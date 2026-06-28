@@ -1,0 +1,46 @@
+name: Build Debug APK
+
+# Bu workflow, bilgisayar / Android Studio olmadan, sadece GitHub.com üzerinden
+# (telefon tarayıcısından bile) GERÇEK bir Android SDK + Gradle ortamında APK derler.
+# "Actions" sekmesinden tetiklenir veya main branch'e her push'ta otomatik çalışır.
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: JDK 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK kur
+        uses: android-actions/setup-android@v3
+
+      - name: Gerekli SDK platform/build-tools paketlerini indir
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Gradle kur (wrapper jar projede olmadığı için)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.5
+
+      - name: Debug APK derle (gerçek ffmpeg-kit native .so dosyaları dahil)
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: APK'yı indirilebilir artifact olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: muxmaster-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
