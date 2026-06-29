@@ -259,7 +259,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         } catch (_: SecurityException) { /* yine de devam edilebilir */ }
     }
 
-    fun setOutputFileName(name: String) {
+    fun updateOutputFileName(name: String) {
         // NOT: burada ".mkv" zorla eklenmiyor — kullanıcı yazarken her tuş vuruşunda
         // metni değiştirmek input alanını kullanılamaz hale getirirdi. Uzantı normalizasyonu
         // sadece mux işlemi başlarken (startMux içinde) yapılır.
