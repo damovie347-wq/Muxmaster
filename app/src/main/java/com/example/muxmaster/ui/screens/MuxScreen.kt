@@ -52,7 +52,7 @@ fun MuxScreen(
                 isSuccess = viewModel.isSuccess,
                 canStartMux = viewModel.videoFile != null,
                 onPickFolder = onPickOutputFolder,
-                onFileNameChange = viewModel::setOutputFileName,
+                onFileNameChange = viewModel::updateOutputFileName,
                 onStart = viewModel::startMux
             )
         }
