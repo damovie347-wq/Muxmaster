@@ -98,14 +98,18 @@ private fun TrackHeaderRow(
 
 @Composable
 private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
+    var localValue by remember(delayMs) { mutableStateOf(delayMs.toFloat()) }
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text("Delay", color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
         Slider(
-            value = delayMs.toFloat(),
+            value = localValue,
             onValueChange = {
-                onDelayChange(it.toLong())
+                localValue = it
                 text = it.toLong().toString()
+            },
+            onValueChangeFinished = {
+                onDelayChange(localValue.toLong())
             },
             valueRange = -10000f..10000f,
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
@@ -116,7 +120,11 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             onValueChange = { newVal ->
                 text = newVal
                 val parsed = newVal.toLongOrNull()
-                if (parsed != null) onDelayChange(parsed.coerceIn(-10000, 10000))
+                if (parsed != null) {
+                    val coerced = parsed.coerceIn(-10000, 10000)
+                    localValue = coerced.toFloat()
+                    onDelayChange(coerced)
+                }
             },
             modifier = Modifier.width(86.dp),
             singleLine = true,
