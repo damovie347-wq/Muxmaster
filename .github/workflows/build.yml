@@ -36,7 +36,7 @@ jobs:
           gradle-version: 8.5
 
       - name: Debug APK derle (gerçek ffmpeg-kit native .so dosyaları dahil)
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle assembleDebug --no-daemon
 
       - name: APK'yı indirilebilir artifact olarak yükle
         uses: actions/upload-artifact@v4
