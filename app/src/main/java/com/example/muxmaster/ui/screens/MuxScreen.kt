@@ -1,10 +1,13 @@
 package com.example.muxmaster.ui.screens
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -30,7 +33,8 @@ fun MuxScreen(
     onPickVideo: () -> Unit,
     onPickAudio: () -> Unit,
     onPickSubtitle: () -> Unit,
-    onPickOutputFolder: () -> Unit
+    onPickOutputFolder: () -> Unit,
+    onNavigateToConverter: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
 
@@ -39,6 +43,11 @@ fun MuxScreen(
         topBar = {
             TopAppBar(
                 title = { Text("MuxMaster", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                actions = {
+                    IconButton(onClick = onNavigateToConverter) {
+                        Icon(Icons.Filled.Tune, "Ses Dönüştürücü", tint = TextSec)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark)
             )
         },
@@ -50,10 +59,14 @@ fun MuxScreen(
                 muxProgress = viewModel.muxProgress,
                 resultMessage = viewModel.resultMessage,
                 isSuccess = viewModel.isSuccess,
-                canStartMux = viewModel.videoFile != null,
+                canStartMux = viewModel.videoFile != null && viewModel.outputFolderUri != null,
                 onPickFolder = onPickOutputFolder,
                 onFileNameChange = viewModel::updateOutputFileName,
-                onStart = viewModel::startMux
+                onStart = viewModel::startMux,
+                onCancel = viewModel::cancelMux,
+                onDismissResult = {
+                    if (viewModel.isSuccess) viewModel.dismissAndReset() else viewModel.clearResult()
+                }
             )
         }
     ) { padding ->
@@ -74,43 +87,26 @@ fun MuxScreen(
             Spacer(Modifier.height(16.dp))
 
             if (viewModel.videoFile != null) {
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = BgDark,
-                    contentColor = Purple
-                ) {
-                    Tab(
-                        selected = selectedTab == 0,
-                        onClick = { selectedTab = 0 },
-                        text = { Text("Sesler (${viewModel.audioTracks.size})") }
-                    )
-                    Tab(
-                        selected = selectedTab == 1,
-                        onClick = { selectedTab = 1 },
-                        text = { Text("Altyazılar (${viewModel.subtitleTracks.size})") }
-                    )
+                TabRow(selectedTabIndex = selectedTab, containerColor = BgDark, contentColor = Purple) {
+                    Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 },
+                        text = { Text("Sesler (${viewModel.audioTracks.size})") })
+                    Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 },
+                        text = { Text("Altyazılar (${viewModel.subtitleTracks.size})") })
                 }
 
                 Spacer(Modifier.height(8.dp))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = if (selectedTab == 0) onPickAudio else onPickSubtitle) {
-                        Icon(Icons.Filled.Add, contentDescription = null, tint = Purple, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.Add, null, tint = Purple, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(
-                            if (selectedTab == 0) "Ses Dosyası Ekle" else "Altyazı Dosyası Ekle",
-                            color = Purple,
-                            fontSize = 13.sp
-                        )
+                        Text(if (selectedTab == 0) "Ses Dosyası Ekle" else "Altyazı Dosyası Ekle", color = Purple, fontSize = 13.sp)
                     }
                 }
 
                 if (selectedTab == 0) {
                     if (viewModel.audioTracks.isEmpty()) {
-                        EmptyHint("Bu videoda ses track'i bulunamadı. + ile ekleyebilirsin.")
+                        EmptyHint("Bu videoda ses track'i yok. + ile ekleyebilirsin.")
                     } else {
                         LazyColumn(modifier = Modifier.weight(1f)) {
                             items(viewModel.audioTracks, key = { it.id }) { track ->
@@ -122,14 +118,17 @@ fun MuxScreen(
                                     onUpdate = viewModel::updateAudio,
                                     onRemove = { viewModel.removeAudio(track.id) },
                                     onMoveUp = { viewModel.moveAudioUp(track.id) },
-                                    onMoveDown = { viewModel.moveAudioDown(track.id) }
+                                    onMoveDown = { viewModel.moveAudioDown(track.id) },
+                                    modifier = Modifier.animateItemPlacement(
+                                        spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMediumLow)
+                                    )
                                 )
                             }
                         }
                     }
                 } else {
                     if (viewModel.subtitleTracks.isEmpty()) {
-                        EmptyHint("Bu videoda altyazı track'i bulunamadı. + ile ekleyebilirsin.")
+                        EmptyHint("Bu videoda altyazı yok. + ile ekleyebilirsin.")
                     } else {
                         LazyColumn(modifier = Modifier.weight(1f)) {
                             items(viewModel.subtitleTracks, key = { it.id }) { track ->
@@ -141,7 +140,10 @@ fun MuxScreen(
                                     onUpdate = viewModel::updateSubtitle,
                                     onRemove = { viewModel.removeSubtitle(track.id) },
                                     onMoveUp = { viewModel.moveSubtitleUp(track.id) },
-                                    onMoveDown = { viewModel.moveSubtitleDown(track.id) }
+                                    onMoveDown = { viewModel.moveSubtitleDown(track.id) },
+                                    modifier = Modifier.animateItemPlacement(
+                                        spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMediumLow)
+                                    )
                                 )
                             }
                         }
@@ -156,12 +158,7 @@ fun MuxScreen(
 
 @Composable
 private fun EmptyHint(text: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 24.dp),
-        contentAlignment = Alignment.Center
-    ) {
+    Box(modifier = Modifier.fillMaxWidth().padding(top = 24.dp), contentAlignment = Alignment.Center) {
         Text(text, color = TextMuted, fontSize = 13.sp)
     }
 }
