@@ -13,9 +13,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
@@ -31,26 +30,18 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures {
-        compose = true
-    }
+    buildFeatures { compose = true }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
-    }
+    composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
 
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/DEPENDENCIES"
         }
-        jniLibs {
-            pickFirsts += "**/*.so"
-        }
+        jniLibs { pickFirsts += "**/*.so" }
     }
 }
 
@@ -67,6 +58,5 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
-
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
