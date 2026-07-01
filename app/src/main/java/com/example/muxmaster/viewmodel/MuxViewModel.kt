@@ -344,17 +344,19 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     private fun copyUriToCache(uri: Uri, fileName: String): String? {
-    return try {
-        val f = File(app.cacheDir, "mux_work/$fileName").also { it.parentFile?.mkdirs() }
-        val stream = app.contentResolver.openInputStream(uri) ?: return null
-        stream.use { i -> f.outputStream().use { o -> i.copyTo(o, 8*1024*1024) } }
-        if (f.exists() && f.length() > 0) f.absolutePath else null
-    } catch (_: Exception) { null }
+        return try {
+            val file = File(app.cacheDir, "mux_work/$fileName")
+            file.parentFile?.mkdirs()
+            val input = app.contentResolver.openInputStream(uri) ?: return null
+            val output = file.outputStream()
+            input.use { inp -> output.use { out -> inp.copyTo(out, 8 * 1024 * 1024) } }
+            if (file.exists() && file.length() > 0) file.absolutePath else null
+        } catch (e: Exception) { null }
     }
-        val f = File(app.cacheDir, "mux_work/$fileName").also { it.parentFile?.mkdirs() }
-        app.contentResolver.openInputStream(uri)?.use { i -> f.outputStream().use { o -> i.copyTo(o, 8*1024*1024) } } ?: return null
-        if (f.exists() && f.length() > 0) f.absolutePath else null
-    } catch (_: Exception) { null }
 
-    private fun extensionFromName(n: String): String { val d = n.lastIndexOf('.'); return if (d<0||d==n.length-1) "" else n.substring(d+1).lowercase().filter { it.isLetterOrDigit() } }
+    private fun extensionFromName(n: String): String {
+        val d = n.lastIndexOf('.')
+        return if (d < 0 || d == n.length - 1) "" 
+        else n.substring(d + 1).lowercase().filter { it.isLetterOrDigit() }
+    }
 }
