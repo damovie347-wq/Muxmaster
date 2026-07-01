@@ -20,7 +20,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 
-/** Dönüştürme ekranında seçilen kaynak ses dosyası hakkında GERÇEK (ffprobe ile okunan) bilgi. */
 data class ConvertSourceAudio(
     val uri: Uri,
     val displayName: String,
@@ -32,18 +31,11 @@ data class ConvertSourceAudio(
     val fileSizeMb: Float
 )
 
-/**
- * "Dönüştürücü" sekmesinin ViewModel'i: bir ses dosyasını (ya da video içindeki ilk ses
- * stream'ini) kullanıcının elle girdiği bitrate ile GERÇEK Opus formatına dönüştürür.
- * MuxViewModel ile aynı prensipler: re-encode sadece burada (mux'ta değil) gerçekten
- * gerekiyor, çünkü hedef format değişiyor (codec dönüşümü = encode şart).
- */
 class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     var sourceAudio by mutableStateOf<ConvertSourceAudio?>(null)
         private set
 
-    // Kullanıcının elle girdiği hedef bitrate (kbps), serbest metin olarak tutulur
     var bitrateKbpsText by mutableStateOf("128")
         private set
 
@@ -72,9 +64,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         convertJob?.cancel()
     }
 
-    // ---------------------------------------------------------------------
-    // SES DOSYASI SEÇİLDİĞİNDE: cache'e kopyala -> ffprobe ile GERÇEK bilgi oku
-    // ---------------------------------------------------------------------
     fun onAudioSelected(uri: Uri, displayName: String) {
         viewModelScope.launch {
             isLoading = true
@@ -82,7 +71,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             resultMessage = null
             isSuccess = false
 
-            // Önceki kaynak/çalışma dosyalarını temizle (depolama birikmesin)
             withContext(Dispatchers.IO) {
                 runCatching { File(app.cacheDir, "convert_work").deleteRecursively() }
             }
@@ -143,7 +131,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun updateBitrateText(value: String) {
-        // Sadece rakam kabul edilir, kullanıcı serbestçe kendi değerini girebilsin
         bitrateKbpsText = value.filter { it.isDigit() }.take(4)
     }
 
@@ -154,7 +141,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-        } catch (_: SecurityException) { /* yine de devam edilebilir */ }
+        } catch (_: SecurityException) { }
     }
 
     fun updateOutputFileName(name: String) {
@@ -166,7 +153,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         isSuccess = false
     }
 
-    /** Sonuç kartındaki "X": ekranı sıfırlar, başarılıysa artık gereksiz kaynak önbelleğini siler. */
     fun dismissAndReset() {
         if (isConverting) return
         val old = sourceAudio?.cachePath
@@ -180,9 +166,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // DÖNÜŞTÜR — GERÇEK FFmpeg encode işlemi (libopus)
-    // ---------------------------------------------------------------------
     fun startConvert() {
         val source = sourceAudio
         val outFolder = outputFolderUri
@@ -218,17 +201,15 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
                 convertProgress = 10
 
-                // GERÇEK ffmpeg encode: kaynaktaki İLK ses stream'i alınır (-map 0:a:0),
-                // video/altyazı varsa atılır (-vn), libopus codec'ine kullanıcının
-                // girdiği bitrate ile dönüştürülür. ".opus" uzantısı ffmpeg'e Ogg/Opus
-                // muxer'ını otomatik seçtirir.
-                val args = arrayOf(
-                    "-y", "-i", source.cachePath,
-                    "-vn", "-map", "0:a:0",
-                    "-c:a", "libopus",
-                    "-b:a", "${bitrate}k",
-                    tempOutput.absolutePath
-                )
+                val forceMono = bitrate < 48
+                val args = buildList {
+                    add("-y"); add("-i"); add(source.cachePath)
+                    add("-vn"); add("-map"); add("0:a:0")
+                    if (forceMono) { add("-ac"); add("1") }
+                    add("-c:a"); add("libopus")
+                    add("-b:a"); add("${bitrate}k")
+                    add(tempOutput.absolutePath)
+                }.toTypedArray()
 
                 val returnCodeVal = runFfmpegAsync(args, source.durationMs)
                 convertProgress = 92
