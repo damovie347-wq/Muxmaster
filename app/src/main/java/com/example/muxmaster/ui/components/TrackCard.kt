@@ -3,9 +3,9 @@ package com.example.muxmaster.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
@@ -53,9 +53,7 @@ private fun SourceBadge(source: TrackSource) {
 @Composable
 private fun IconBadge(icon: ImageVector, color: Color) {
     Box(
-        modifier = Modifier
-            .size(36.dp)
-            .background(color.copy(alpha = 0.15f), RoundedCornerShape(8.dp)),
+        modifier = Modifier.size(36.dp).background(color.copy(alpha = 0.15f), RoundedCornerShape(8.dp)),
         contentAlignment = Alignment.Center
     ) {
         Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
@@ -104,13 +102,8 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
         Text("Delay", color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
         Slider(
             value = localValue,
-            onValueChange = {
-                localValue = it
-                text = it.toLong().toString()
-            },
-            onValueChangeFinished = {
-                onDelayChange(localValue.toLong())
-            },
+            onValueChange = { localValue = it; text = it.toLong().toString() },
+            onValueChangeFinished = { onDelayChange(localValue.toLong()) },
             valueRange = -10000f..10000f,
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             colors = SliderDefaults.colors(thumbColor = Purple, activeTrackColor = Purple)
@@ -119,8 +112,7 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             value = text,
             onValueChange = { newVal ->
                 text = newVal
-                val parsed = newVal.toLongOrNull()
-                if (parsed != null) {
+                newVal.toLongOrNull()?.let { parsed ->
                     val coerced = parsed.coerceIn(-10000, 10000)
                     localValue = coerced.toFloat()
                     onDelayChange(coerced)
@@ -130,28 +122,22 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             singleLine = true,
             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
             suffix = { Text("ms", fontSize = 10.sp, color = TextMuted) },
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Purple,
-                unfocusedBorderColor = Outline
-            )
+            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Purple, unfocusedBorderColor = Outline)
         )
     }
 }
 
 @Composable
 private fun LanguageRow(language: String, onLanguageChange: (String) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp)
-            .horizontalScroll(rememberScrollState())
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        LANGUAGE_CHOICES.forEach { (code, label) ->
+        items(LANGUAGE_CHOICES, key = { it.first }) { (code, label) ->
             FilterChip(
                 selected = language == code,
                 onClick = { onLanguageChange(code) },
                 label = { Text(label, fontSize = 11.sp) },
-                modifier = Modifier.padding(end = 6.dp),
                 colors = FilterChipDefaults.filterChipColors(
                     selectedContainerColor = Purple,
                     selectedLabelColor = Color.White,
@@ -171,13 +157,14 @@ fun AudioTrackCard(
     onUpdate: (AudioTrackItem) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit
+    onMoveDown: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
         border = BorderStroke(1.dp, Outline),
         shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp)
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
@@ -185,27 +172,19 @@ fun AudioTrackCard(
             }
             val subtitle = if (track.source == TrackSource.EXISTING) {
                 "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
-            } else {
-                track.fileDisplayName
-            }
+            } else track.fileDisplayName
+
             TrackHeaderRow(
-                icon = Icons.Filled.Audiotrack,
-                iconColor = Blue,
-                title = title,
-                subtitle = subtitle,
-                source = track.source,
-                canMoveUp = canMoveUp,
-                canMoveDown = canMoveDown,
-                onMoveUp = onMoveUp,
-                onMoveDown = onMoveDown,
-                onRemove = onRemove
+                icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
+                source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
+                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
             )
 
             DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
             LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
 
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                Text("Varsayılan (Default)", color = TextSec, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Text("Varsayılan", color = TextSec, fontSize = 12.sp, modifier = Modifier.weight(1f))
                 Switch(
                     checked = track.isDefault,
                     onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
@@ -232,34 +211,25 @@ fun SubtitleTrackCard(
     onUpdate: (SubtitleTrackItem) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit
+    onMoveDown: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
         border = BorderStroke(1.dp, Outline),
         shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp)
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
                 if (track.source == TrackSource.EXISTING) "Altyazı #${track.existingStreamIndex}" else track.fileDisplayName
             }
-            val subtitle = if (track.source == TrackSource.EXISTING) {
-                track.existingCodec.uppercase()
-            } else {
-                track.fileDisplayName
-            }
+            val subtitle = if (track.source == TrackSource.EXISTING) track.existingCodec.uppercase() else track.fileDisplayName
+
             TrackHeaderRow(
-                icon = Icons.Filled.Subtitles,
-                iconColor = PurpleLight,
-                title = title,
-                subtitle = subtitle,
-                source = track.source,
-                canMoveUp = canMoveUp,
-                canMoveDown = canMoveDown,
-                onMoveUp = onMoveUp,
-                onMoveDown = onMoveDown,
-                onRemove = onRemove
+                icon = Icons.Filled.Subtitles, iconColor = PurpleLight, title = title, subtitle = subtitle,
+                source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
+                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
             )
 
             DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
@@ -299,9 +269,5 @@ fun SubtitleTrackCard(
 }
 
 private fun channelLabel(channels: Int): String = when (channels) {
-    1 -> "Mono"
-    2 -> "Stereo"
-    6 -> "5.1"
-    8 -> "7.1"
-    else -> "${channels}ch"
+    1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "${channels}ch"
 }
