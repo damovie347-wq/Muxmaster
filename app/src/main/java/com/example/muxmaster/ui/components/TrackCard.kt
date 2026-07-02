@@ -103,8 +103,7 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
         val interactionSource = remember { MutableInteractionSource() }
 
 Slider(
-    value = localValue,
-    interactionSource = interactionSource,
+    value = localValue, 
     onValueChange = {
         localValue = it
         text = it.toLong().toString()
