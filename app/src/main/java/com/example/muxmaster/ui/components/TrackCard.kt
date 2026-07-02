@@ -100,14 +100,27 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text("Delay", color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
-        Slider(
-            value = localValue,
-            onValueChange = { localValue = it; text = it.toLong().toString() },
-            onValueChangeFinished = { onDelayChange(localValue.toLong()) },
-            valueRange = -10000f..10000f,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            colors = SliderDefaults.colors(thumbColor = Purple, activeTrackColor = Purple)
-        )
+        val interactionSource = remember { MutableInteractionSource() }
+
+Slider(
+    value = localValue,
+    interactionSource = interactionSource,
+    onValueChange = {
+        localValue = it
+        text = it.toLong().toString()
+    },
+    onValueChangeFinished = {
+        onDelayChange(localValue.toLong())
+    },
+    valueRange = -10000f..10000f,
+    modifier = Modifier
+        .weight(1f)
+        .padding(horizontal = 8.dp),
+    colors = SliderDefaults.colors(
+        thumbColor = Purple,
+        activeTrackColor = Purple
+    )
+)
         OutlinedTextField(
             value = text,
             onValueChange = { newVal ->
