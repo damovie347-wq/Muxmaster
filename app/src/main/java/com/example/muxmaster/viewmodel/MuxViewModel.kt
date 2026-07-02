@@ -57,19 +57,12 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private var muxJob: Job? = null
 
-    fun cancelMux() {
-        muxJob?.cancel()
-    }
+    fun cancelMux() { muxJob?.cancel() }
 
-    fun clearResult() {
-        resultMessage = null
-        isSuccess = false
-    }
+    fun clearResult() { resultMessage = null; isSuccess = false }
 
     fun dismissAndReset() {
-        resultMessage = null
-        isSuccess = false
-        muxProgress = 0
+        resultMessage = null; isSuccess = false; muxProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 File(app.cacheDir, "mux_work").listFiles()
@@ -82,12 +75,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     fun clearVideo() {
         if (isMuxing) return
         val old = videoFile?.cachePath
-        videoFile = null
-        audioTracks.clear()
-        subtitleTracks.clear()
-        resultMessage = null
-        isSuccess = false
-        muxProgress = 0
+        videoFile = null; audioTracks.clear(); subtitleTracks.clear()
+        resultMessage = null; isSuccess = false; muxProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             if (old != null) runCatching { File(old).delete() }
             runCatching { File(app.cacheDir, "mux_work").deleteRecursively() }
@@ -98,12 +87,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             isLoading = true
             loadingMessage = "Video kopyalanıyor..."
-            audioTracks.clear()
-            subtitleTracks.clear()
-            resultMessage = null
-            isSuccess = false
+            audioTracks.clear(); subtitleTracks.clear()
+            resultMessage = null; isSuccess = false
 
-            // Eski cache'i temizle (disk birikmesin)
             val old = videoFile?.cachePath
             withContext(Dispatchers.IO) {
                 if (old != null) runCatching { File(old).delete() }
@@ -268,6 +254,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                         val outDoc = DocumentFile.fromTreeUri(app, outFolder)?.createFile("video/x-matroska", finalName)
                         val outUri = outDoc?.uri ?: return@withContext false
                         app.contentResolver.openOutputStream(outUri)?.use { o -> tempOutput.inputStream().use { it.copyTo(o, 8*1024*1024) } } ?: return@withContext false
+                        triggerMediaScan(outUri)
                         true
                     } catch (_: Exception) { false }
                 }
@@ -343,20 +330,24 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         cont.invokeOnCancellation { runCatching { session.cancel() } }
     }
 
-    private fun copyUriToCache(uri: Uri, fileName: String): String? {
-        return try {
-            val file = File(app.cacheDir, "mux_work/$fileName")
-            file.parentFile?.mkdirs()
-            val input = app.contentResolver.openInputStream(uri) ?: return null
-            val output = file.outputStream()
-            input.use { inp -> output.use { out -> inp.copyTo(out, 8 * 1024 * 1024) } }
-            if (file.exists() && file.length() > 0) file.absolutePath else null
-        } catch (e: Exception) { null }
-    }
+    private fun copyUriToCache(uri: Uri, fileName: String): String? = try {
+        val f = File(app.cacheDir, "mux_work/$fileName").also { it.parentFile?.mkdirs() }
+        app.contentResolver.openInputStream(uri)?.use { i -> f.outputStream().use { o -> i.copyTo(o, 8*1024*1024) } } ?: return null
+        if (f.exists() && f.length() > 0) f.absolutePath else null
+    } catch (_: Exception) { null }
 
-    private fun extensionFromName(n: String): String {
-        val d = n.lastIndexOf('.')
-        return if (d < 0 || d == n.length - 1) "" 
-        else n.substring(d + 1).lowercase().filter { it.isLetterOrDigit() }
+    private fun extensionFromName(n: String): String { val d = n.lastIndexOf('.'); return if (d<0||d==n.length-1) "" else n.substring(d+1).lowercase().filter { it.isLetterOrDigit() } }
+
+    private fun triggerMediaScan(docUri: Uri) {
+        try {
+            val docId = android.provider.DocumentsContract.getDocumentId(docUri)
+            val parts = docId.split(":", limit = 2)
+            if (parts.size == 2 && parts[0].equals("primary", ignoreCase = true)) {
+                val realPath = "${android.os.Environment.getExternalStorageDirectory().absolutePath}/${parts[1]}"
+                if (File(realPath).exists()) {
+                    android.media.MediaScannerConnection.scanFile(app, arrayOf(realPath), arrayOf("video/x-matroska"), null)
+                }
+            }
+        } catch (_: Exception) { }
     }
 }
