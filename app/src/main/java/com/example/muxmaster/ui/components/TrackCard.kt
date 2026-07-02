@@ -100,8 +100,6 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text("Delay", color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
-        val interactionSource = remember { MutableInteractionSource() }
-
 Slider(
     value = localValue, 
     onValueChange = {
