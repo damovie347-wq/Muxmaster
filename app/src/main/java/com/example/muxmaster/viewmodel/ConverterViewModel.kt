@@ -83,7 +83,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun cancelConvert() { convertJob?.cancel() }
 
-    fun setOutputFormat(format: OutputFormat) {
+    fun selectFormat(format: OutputFormat) {
         if (!isConverting) outputFormat = format
     }
 
