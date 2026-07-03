@@ -1,8 +1,14 @@
 package com.example.muxmaster.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -10,6 +16,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Subtitles
@@ -70,6 +78,9 @@ private fun TrackHeaderRow(
     source: TrackSource,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    // --- Collapse/expand toggle (new) ---
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onRemove: () -> Unit
@@ -77,9 +88,23 @@ private fun TrackHeaderRow(
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         IconBadge(icon, iconColor)
         Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
+        // Title/subtitle column is now clickable to toggle collapse, so the
+        // whole header area (not just the tiny icon) can be tapped.
+        Column(
+            Modifier
+                .weight(1f)
+                .clickable(onClick = onToggleExpand)
+        ) {
             Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
             Text(subtitle, color = TextSec, fontSize = 12.sp, maxLines = 1)
+        }
+        // Collapse/expand button - "next to" the title, before the badge/controls.
+        IconButton(onClick = onToggleExpand, modifier = Modifier.size(32.dp)) {
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "Daralt" else "Genişlet",
+                tint = TextSec
+            )
         }
         SourceBadge(source)
         Spacer(Modifier.width(4.dp))
@@ -229,30 +254,44 @@ fun AudioTrackCard(
                 "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
             } else track.fileDisplayName
 
+            // Collapse/expand state, keyed by track.id so it survives reordering
+            // but resets correctly if the track list changes. Open by default.
+            var expanded by remember(track.id) { mutableStateOf(true) }
+
             TrackHeaderRow(
                 icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
+                expanded = expanded, onToggleExpand = { expanded = !expanded },
                 onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
             )
 
-            DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
-            LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
+            // --- Collapsible body: Delay slider, language row and switches ---
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column {
+                    DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
+                    LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
 
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                Text("Varsayılan", color = TextSec, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Switch(
-                    checked = track.isDefault,
-                    onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Purple, checkedTrackColor = PurpleLight.copy(alpha = 0.4f))
-                )
-                Spacer(Modifier.width(12.dp))
-                Text("Aktif", color = TextSec, fontSize = 12.sp)
-                Spacer(Modifier.width(6.dp))
-                Switch(
-                    checked = track.isEnabled,
-                    onCheckedChange = { onUpdate(track.copy(isEnabled = it)) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Green, checkedTrackColor = Green.copy(alpha = 0.4f))
-                )
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Varsayılan", color = TextSec, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = track.isDefault,
+                            onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Purple, checkedTrackColor = PurpleLight.copy(alpha = 0.4f))
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text("Aktif", color = TextSec, fontSize = 12.sp)
+                        Spacer(Modifier.width(6.dp))
+                        Switch(
+                            checked = track.isEnabled,
+                            onCheckedChange = { onUpdate(track.copy(isEnabled = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Green, checkedTrackColor = Green.copy(alpha = 0.4f))
+                        )
+                    }
+                }
             }
         }
     }
@@ -281,43 +320,56 @@ fun SubtitleTrackCard(
             }
             val subtitle = if (track.source == TrackSource.EXISTING) track.existingCodec.uppercase() else track.fileDisplayName
 
+            // Collapse/expand state, keyed by track.id. Open by default.
+            var expanded by remember(track.id) { mutableStateOf(true) }
+
             TrackHeaderRow(
                 icon = Icons.Filled.Subtitles, iconColor = PurpleLight, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
+                expanded = expanded, onToggleExpand = { expanded = !expanded },
                 onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
             )
 
-            DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
-            LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
+            // --- Collapsible body: Delay slider, language row and switches ---
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column {
+                    DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
+                    LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
 
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                Text("Default", color = TextSec, fontSize = 11.sp)
-                Switch(
-                    checked = track.isDefault,
-                    onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Purple, checkedTrackColor = PurpleLight.copy(alpha = 0.4f))
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Forced", color = TextSec, fontSize = 11.sp)
-                Switch(
-                    checked = track.isForced,
-                    onCheckedChange = { onUpdate(track.copy(isForced = it)) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Amber, checkedTrackColor = Amber.copy(alpha = 0.4f))
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("HI", color = TextSec, fontSize = 11.sp)
-                Switch(
-                    checked = track.isHearingImpaired,
-                    onCheckedChange = { onUpdate(track.copy(isHearingImpaired = it)) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Blue, checkedTrackColor = Blue.copy(alpha = 0.4f))
-                )
-                Spacer(Modifier.weight(1f))
-                Text("Aktif", color = TextSec, fontSize = 11.sp)
-                Switch(
-                    checked = track.isEnabled,
-                    onCheckedChange = { onUpdate(track.copy(isEnabled = it)) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Green, checkedTrackColor = Green.copy(alpha = 0.4f))
-                )
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Default", color = TextSec, fontSize = 11.sp)
+                        Switch(
+                            checked = track.isDefault,
+                            onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Purple, checkedTrackColor = PurpleLight.copy(alpha = 0.4f))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Forced", color = TextSec, fontSize = 11.sp)
+                        Switch(
+                            checked = track.isForced,
+                            onCheckedChange = { onUpdate(track.copy(isForced = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Amber, checkedTrackColor = Amber.copy(alpha = 0.4f))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("HI", color = TextSec, fontSize = 11.sp)
+                        Switch(
+                            checked = track.isHearingImpaired,
+                            onCheckedChange = { onUpdate(track.copy(isHearingImpaired = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Blue, checkedTrackColor = Blue.copy(alpha = 0.4f))
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text("Aktif", color = TextSec, fontSize = 11.sp)
+                        Switch(
+                            checked = track.isEnabled,
+                            onCheckedChange = { onUpdate(track.copy(isEnabled = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Green, checkedTrackColor = Green.copy(alpha = 0.4f))
+                        )
+                    }
+                }
             }
         }
     }
