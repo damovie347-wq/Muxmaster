@@ -1,8 +1,4 @@
-name: Build Debug APK
-
-# Bu workflow, bilgisayar / Android Studio olmadan, sadece GitHub.com üzerinden
-# (telefon tarayıcısından bile) GERÇEK bir Android SDK + Gradle ortamında APK derler.
-# "Actions" sekmesinden tetiklenir veya main branch'e her push'ta otomatik çalışır.
+name: Build Release APK
 
 on:
   push:
@@ -35,12 +31,12 @@ jobs:
         with:
           gradle-version: 8.5
 
-      - name: Debug APK derle (gerçek ffmpeg-kit native .so dosyaları dahil)
-        run: gradle assembleDebug --no-daemon
+      - name: Release APK derle (minify açık, gerçek ffmpeg-kit native .so dosyaları dahil)
+        run: gradle assembleRelease --no-daemon
 
       - name: APK'yı indirilebilir artifact olarak yükle
         uses: actions/upload-artifact@v4
         with:
-          name: muxmaster-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: muxmaster-release-apk
+          path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
