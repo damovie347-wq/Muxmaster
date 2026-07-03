@@ -3,8 +3,8 @@ package com.example.muxmaster.ui.screens
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,7 +22,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.muxmaster.viewmodel.ConvertQueueItem
+import com.example.muxmaster.viewmodel.ConvertStatus
 import com.example.muxmaster.viewmodel.ConverterViewModel
+import com.example.muxmaster.viewmodel.OutputFormat
 import com.example.muxmaster.ui.theme.*
 
 private val BITRATE_PRESETS = listOf(32, 64, 96, 128, 192, 256, 320)
@@ -57,77 +60,96 @@ fun ConverterScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
 
-            // ── 1) KAYNAK DOSYA SEÇİMİ ────────────────────────────────────────
-            SectionTitle("Kaynak Ses Dosyası")
+            // ── 1) KAYNAK DOSYALAR (çoklu) ────────────────────────────────────
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                SectionTitle("Kaynak Ses Dosyaları" + if (viewModel.queue.isNotEmpty()) " (${viewModel.queue.size})" else "")
+                Spacer(Modifier.weight(1f))
+                if (viewModel.queue.isNotEmpty() && !viewModel.isConverting) {
+                    TextButton(onClick = viewModel::clearQueue, contentPadding = PaddingValues(0.dp)) {
+                        Text("TÜMÜNÜ TEMİZLE", color = TextSec, fontSize = 11.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
             Card(
                 colors = CardDefaults.cardColors(containerColor = Surface),
-                border = CardDefaults.outlinedCardBorder().let {
-                    androidx.compose.foundation.BorderStroke(1.dp, Outline)
-                },
+                border = BorderStroke(1.dp, Outline),
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(Modifier.padding(14.dp)) {
-                    val src = viewModel.sourceAudio
-                    if (src == null) {
-                        // Dosya seçilmemiş
+                    if (viewModel.queue.isEmpty() && !viewModel.isLoading) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.MusicNote, null, tint = TextMuted, modifier = Modifier.size(28.dp))
                             Spacer(Modifier.width(10.dp))
-                            Text(
-                                if (viewModel.isLoading) viewModel.loadingMessage.ifBlank { "Dosya analiz ediliyor..." }
-                                else "Henüz dosya seçilmedi",
-                                color = TextSec, modifier = Modifier.weight(1f)
-                            )
-                            if (viewModel.isLoading) CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = Purple)
+                            Text("Henüz dosya seçilmedi", color = TextSec, modifier = Modifier.weight(1f))
                         }
                         Spacer(Modifier.height(12.dp))
-                        Button(
-                            onClick = onPickAudio,
-                            enabled = !viewModel.isLoading,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(containerColor = Purple)
-                        ) {
-                            Icon(Icons.Filled.FileOpen, null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("SES DOSYASI SEÇ (MP3, AAC, FLAC, MKV…)")
-                        }
                     } else {
-                        // Dosya seçilmiş → bilgi kartı
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Filled.MusicNote, null, tint = PurpleLight, modifier = Modifier.size(22.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Text(src.displayName, color = TextPrimary, fontWeight = FontWeight.Medium, fontSize = 14.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                            IconButton(onClick = viewModel::clearAudio, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Filled.Close, "Kaldır", tint = TextSec)
+                        viewModel.queue.forEachIndexed { index, item ->
+                            if (index > 0) Divider(color = Outline, thickness = 0.5.dp)
+                            QueueItemRow(
+                                item = item,
+                                onRemove = { viewModel.removeFromQueue(item.id) },
+                                removeEnabled = !viewModel.isConverting
+                            )
+                        }
+                        if (viewModel.isLoading) {
+                            if (viewModel.queue.isNotEmpty()) Divider(color = Outline, thickness = 0.5.dp)
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 6.dp)) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Purple)
+                                Spacer(Modifier.width(10.dp))
+                                Text(viewModel.loadingMessage, color = TextSec, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
                             }
                         }
                         Spacer(Modifier.height(8.dp))
-                        Row {
-                            InfoChip(src.sourceCodec)
-                            Spacer(Modifier.width(6.dp))
-                            InfoChip(channelLabel(src.sourceChannels), Blue)
-                            Spacer(Modifier.width(6.dp))
-                            InfoChip(src.sourceBitrateLabel, Amber)
-                            Spacer(Modifier.width(6.dp))
-                            InfoChip("%.1f MB".format(src.fileSizeMb), Green)
-                        }
+                    }
+                    Button(
+                        onClick = onPickAudio,
+                        enabled = !viewModel.isLoading && !viewModel.isConverting,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Purple)
+                    ) {
+                        Icon(Icons.Filled.FileOpen, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (viewModel.queue.isEmpty()) "SES DOSYALARI SEÇ (çoklu seçilebilir)" else "DAHA FAZLA DOSYA EKLE")
                     }
                 }
             }
 
             Spacer(Modifier.height(20.dp))
 
-            // ── 2) HEDEF BİTRATE ──────────────────────────────────────────────
-            SectionTitle("Hedef Bitrate (Opus)")
+            // ── 2) HEDEF FORMAT ───────────────────────────────────────────────
+            SectionTitle("Hedef Format")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutputFormat.entries.forEach { fmt ->
+                    val selected = viewModel.outputFormat == fmt
+                    FilterChip(
+                        selected = selected,
+                        onClick = { viewModel.setOutputFormat(fmt) },
+                        enabled = !viewModel.isConverting,
+                        label = { Text(fmt.label, fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                            containerColor = SurfaceHigh, labelColor = TextSec
+                        )
+                    )
+                }
+            }
 
-            // Preset butonları
+            Spacer(Modifier.height(20.dp))
+
+            // ── 3) HEDEF BİTRATE ──────────────────────────────────────────────
+            SectionTitle("Hedef Bitrate (${viewModel.outputFormat.label})")
+
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 BITRATE_PRESETS.forEach { preset ->
                     val selected = viewModel.bitrateKbpsText == preset.toString()
                     FilterChip(
                         selected = selected,
                         onClick = { viewModel.updateBitrateText(preset.toString()) },
+                        enabled = !viewModel.isConverting,
                         label = { Text("${preset}k", fontSize = 11.sp) },
                         modifier = Modifier.weight(1f),
                         colors = FilterChipDefaults.filterChipColors(
@@ -140,12 +162,12 @@ fun ConverterScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            // Serbest girdi
             OutlinedTextField(
                 value = viewModel.bitrateKbpsText,
                 onValueChange = viewModel::updateBitrateText,
                 label = { Text("Özel bitrate (kbps)", fontSize = 11.sp) },
                 singleLine = true,
+                enabled = !viewModel.isConverting,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 suffix = { Text("kbps", fontSize = 12.sp, color = TextMuted) },
                 modifier = Modifier.fillMaxWidth(),
@@ -155,7 +177,6 @@ fun ConverterScreen(
                 )
             )
 
-            // Seçili bitrate bilgisi
             val parsedBr = viewModel.bitrateKbpsText.toIntOrNull()
             val brHint = when {
                 parsedBr == null || parsedBr < 6 -> "⚠ Geçersiz (min. 6 kbps)"
@@ -169,8 +190,8 @@ fun ConverterScreen(
 
             Spacer(Modifier.height(20.dp))
 
-            // ── 3) ÇIKTI AYARLARI ────────────────────────────────────────────
-            SectionTitle("Çıktı")
+            // ── 4) ÇIKTI KLASÖRÜ ──────────────────────────────────────────────
+            SectionTitle("Çıktı Klasörü")
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -189,24 +210,14 @@ fun ConverterScreen(
                     Text(if (viewModel.outputFolderUri == null) "SEÇ" else "DEĞİŞTİR", color = PurpleLight, fontSize = 12.sp)
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = viewModel.outputFileName,
-                onValueChange = viewModel::updateOutputFileName,
-                label = { Text("Çıktı dosya adı", fontSize = 11.sp) },
-                singleLine = true,
-                enabled = !viewModel.isConverting,
-                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Purple, unfocusedBorderColor = Outline,
-                    focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
-                )
+            Text(
+                "Her dosya, orijinal adı + seçili formatın uzantısıyla bu klasöre kaydedilir.",
+                color = TextMuted, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp)
             )
 
             Spacer(Modifier.height(16.dp))
 
-            // ── 4) SONUÇ KARTI ────────────────────────────────────────────────
+            // ── 5) SONUÇ ──────────────────────────────────────────────────────
             AnimatedVisibility(visible = viewModel.resultMessage != null && !viewModel.isConverting, enter = fadeIn(), exit = fadeOut()) {
                 val msg = viewModel.resultMessage
                 if (msg != null) {
@@ -229,9 +240,8 @@ fun ConverterScreen(
                 }
             }
 
-            // ── 5) DÖNÜŞTÜR / İPTAL BUTONU ───────────────────────────────────
+            // ── 6) DÖNÜŞTÜR / İPTAL ──────────────────────────────────────────
             if (viewModel.isConverting) {
-                // İlerleme
                 Column(Modifier.fillMaxWidth()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         LinearProgressIndicator(
@@ -241,6 +251,13 @@ fun ConverterScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text("%${viewModel.convertProgress}", color = TextSec, fontSize = 12.sp)
+                    }
+                    if (viewModel.currentFileName.isNotBlank()) {
+                        Text(
+                            "İşleniyor: ${viewModel.currentFileName}",
+                            color = TextMuted, fontSize = 11.sp, maxLines = 1,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                     Spacer(Modifier.height(10.dp))
                     Row(modifier = Modifier.fillMaxWidth().height(50.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -263,16 +280,18 @@ fun ConverterScreen(
                     }
                 }
             } else {
+                val pendingCount = viewModel.queue.count { it.status == ConvertStatus.PENDING || it.status == ConvertStatus.ERROR }
                 Button(
                     onClick = viewModel::startConvert,
-                    enabled = viewModel.sourceAudio != null && viewModel.outputFolderUri != null && (viewModel.bitrateKbpsText.toIntOrNull() ?: 0) >= 6,
+                    enabled = pendingCount > 0 && viewModel.outputFolderUri != null && (viewModel.bitrateKbpsText.toIntOrNull() ?: 0) >= 6,
                     modifier = Modifier.fillMaxWidth().height(50.dp),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Purple, disabledContainerColor = SurfaceHigh)
                 ) {
                     Icon(Icons.Filled.Autorenew, null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("OPUS'A DÖNÜŞTÜR", fontWeight = FontWeight.Bold)
+                    val label = if (pendingCount > 1) "$pendingCount DOSYAYI" else "DOSYAYI"
+                    Text("$label ${viewModel.outputFormat.label.uppercase()} FORMATINA DÖNÜŞTÜR", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
 
@@ -282,19 +301,44 @@ fun ConverterScreen(
 }
 
 @Composable
-private fun SectionTitle(text: String) {
-    Text(text, color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 8.dp))
+private fun QueueItemRow(item: ConvertQueueItem, onRemove: () -> Unit, removeEnabled: Boolean) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+    ) {
+        if (item.status == ConvertStatus.CONVERTING) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Purple)
+        } else {
+            val (icon, tint) = when (item.status) {
+                ConvertStatus.PENDING -> Icons.Filled.Schedule to TextMuted
+                ConvertStatus.DONE -> Icons.Filled.CheckCircle to Green
+                ConvertStatus.ERROR -> Icons.Filled.ErrorOutline to Red
+                else -> Icons.Filled.Schedule to TextMuted
+            }
+            Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(item.displayName, color = TextPrimary, fontSize = 13.sp, maxLines = 1, fontWeight = FontWeight.Medium)
+            val subtitle = when (item.status) {
+                ConvertStatus.PENDING -> "${item.sourceCodec} · ${channelLabel(item.sourceChannels)} · %.1f MB".format(item.fileSizeMb)
+                ConvertStatus.CONVERTING -> "Dönüştürülüyor... %${item.progress}"
+                ConvertStatus.DONE -> "Tamamlandı — %.1f MB".format(item.outputSizeMb ?: 0f)
+                ConvertStatus.ERROR -> item.errorMessage ?: "Hata"
+            }
+            Text(subtitle, color = if (item.status == ConvertStatus.ERROR) Red else TextSec, fontSize = 11.sp, maxLines = 1)
+        }
+        if (removeEnabled && item.status != ConvertStatus.CONVERTING) {
+            IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Filled.Close, "Kaldır", tint = TextSec, modifier = Modifier.size(16.dp))
+            }
+        }
+    }
 }
 
 @Composable
-private fun InfoChip(text: String, color: Color = PurpleLight) {
-    Box(
-        modifier = Modifier
-            .background(color.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-    ) {
-        Text(text, color = color, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-    }
+private fun SectionTitle(text: String) {
+    Text(text, color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 8.dp))
 }
 
 private fun channelLabel(ch: Int) = when(ch) { 1->"Mono"; 2->"Stereo"; 6->"5.1"; 8->"7.1"; else->"${ch}ch" }
