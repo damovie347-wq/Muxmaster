@@ -1,6 +1,7 @@
 package com.example.muxmaster.model
 
 import android.net.Uri
+import androidx.compose.runtime.Immutable
 
 /** Bir audio/subtitle track'inin nereden geldiğini belirtir. */
 enum class TrackSource { EXISTING, NEW_FILE }
@@ -10,7 +11,15 @@ enum class TrackSource { EXISTING, NEW_FILE }
  *
  * EXISTING  -> videonun içinden geliyor (existingStreamIndex dolu)
  * NEW_FILE  -> kullanıcının + butonuyla eklediği harici dosyadan geliyor (fileUri dolu)
+ *
+ * @Immutable: Bu sınıf `android.net.Uri` alanı içerdiği için Compose derleyicisi
+ * onu normalde "unstable" (kararsız) olarak işaretler; bunu parametre olarak alan
+ * her composable (AudioTrackCard gibi) recomposition'ı ATLAYAMAZ hale gelir - yani
+ * listedeki HER track kartı, ekranda alakasız bir şey değiştiğinde bile (örn. mux
+ * ilerleme yüzdesi) gereksiz yere yeniden çizilir. Sınıf aslında tamamen değişmez
+ * (sadece `val` alanlar) olduğu için bunu Compose'a garanti ediyoruz.
  */
+@Immutable
 data class AudioTrackItem(
     val id: Int,
     val source: TrackSource,
@@ -35,6 +44,7 @@ data class AudioTrackItem(
 )
 
 /** Tek bir altyazı track'i. Alan anlamları AudioTrackItem ile aynı mantıkta. */
+@Immutable
 data class SubtitleTrackItem(
     val id: Int,
     val source: TrackSource,
@@ -56,6 +66,7 @@ data class SubtitleTrackItem(
 )
 
 /** Kullanıcının seçtiği ana video dosyası ve onunla ilgili temel bilgiler. */
+@Immutable
 data class VideoFile(
     val uri: Uri,
     val displayName: String,
