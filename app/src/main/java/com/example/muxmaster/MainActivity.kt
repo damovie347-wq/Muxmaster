@@ -34,8 +34,10 @@ class MainActivity : ComponentActivity() {
     private val pickMuxOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) muxViewModel.setOutputFolder(uri)
     }
-    private val pickConverterAudioLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) converterViewModel.onAudioSelected(uri, queryDisplayName(uri) ?: "audio")
+    private val pickConverterAudioLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            converterViewModel.onAudioFilesSelected(uris.map { u -> u to (queryDisplayName(u) ?: "audio") })
+        }
     }
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
