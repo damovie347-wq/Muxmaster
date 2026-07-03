@@ -126,7 +126,7 @@ fun ConverterScreen(
                     val selected = viewModel.outputFormat == fmt
                     FilterChip(
                         selected = selected,
-                        onClick = { viewModel.setOutputFormat(fmt) },
+                        onClick = { viewModel.selectFormat(fmt) },
                         enabled = !viewModel.isConverting,
                         label = { Text(fmt.label, fontSize = 12.sp) },
                         modifier = Modifier.weight(1f),
