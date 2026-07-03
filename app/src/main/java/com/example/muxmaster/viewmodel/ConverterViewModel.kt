@@ -21,27 +21,47 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 
+/** Dönüştürme hedefi format. */
+enum class OutputFormat(val extension: String, val mimeType: String, val label: String) {
+    OPUS("opus", "audio/ogg", "Opus"),
+    MP3("mp3", "audio/mpeg", "MP3")
+}
+
+/** Kuyruktaki tek bir dosyanın işlem durumu. */
+enum class ConvertStatus { PENDING, CONVERTING, DONE, ERROR }
+
+/**
+ * Toplu dönüştürme kuyruğundaki tek bir öğe.
+ * @Immutable: Uri alanı içerdiği için (bkz. Models.kt'deki aynı gerekçe) Compose'a bu
+ * sınıfın değişmez olduğunu garanti ediyoruz - kuyruk listesinde değişmeyen satırlar
+ * gereksiz yere yeniden çizilmesin diye.
+ */
 @Immutable
-data class ConvertSourceAudio(
+data class ConvertQueueItem(
+    val id: Long,
     val uri: Uri,
     val displayName: String,
-    val cachePath: String,
-    val sourceCodec: String,
-    val sourceChannels: Int,
-    val sourceBitrateLabel: String,
-    val durationMs: Long,
-    val fileSizeMb: Float
+    val cachePath: String = "",
+    val sourceCodec: String = "",
+    val sourceChannels: Int = 2,
+    val sourceBitrateLabel: String = "",
+    val durationMs: Long = 0L,
+    val fileSizeMb: Float = 0f,
+    val status: ConvertStatus = ConvertStatus.PENDING,
+    val progress: Int = 0,
+    val outputSizeMb: Float? = null,
+    val errorMessage: String? = null
 )
 
 class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
-    var sourceAudio by mutableStateOf<ConvertSourceAudio?>(null)
+    var queue by mutableStateOf<List<ConvertQueueItem>>(emptyList())
+        private set
+    var outputFormat by mutableStateOf(OutputFormat.OPUS)
         private set
     var bitrateKbpsText by mutableStateOf("128")
         private set
     var outputFolderUri by mutableStateOf<Uri?>(null)
-        private set
-    var outputFileName by mutableStateOf("converted_audio.opus")
         private set
     var isLoading by mutableStateOf(false)
         private set
@@ -51,68 +71,83 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         private set
     var convertProgress by mutableStateOf(0)
         private set
+    var currentFileName by mutableStateOf("")
+        private set
     var resultMessage by mutableStateOf<String?>(null)
         private set
     var isSuccess by mutableStateOf(false)
         private set
 
     private var convertJob: Job? = null
+    private var nextId = 0L
 
     fun cancelConvert() { convertJob?.cancel() }
 
-    fun onAudioSelected(uri: Uri, displayName: String) {
+    fun setOutputFormat(format: OutputFormat) {
+        if (!isConverting) outputFormat = format
+    }
+
+    /** Kullanıcı bir veya birden fazla dosya seçtiğinde çağrılır; her biri SIRAYLA kopyalanıp analiz edilir. */
+    fun onAudioFilesSelected(files: List<Pair<Uri, String>>) {
+        if (files.isEmpty()) return
         viewModelScope.launch {
             isLoading = true
-            loadingMessage = "Ses dosyası kopyalanıyor..."
             resultMessage = null
             isSuccess = false
 
-            withContext(Dispatchers.IO) {
-                runCatching { File(app.cacheDir, "convert_work").deleteRecursively() }
+            var added = 0
+            files.forEachIndexed { index, pair ->
+                val uri = pair.first
+                val displayName = pair.second
+                loadingMessage = "Dosya analiz ediliyor (${index + 1}/${files.size}): $displayName"
+
+                val ext = extensionFromName(displayName).ifBlank { "bin" }
+                val id = nextId++
+                val cachePath = withContext(Dispatchers.IO) {
+                    copyUriToCache(uri, "src_${id}_${System.currentTimeMillis()}.$ext")
+                }
+                if (cachePath != null) {
+                    val sizeMb = withContext(Dispatchers.IO) { File(cachePath).length().toFloat() / (1024 * 1024) }
+                    val probe = withContext(Dispatchers.IO) { TrackProber.probe(cachePath) }
+                    val firstAudio = probe.audioStreams.firstOrNull()
+                    if (firstAudio != null) {
+                        queue = queue + ConvertQueueItem(
+                            id = id, uri = uri, displayName = displayName, cachePath = cachePath,
+                            sourceCodec = firstAudio.codec.uppercase(), sourceChannels = firstAudio.channels,
+                            sourceBitrateLabel = firstAudio.bitrate, durationMs = probe.durationMs, fileSizeMb = sizeMb
+                        )
+                        added++
+                    } else {
+                        withContext(Dispatchers.IO) { runCatching { File(cachePath).delete() } }
+                    }
+                }
             }
 
-            val ext = extensionFromName(displayName).ifBlank { "bin" }
-            val cachePath = withContext(Dispatchers.IO) {
-                copyUriToCache(uri, "src_audio_${System.currentTimeMillis()}.$ext")
-            }
-            if (cachePath == null) {
-                resultMessage = "Dosya okunamadı / kopyalanamadı."
-                isLoading = false
-                return@launch
-            }
-
-            val sizeMb = withContext(Dispatchers.IO) { File(cachePath).length().toFloat() / (1024 * 1024) }
-
-            loadingMessage = "Ses bilgisi okunuyor (ffprobe)..."
-            val probe = withContext(Dispatchers.IO) { TrackProber.probe(cachePath) }
-            val firstAudio = probe.audioStreams.firstOrNull()
-
-            if (firstAudio == null) {
-                resultMessage = "Bu dosyada ses stream'i bulunamadı."
-                isLoading = false
-                withContext(Dispatchers.IO) { runCatching { File(cachePath).delete() } }
-                return@launch
-            }
-
-            sourceAudio = ConvertSourceAudio(
-                uri = uri, displayName = displayName, cachePath = cachePath,
-                sourceCodec = firstAudio.codec.uppercase(), sourceChannels = firstAudio.channels,
-                sourceBitrateLabel = firstAudio.bitrate, durationMs = probe.durationMs, fileSizeMb = sizeMb
-            )
-
-            outputFileName = displayName.substringBeforeLast('.', displayName) + "_opus.opus"
             isLoading = false
             loadingMessage = ""
+            if (added == 0) {
+                resultMessage = "Seçilen dosya(lar) okunamadı / ses stream'i bulunamadı."
+                isSuccess = false
+            }
         }
     }
 
-    fun clearAudio() {
+    fun removeFromQueue(id: Long) {
         if (isConverting) return
-        val old = sourceAudio?.cachePath
-        sourceAudio = null; resultMessage = null; isSuccess = false; convertProgress = 0
+        val item = queue.firstOrNull { it.id == id }
+        queue = queue.filterNot { it.id == id }
+        if (item != null) {
+            viewModelScope.launch(Dispatchers.IO) { runCatching { File(item.cachePath).delete() } }
+        }
+    }
+
+    fun clearQueue() {
+        if (isConverting) return
+        val old = queue
+        queue = emptyList()
+        resultMessage = null; isSuccess = false; convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            if (old != null) runCatching { File(old).delete() }
-            runCatching { File(app.cacheDir, "convert_work").deleteRecursively() }
+            old.forEach { runCatching { File(it.cachePath).delete() } }
         }
     }
 
@@ -127,25 +162,25 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         } catch (_: SecurityException) { }
     }
 
-    fun updateOutputFileName(name: String) { outputFileName = name }
     fun clearResult() { resultMessage = null; isSuccess = false }
 
     fun dismissAndReset() {
         if (isConverting) return
-        val old = sourceAudio?.cachePath
-        sourceAudio = null; resultMessage = null; isSuccess = false; convertProgress = 0
+        val old = queue
+        queue = emptyList()
+        resultMessage = null; isSuccess = false; convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            if (old != null) runCatching { File(old).delete() }
-            runCatching { File(app.cacheDir, "convert_work").deleteRecursively() }
+            old.forEach { runCatching { File(it.cachePath).delete() } }
         }
     }
 
+    /** Kuyruktaki tüm PENDING/ERROR öğeleri SIRAYLA (biri bitmeden diğeri başlamaz) dönüştürür. */
     fun startConvert() {
-        val source = sourceAudio
         val outFolder = outputFolderUri
         val bitrate = bitrateKbpsText.toIntOrNull()
+        val toProcess = queue.filter { it.status == ConvertStatus.PENDING || it.status == ConvertStatus.ERROR }
 
-        if (source == null) { resultMessage = "Önce bir ses dosyası seçin."; isSuccess = false; return }
+        if (toProcess.isEmpty()) { resultMessage = "Kuyrukta dönüştürülecek dosya yok."; isSuccess = false; return }
         if (outFolder == null) { resultMessage = "Çıktı klasörü seçilmedi."; isSuccess = false; return }
         if (bitrate == null || bitrate < 6 || bitrate > 512) {
             resultMessage = "Geçerli bir bitrate girin (6-512 kbps arası)."; isSuccess = false; return
@@ -154,82 +189,116 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
         convertJob = viewModelScope.launch {
             try {
-                isConverting = true; convertProgress = 0; resultMessage = null; isSuccess = false
+                isConverting = true; resultMessage = null; isSuccess = false; convertProgress = 0
 
-                val workDir = File(app.cacheDir, "convert_work").also { it.mkdirs() }
-                val tempOutput = File(workDir, "temp_out_${System.currentTimeMillis()}.opus")
-                tempOutput.delete()
+                var doneCount = 0
+                var errorCount = 0
+                val total = toProcess.size
+                val format = outputFormat
 
-                convertProgress = 10
+                for (item in toProcess) {
+                    currentFileName = item.displayName
+                    updateQueueItem(item.id) { it.copy(status = ConvertStatus.CONVERTING, progress = 0) }
 
-                val forceMono = bitrate < 48
-                val audioFilters = if (forceMono) {
-                    "adelay=50:all=1,highpass=f=20,afade=t=in:st=0.05:d=0.12:curve=log,alimiter=limit=0.95:attack=5:release=50"
-                } else {
-                    "highpass=f=20,afade=t=in:st=0:d=0.05:curve=log,alimiter=limit=0.95:attack=5:release=50"
+                    val workDir = File(app.cacheDir, "convert_work").also { it.mkdirs() }
+                    val tempOutput = File(workDir, "out_${item.id}_${System.currentTimeMillis()}.${format.extension}")
+                    tempOutput.delete()
+
+                    val args = buildFfmpegArgs(item, format, bitrate, tempOutput.absolutePath)
+                    val doneSoFar = doneCount + errorCount
+
+                    val returnCodeVal = runFfmpegAsync(args, item.durationMs) { pct ->
+                        updateQueueItem(item.id) { it.copy(progress = pct) }
+                        convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
+                    }
+
+                    val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
+                    if (!ok) {
+                        errorCount++
+                        updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = "FFmpeg hatası (kod: $returnCodeVal)") }
+                        runCatching { tempOutput.delete() }
+                    } else {
+                        val rawName = item.displayName.substringBeforeLast('.', item.displayName)
+                        val finalName = "$rawName.${format.extension}"
+                        val finalSizeBytes = tempOutput.length()
+
+                        val copyOk = withContext(Dispatchers.IO) {
+                            try {
+                                val outDoc = DocumentFile.fromTreeUri(app, outFolder)?.createFile(format.mimeType, finalName)
+                                val outUri = outDoc?.uri ?: return@withContext false
+                                app.contentResolver.openOutputStream(outUri)?.use { out ->
+                                    tempOutput.inputStream().use { input -> input.copyTo(out, 8 * 1024 * 1024) }
+                                } ?: return@withContext false
+                                triggerMediaScan(outUri, format.mimeType)
+                                true
+                            } catch (e: Exception) { false }
+                        }
+                        runCatching { tempOutput.delete() }
+
+                        if (copyOk) {
+                            doneCount++
+                            updateQueueItem(item.id) {
+                                it.copy(status = ConvertStatus.DONE, progress = 100, outputSizeMb = finalSizeBytes / (1024f * 1024f))
+                            }
+                        } else {
+                            errorCount++
+                            updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = "Hedef klasöre kaydedilemedi.") }
+                        }
+                    }
+
+                    convertProgress = (((doneCount + errorCount).toFloat() / total) * 100).toInt().coerceIn(0, 100)
+                    runCatching { File(item.cachePath).delete() }
                 }
-                val opusApplication = if (forceMono) "voip" else "audio"
-                val args = buildList {
-                    add("-y"); add("-i"); add(source.cachePath)
-                    add("-vn"); add("-map"); add("0:a:0")
-                    add("-ar"); add("48000")
-                    if (forceMono) { add("-ac"); add("1") }
-                    add("-af"); add(audioFilters)
-                    add("-c:a"); add("libopus")
-                    add("-application"); add(opusApplication)
-                    add("-b:a"); add("${bitrate}k")
-                    add(tempOutput.absolutePath)
-                }.toTypedArray()
 
-                val returnCodeVal = runFfmpegAsync(args, source.durationMs)
-                convertProgress = 92
-
-                if (returnCodeVal == null || returnCodeVal != 0) {
-                    resultMessage = "FFmpeg hatası (kod: $returnCodeVal). Kaynak dosya bozuk olabilir."
-                    return@launch
-                }
-                if (!tempOutput.exists() || tempOutput.length() == 0L) {
-                    resultMessage = "Hata: Çıktı dosyası oluşmadı (0 byte)."
-                    return@launch
-                }
-
-                convertProgress = 95
-                val rawName = outputFileName.trim().ifBlank { "converted_audio.opus" }
-                val finalName = if (rawName.endsWith(".opus", ignoreCase = true)) rawName else "$rawName.opus"
-                val finalSizeBytes = tempOutput.length()
-
-                val copyOk = withContext(Dispatchers.IO) {
-                    try {
-                        val outDoc = DocumentFile.fromTreeUri(app, outFolder)?.createFile("audio/ogg", finalName)
-                        val outUri = outDoc?.uri ?: return@withContext false
-                        app.contentResolver.openOutputStream(outUri)?.use { out ->
-                            tempOutput.inputStream().use { input -> input.copyTo(out, 8 * 1024 * 1024) }
-                        } ?: return@withContext false
-                        triggerMediaScan(outUri)
-                        true
-                    } catch (e: Exception) { false }
-                }
-
-                runCatching { tempOutput.delete() }
                 convertProgress = 100
-
-                if (copyOk) {
-                    val sizeMb = finalSizeBytes / (1024f * 1024f)
-                    resultMessage = "✅ Tamamlandı! %.1f MB (Opus, $bitrate kbps)".format(sizeMb)
-                    isSuccess = true
+                currentFileName = ""
+                resultMessage = if (errorCount == 0) {
+                    "✅ Tamamlandı! $doneCount/$total dosya ${format.label} formatına dönüştürüldü."
                 } else {
-                    resultMessage = "Hata: Dosya hedef klasöre kaydedilemedi."
-                    isSuccess = false
+                    "⚠ $doneCount/$total tamamlandı, $errorCount dosyada hata oluştu."
                 }
+                isSuccess = errorCount == 0
             } catch (c: CancellationException) {
-                resultMessage = "İşlem iptal edildi."; isSuccess = false; throw c
+                resultMessage = "İşlem iptal edildi."; isSuccess = false; currentFileName = ""
+                throw c
             } finally {
                 isConverting = false
             }
         }
     }
 
-    private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long): Int? =
+    private fun updateQueueItem(id: Long, transform: (ConvertQueueItem) -> ConvertQueueItem) {
+        queue = queue.map { if (it.id == id) transform(it) else it }
+    }
+
+    private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
+        val forceMono = bitrate < 48
+        val audioFilters = if (forceMono) {
+            "adelay=50:all=1,highpass=f=20,afade=t=in:st=0.05:d=0.12:curve=log,alimiter=limit=0.95:attack=5:release=50"
+        } else {
+            "highpass=f=20,afade=t=in:st=0:d=0.05:curve=log,alimiter=limit=0.95:attack=5:release=50"
+        }
+        return buildList {
+            add("-y"); add("-i"); add(item.cachePath)
+            add("-vn"); add("-map"); add("0:a:0")
+            add("-ar"); add("48000")
+            if (forceMono) { add("-ac"); add("1") }
+            add("-af"); add(audioFilters)
+            when (format) {
+                OutputFormat.OPUS -> {
+                    add("-c:a"); add("libopus")
+                    add("-application"); add(if (forceMono) "voip" else "audio")
+                }
+                OutputFormat.MP3 -> {
+                    add("-c:a"); add("libmp3lame")
+                }
+            }
+            add("-b:a"); add("${bitrate}k")
+            add(outputPath)
+        }.toTypedArray()
+    }
+
+    private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
         suspendCancellableCoroutine { cont ->
             val session = FFmpegKit.executeWithArgumentsAsync(
                 args,
@@ -237,8 +306,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 null
             ) { stats ->
                 if (durationMs > 0) {
-                    val pct = (((stats.time.toFloat() / durationMs) * 80f) + 10f).toInt().coerceIn(10, 90)
-                    viewModelScope.launch { convertProgress = pct }
+                    val pct = ((stats.time.toFloat() / durationMs) * 100f).toInt().coerceIn(0, 100)
+                    viewModelScope.launch { onProgress(pct) }
                 }
             }
             cont.invokeOnCancellation { runCatching { session.cancel() } }
@@ -261,14 +330,14 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         return displayName.substring(dot + 1).lowercase().filter { it.isLetterOrDigit() }
     }
 
-    private fun triggerMediaScan(docUri: Uri) {
+    private fun triggerMediaScan(docUri: Uri, mimeType: String) {
         try {
             val docId = android.provider.DocumentsContract.getDocumentId(docUri)
             val parts = docId.split(":", limit = 2)
             if (parts.size == 2 && parts[0].equals("primary", ignoreCase = true)) {
                 val realPath = "${android.os.Environment.getExternalStorageDirectory().absolutePath}/${parts[1]}"
                 if (File(realPath).exists()) {
-                    android.media.MediaScannerConnection.scanFile(app, arrayOf(realPath), arrayOf("audio/ogg"), null)
+                    android.media.MediaScannerConnection.scanFile(app, arrayOf(realPath), arrayOf(mimeType), null)
                 }
             }
         } catch (_: Exception) { }
