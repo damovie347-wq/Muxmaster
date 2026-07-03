@@ -163,20 +163,12 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 convertProgress = 10
 
                 val forceMono = bitrate < 48
-                // İlk saniyedeki "patlak ses" düzeltmesi:
-                // 1) highpass=f=20   -> kaynaktaki DC/subsonik sapmayı temizler; libopus'un
-                //    dahili yüksek geçiren filtresiyle etkileşip dosya başında "thump" (gümbürtü)
-                //    oluşturmasını engeller.
-                // 2) afade...d=0.05  -> eski koddaki 8ms'lik fade, TEK bir Opus çerçevesinden
-                //    (20ms) bile kısaydı; bu hem sesi fiilen yumuşatmıyordu hem de kodlayıcının
-                //    "transient" (ani geçiş) algılayıcısını tetikleyip ekstra artefakt riski
-                //    taşıyordu. 50ms + logaritmik eğri, en az 2 çerçeveyi kapsayıp kulağa gerçekten
-                //    pürüzsüz gelir (ffmpeg + libopus ile ölçülerek doğrulandı).
-                // 3) alimiter        -> dosyanın herhangi bir yerinde (sadece başında değil)
-                //    beklenmedik bir seviye sıçraması/aşımı olursa hızlı ataklı bir limiter bunu
-                //    yakalar; normal seviyedeki içeriğe dokunmaz, sadece gerçek "patlama" anlarını
-                //    frenler.
-                val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.05:curve=log,alimiter=limit=0.95:attack=5:release=50"
+                val audioFilters = if (forceMono) {
+                    "adelay=50:all=1,highpass=f=20,afade=t=in:st=0.05:d=0.12:curve=log,alimiter=limit=0.95:attack=5:release=50"
+                } else {
+                    "highpass=f=20,afade=t=in:st=0:d=0.05:curve=log,alimiter=limit=0.95:attack=5:release=50"
+                }
+                val opusApplication = if (forceMono) "voip" else "audio"
                 val args = buildList {
                     add("-y"); add("-i"); add(source.cachePath)
                     add("-vn"); add("-map"); add("0:a:0")
@@ -184,7 +176,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     if (forceMono) { add("-ac"); add("1") }
                     add("-af"); add(audioFilters)
                     add("-c:a"); add("libopus")
-                    add("-application"); add("audio")
+                    add("-application"); add(opusApplication)
                     add("-b:a"); add("${bitrate}k")
                     add(tempOutput.absolutePath)
                 }.toTypedArray()
