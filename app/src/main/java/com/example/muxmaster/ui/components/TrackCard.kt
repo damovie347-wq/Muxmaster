@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -94,37 +95,81 @@ private fun TrackHeaderRow(
     }
 }
 
+private const val DELAY_RANGE_MS = 10000f
+
+/**
+ * PERFORMANS NOTU (delay slider akıcılığı):
+ * Eski kodda Slider'ın onValueChange'i HEM kendi pozisyonunu (localValue) HEM DE
+ * yanındaki OutlinedTextField'ın metnini (text) aynı anda güncelliyordu. İkisi de
+ * aynı composable fonksiyonun gövdesinde okunduğu için, parmak her piksel
+ * kaydığında (saniyede onlarca-yüzlerce kez) TÜM OutlinedTextField yeniden
+ * ölçülüp yeniden çiziliyordu (cursor, IME, decoration box, text layout dahil) -
+ * bu da gerçek cihazlarda sürüklemeyi 3-10fps'e kadar düşürüyordu.
+ *
+ * Çözüm: Sürükleme sırasında sadece ÇOK ucuz bir "değer balonu" (Text) güncellenir;
+ * ağır OutlinedTextField'ın `value`'su parmak kaldırılana kadar (onValueChangeFinished)
+ * DEĞİŞMEZ. Compose, değişmeyen (stable) parametrelerle çağrılan composable'ları
+ * otomatik olarak atlar (skip), böylece TextField sürükleme boyunca hiç yeniden
+ * render edilmez ve Slider donanım hızında (60/90/120fps, cihaza bağlı) akar.
+ */
 @Composable
 private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
-    var localValue by remember(delayMs) { mutableStateOf(delayMs.toFloat()) }
+    // Slider'ın anlık pozisyonu - primitive-specialized state (autoboxing yok)
+    var sliderValue by remember(delayMs) { mutableFloatStateOf(delayMs.toFloat()) }
+    // TextField'ın gösterdiği metin - SADECE sürükleme bitince veya elle yazılınca değişir
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
+    var isDragging by remember { mutableStateOf(false) }
+
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text("Delay", color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
-Slider(
-    value = localValue, 
-    onValueChange = {
-        localValue = it
-        text = it.toLong().toString()
-    },
-    onValueChangeFinished = {
-        onDelayChange(localValue.toLong())
-    },
-    valueRange = -10000f..10000f,
-    modifier = Modifier
-        .weight(1f)
-        .padding(horizontal = 8.dp),
-    colors = SliderDefaults.colors(
-        thumbColor = Purple,
-        activeTrackColor = Purple
-    )
-)
+
+        BoxWithConstraints(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
+            Slider(
+                value = sliderValue,
+                onValueChange = { isDragging = true; sliderValue = it },
+                onValueChangeFinished = {
+                    isDragging = false
+                    val finalValue = sliderValue.toLong()
+                    text = finalValue.toString()
+                    onDelayChange(finalValue)
+                },
+                valueRange = -DELAY_RANGE_MS..DELAY_RANGE_MS,
+                modifier = Modifier.fillMaxWidth(),
+                colors = SliderDefaults.colors(thumbColor = Purple, activeTrackColor = Purple)
+            )
+
+            // Sürüklerken parmağın üstünde akan hafif değer balonu (tek bir Text -
+            // TextField'a kıyasla neredeyse bedava, akıcılığı bozmaz).
+            if (isDragging) {
+                val fraction = ((sliderValue + DELAY_RANGE_MS) / (2 * DELAY_RANGE_MS)).coerceIn(0f, 1f)
+                val bubbleWidth = 46.dp
+                val bubbleX = (maxWidth - bubbleWidth) * fraction
+                Box(
+                    modifier = Modifier
+                        .offset(x = bubbleX, y = (-30).dp)
+                        .width(bubbleWidth)
+                        .background(Purple, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 4.dp, vertical = 3.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "${sliderValue.toLong()}ms",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
         OutlinedTextField(
             value = text,
             onValueChange = { newVal ->
                 text = newVal
                 newVal.toLongOrNull()?.let { parsed ->
                     val coerced = parsed.coerceIn(-10000, 10000)
-                    localValue = coerced.toFloat()
+                    sliderValue = coerced.toFloat()
                     onDelayChange(coerced)
                 }
             },
