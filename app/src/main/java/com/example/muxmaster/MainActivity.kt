@@ -1,16 +1,20 @@
 package com.example.muxmaster
 
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import com.example.muxmaster.ui.screens.ConverterScreen
 import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.theme.MuxMasterTheme
@@ -21,6 +25,9 @@ class MainActivity : ComponentActivity() {
 
     private val muxViewModel: MuxViewModel by viewModels()
     private val converterViewModel: ConverterViewModel by viewModels()
+
+    // Compose dışından (onNewIntent) hangi ekranda olduğumuzu değiştirebilmek için.
+    private var screenState: MutableState<Int>? = null
 
     private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) muxViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
@@ -47,7 +54,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             MuxMasterTheme {
-                var screen by remember { mutableIntStateOf(0) }
+                val screenHolder = remember { mutableIntStateOf(0) }
+                screenState = screenHolder
+                var screen by screenHolder
+
+                // Soğuk başlangıç: uygulama bir dosya yöneticisinden "Birlikte Aç" /
+                // "Paylaş" ile açıldıysa geleni burada işle.
+                LaunchedEffect(Unit) { handleIncomingIntent(intent) }
+
                 when (screen) {
                     0 -> MuxScreen(
                         viewModel = muxViewModel,
@@ -67,6 +81,48 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // Uygulama zaten açıkken başka bir dosya yöneticisinden "Birlikte Aç" / "Paylaş"
+    // ile tekrar çağrılırsa (launchMode="singleTask" sayesinde) onCreate değil bu
+    // çağrılır.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        screenState?.let { handleIncomingIntent(intent) }
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        val uri = when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data
+            Intent.ACTION_SEND -> intent.getStreamUriCompat()
+            else -> null
+        } ?: return
+
+        try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        catch (_: SecurityException) { }
+
+        val displayName = queryDisplayName(uri) ?: "file"
+        val mimeType = intent.type ?: contentResolver.getType(uri).orEmpty()
+
+        when {
+            mimeType.startsWith("video/") -> {
+                muxViewModel.onVideoSelected(uri, displayName)
+                screenState?.value = 0
+            }
+            mimeType.startsWith("audio/") -> {
+                converterViewModel.onAudioFilesSelected(listOf(uri to displayName))
+                screenState?.value = 1
+            }
+        }
+
+        intent.action = null
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.getStreamUriCompat(): Uri? =
+        if (Build.VERSION.SDK_INT >= 33) getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        else getParcelableExtra(Intent.EXTRA_STREAM)
 
     private fun queryDisplayName(uri: Uri): String? = try {
         contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
