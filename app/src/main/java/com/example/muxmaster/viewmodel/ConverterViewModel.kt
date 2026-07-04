@@ -30,12 +30,6 @@ enum class OutputFormat(val extension: String, val mimeType: String, val label: 
 /** Kuyruktaki tek bir dosyanın işlem durumu. */
 enum class ConvertStatus { PENDING, CONVERTING, DONE, ERROR }
 
-/**
- * Toplu dönüştürme kuyruğundaki tek bir öğe.
- * @Immutable: Uri alanı içerdiği için (bkz. Models.kt'deki aynı gerekçe) Compose'a bu
- * sınıfın değişmez olduğunu garanti ediyoruz - kuyruk listesinde değişmeyen satırlar
- * gereksiz yere yeniden çizilmesin diye.
- */
 @Immutable
 data class ConvertQueueItem(
     val id: Long,
@@ -87,7 +81,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (!isConverting) outputFormat = format
     }
 
-    /** Kullanıcı bir veya birden fazla dosya seçtiğinde çağrılır; her biri SIRAYLA kopyalanıp analiz edilir. */
     fun onAudioFilesSelected(files: List<Pair<Uri, String>>) {
         if (files.isEmpty()) return
         viewModelScope.launch {
@@ -174,7 +167,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Kuyruktaki tüm PENDING/ERROR öğeleri SIRAYLA (biri bitmeden diğeri başlamaz) dönüştürür. */
     fun startConvert() {
         val outFolder = outputFolderUri
         val bitrate = bitrateKbpsText.toIntOrNull()
@@ -273,11 +265,11 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
-        val audioFilters = if (forceMono) {
-            "adelay=50:all=1,highpass=f=20,afade=t=in:st=0.05:d=0.12:curve=log,alimiter=limit=0.95:attack=5:release=50"
-        } else {
-            "highpass=f=20,afade=t=in:st=0:d=0.05:curve=log,alimiter=limit=0.95:attack=5:release=50"
-        }
+        // Eski zincir (adelay + agresif alimiter) limiter'ı "soğuk" haldeyken sinyalin
+        // en başına maruz bırakıyordu; gain-reduction zarfı oturana kadar geçen ~1-2sn
+        // içinde duyulabilir çıtırtı/pompalama oluşuyordu. Basit, tek geçişlik bir
+        // declick fade + DC/rumble temizliği yeterli ve güvenli.
+        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.03:curve=tri"
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
             add("-vn"); add("-map"); add("0:a:0")
@@ -287,7 +279,19 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    add("-application"); add(if (forceMono) "voip" else "audio")
+                    // "voip" modu dar bantlı konuşma için optimize eder ve genel
+                    // ses/müzikte distorsiyon gibi algılanabiliyordu; artık her
+                    // bitrate'te "audio" kullanılıyor.
+                    add("-application"); add("audio")
+                    // Varsayılan (constrained OLMAYAN) VBR, karmaşık pasajlarda hedef
+                    // bitrate'in çok üzerine çıkabiliyordu; düşük bitrate'lerde bu
+                    // oransal olarak "beklenenden çok daha büyük dosya" şeklinde
+                    // görünüyordu. "constrained" çıktıyı hedefe yakın tutar.
+                    add("-vbr"); add("constrained")
+                    // Varsayılan compression_level=10 en yavaş/en yüksek kalite moddur.
+                    // 8'e düşürmek, algısal kalitede ciddi bir kayıp olmadan encode
+                    // süresini belirgin şekilde kısaltır.
+                    add("-compression_level"); add("8")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
