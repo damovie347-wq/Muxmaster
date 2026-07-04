@@ -78,7 +78,6 @@ private fun TrackHeaderRow(
     source: TrackSource,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
-    // --- Collapse/expand toggle (new) ---
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onMoveUp: () -> Unit,
@@ -88,8 +87,6 @@ private fun TrackHeaderRow(
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         IconBadge(icon, iconColor)
         Spacer(Modifier.width(10.dp))
-        // Title/subtitle column is now clickable to toggle collapse, so the
-        // whole header area (not just the tiny icon) can be tapped.
         Column(
             Modifier
                 .weight(1f)
@@ -98,7 +95,6 @@ private fun TrackHeaderRow(
             Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
             Text(subtitle, color = TextSec, fontSize = 12.sp, maxLines = 1)
         }
-        // Collapse/expand button - "next to" the title, before the badge/controls.
         IconButton(onClick = onToggleExpand, modifier = Modifier.size(32.dp)) {
             Icon(
                 if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
@@ -122,26 +118,9 @@ private fun TrackHeaderRow(
 
 private const val DELAY_RANGE_MS = 10000f
 
-/**
- * PERFORMANS NOTU (delay slider akıcılığı):
- * Eski kodda Slider'ın onValueChange'i HEM kendi pozisyonunu (localValue) HEM DE
- * yanındaki OutlinedTextField'ın metnini (text) aynı anda güncelliyordu. İkisi de
- * aynı composable fonksiyonun gövdesinde okunduğu için, parmak her piksel
- * kaydığında (saniyede onlarca-yüzlerce kez) TÜM OutlinedTextField yeniden
- * ölçülüp yeniden çiziliyordu (cursor, IME, decoration box, text layout dahil) -
- * bu da gerçek cihazlarda sürüklemeyi 3-10fps'e kadar düşürüyordu.
- *
- * Çözüm: Sürükleme sırasında sadece ÇOK ucuz bir "değer balonu" (Text) güncellenir;
- * ağır OutlinedTextField'ın `value`'su parmak kaldırılana kadar (onValueChangeFinished)
- * DEĞİŞMEZ. Compose, değişmeyen (stable) parametrelerle çağrılan composable'ları
- * otomatik olarak atlar (skip), böylece TextField sürükleme boyunca hiç yeniden
- * render edilmez ve Slider donanım hızında (60/90/120fps, cihaza bağlı) akar.
- */
 @Composable
 private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
-    // Slider'ın anlık pozisyonu - primitive-specialized state (autoboxing yok)
     var sliderValue by remember(delayMs) { mutableFloatStateOf(delayMs.toFloat()) }
-    // TextField'ın gösterdiği metin - SADECE sürükleme bitince veya elle yazılınca değişir
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     var isDragging by remember { mutableStateOf(false) }
 
@@ -163,8 +142,6 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
                 colors = SliderDefaults.colors(thumbColor = Purple, activeTrackColor = Purple)
             )
 
-            // Sürüklerken parmağın üstünde akan hafif değer balonu (tek bir Text -
-            // TextField'a kıyasla neredeyse bedava, akıcılığı bozmaz).
             if (isDragging) {
                 val fraction = ((sliderValue + DELAY_RANGE_MS) / (2 * DELAY_RANGE_MS)).coerceIn(0f, 1f)
                 val bubbleWidth = 46.dp
@@ -234,6 +211,8 @@ fun AudioTrackCard(
     track: AudioTrackItem,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
     onUpdate: (AudioTrackItem) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
@@ -254,18 +233,13 @@ fun AudioTrackCard(
                 "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
             } else track.fileDisplayName
 
-            // Collapse/expand state, keyed by track.id so it survives reordering
-            // but resets correctly if the track list changes. Open by default.
-            var expanded by remember(track.id) { mutableStateOf(true) }
-
             TrackHeaderRow(
                 icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
-                expanded = expanded, onToggleExpand = { expanded = !expanded },
+                expanded = expanded, onToggleExpand = onToggleExpand,
                 onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
             )
 
-            // --- Collapsible body: Delay slider, language row and switches ---
             AnimatedVisibility(
                 visible = expanded,
                 enter = expandVertically() + fadeIn(),
@@ -302,6 +276,8 @@ fun SubtitleTrackCard(
     track: SubtitleTrackItem,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
     onUpdate: (SubtitleTrackItem) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
@@ -320,17 +296,13 @@ fun SubtitleTrackCard(
             }
             val subtitle = if (track.source == TrackSource.EXISTING) track.existingCodec.uppercase() else track.fileDisplayName
 
-            // Collapse/expand state, keyed by track.id. Open by default.
-            var expanded by remember(track.id) { mutableStateOf(true) }
-
             TrackHeaderRow(
                 icon = Icons.Filled.Subtitles, iconColor = PurpleLight, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
-                expanded = expanded, onToggleExpand = { expanded = !expanded },
+                expanded = expanded, onToggleExpand = onToggleExpand,
                 onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
             )
 
-            // --- Collapsible body: Delay slider, language row and switches ---
             AnimatedVisibility(
                 visible = expanded,
                 enter = expandVertically() + fadeIn(),
