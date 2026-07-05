@@ -11,6 +11,8 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arthenica.ffmpegkit.FFmpegKit
+import com.example.muxmaster.R
+import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.TrackProber
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +51,8 @@ data class ConvertQueueItem(
 
 class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
+    private val prefs = AppPreferences(app)
+
     var queue by mutableStateOf<List<ConvertQueueItem>>(emptyList())
         private set
     var outputFormat by mutableStateOf(OutputFormat.OPUS)
@@ -75,6 +79,11 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     private var convertJob: Job? = null
     private var nextId = 0L
 
+    init {
+        // Ayarlar'da seçilmiş varsayılan çıktı klasörü varsa otomatik yükle.
+        prefs.defaultOutputFolder?.let { outputFolderUri = it }
+    }
+
     fun cancelConvert() { convertJob?.cancel() }
 
     fun selectFormat(format: OutputFormat) {
@@ -92,7 +101,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             files.forEachIndexed { index, pair ->
                 val uri = pair.first
                 val displayName = pair.second
-                loadingMessage = "Dosya analiz ediliyor (${index + 1}/${files.size}): $displayName"
+                loadingMessage = "${index + 1}/${files.size}: $displayName"
 
                 val ext = extensionFromName(displayName).ifBlank { "bin" }
                 val id = nextId++
@@ -119,7 +128,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             isLoading = false
             loadingMessage = ""
             if (added == 0) {
-                resultMessage = "Seçilen dosya(lar) okunamadı / ses stream'i bulunamadı."
+                resultMessage = app.getString(R.string.err_no_files_analyzed)
                 isSuccess = false
             }
         }
@@ -153,6 +162,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
         } catch (_: SecurityException) { }
+        // Manuel seçilen klasör aynı zamanda yeni varsayılan klasör olur.
+        prefs.defaultOutputFolder = uri
     }
 
     fun clearResult() { resultMessage = null; isSuccess = false }
@@ -172,10 +183,10 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         val bitrate = bitrateKbpsText.toIntOrNull()
         val toProcess = queue.filter { it.status == ConvertStatus.PENDING || it.status == ConvertStatus.ERROR }
 
-        if (toProcess.isEmpty()) { resultMessage = "Kuyrukta dönüştürülecek dosya yok."; isSuccess = false; return }
-        if (outFolder == null) { resultMessage = "Çıktı klasörü seçilmedi."; isSuccess = false; return }
+        if (toProcess.isEmpty()) { resultMessage = app.getString(R.string.err_no_pending_files); isSuccess = false; return }
+        if (outFolder == null) { resultMessage = app.getString(R.string.err_no_output_folder); isSuccess = false; return }
         if (bitrate == null || bitrate < 6 || bitrate > 512) {
-            resultMessage = "Geçerli bir bitrate girin (6-512 kbps arası)."; isSuccess = false; return
+            resultMessage = app.getString(R.string.err_invalid_bitrate); isSuccess = false; return
         }
         if (isConverting) return
 
@@ -207,7 +218,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
                     if (!ok) {
                         errorCount++
-                        updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = "FFmpeg hatası (kod: $returnCodeVal)") }
+                        updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = app.getString(R.string.err_ffmpeg_code, returnCodeVal.toString())) }
                         runCatching { tempOutput.delete() }
                     } else {
                         val rawName = item.displayName.substringBeforeLast('.', item.displayName)
@@ -234,7 +245,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                             }
                         } else {
                             errorCount++
-                            updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = "Hedef klasöre kaydedilemedi.") }
+                            updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = app.getString(R.string.err_save_failed)) }
                         }
                     }
 
@@ -245,13 +256,13 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 convertProgress = 100
                 currentFileName = ""
                 resultMessage = if (errorCount == 0) {
-                    "✅ Tamamlandı! $doneCount/$total dosya ${format.label} formatına dönüştürüldü."
+                    app.getString(R.string.result_convert_success_all, doneCount, total, format.label)
                 } else {
-                    "⚠ $doneCount/$total tamamlandı, $errorCount dosyada hata oluştu."
+                    app.getString(R.string.result_convert_partial, doneCount, total, errorCount)
                 }
                 isSuccess = errorCount == 0
             } catch (c: CancellationException) {
-                resultMessage = "İşlem iptal edildi."; isSuccess = false; currentFileName = ""
+                resultMessage = app.getString(R.string.result_cancelled); isSuccess = false; currentFileName = ""
                 throw c
             } finally {
                 isConverting = false
@@ -265,11 +276,24 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
-        // Eski zincir (adelay + agresif alimiter) limiter'ı "soğuk" haldeyken sinyalin
-        // en başına maruz bırakıyordu; gain-reduction zarfı oturana kadar geçen ~1-2sn
-        // içinde duyulabilir çıtırtı/pompalama oluşuyordu. Basit, tek geçişlik bir
-        // declick fade + DC/rumble temizliği yeterli ve güvenli.
-        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.03:curve=tri"
+        // Çok düşük bitrate'lerde (<=32kbps) "voip" (SILK tabanlı) modu,
+        // müzik/genel ses için tercih edilen "audio" (CELT tabanlı) moduna göre
+        // ÇOK daha kararlıdır. "audio" modu 32kbps altında bit bütçesi
+        // yetersiz kaldığı için çıtırtı/bozulmaya çok daha yatkındır; "voip"
+        // düşük bitrate'lere özel tasarlandığından aynı hedef bitrate'te
+        // belirgin şekilde daha temiz ve daha kararlı bir çıktı verir.
+        val isVeryLowBitrate = bitrate <= 32
+        // Eski zincir (adelay + agresif alimiter) limiter'ı "soğuk" haldeyken
+        // sinyalin en başına maruz bırakıyordu; gain-reduction zarfı oturana
+        // kadar geçen ~1-2sn içinde duyulabilir çıtırtı/pompalama oluşuyordu.
+        // Düşük bitrate'lerde bu ilk saniyelerdeki ani geçiş (transient) çok
+        // daha belirgin duyulduğu için fade süresi bitrate'e göre ölçekleniyor.
+        val fadeDuration = when {
+            bitrate <= 20 -> 0.25
+            bitrate <= 32 -> 0.12
+            else -> 0.05
+        }
+        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=$fadeDuration:curve=tri"
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
             add("-vn"); add("-map"); add("0:a:0")
@@ -279,15 +303,18 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    // "voip" modu dar bantlı konuşma için optimize eder ve genel
-                    // ses/müzikte distorsiyon gibi algılanabiliyordu; artık her
-                    // bitrate'te "audio" kullanılıyor.
-                    add("-application"); add("audio")
+                    add("-application"); add(if (isVeryLowBitrate) "voip" else "audio")
                     // Varsayılan (constrained OLMAYAN) VBR, karmaşık pasajlarda hedef
                     // bitrate'in çok üzerine çıkabiliyordu; düşük bitrate'lerde bu
                     // oransal olarak "beklenenden çok daha büyük dosya" şeklinde
                     // görünüyordu. "constrained" çıktıyı hedefe yakın tutar.
                     add("-vbr"); add("constrained")
+                    // Çok düşük bitrate'lerde 60ms'lik büyük frame'ler, paket başı
+                    // sabit overhead'in (TOC + boyut alanları) bit bütçesindeki
+                    // payını küçültür. 6-20kbps aralığında bu, dosya boyutunu
+                    // BÜYÜTMEDEN belirgin şekilde daha stabil/temiz bir çıktı sağlar
+                    // (varsayılan 20ms frame'lerde overhead payı çok daha yüksektir).
+                    if (isVeryLowBitrate) { add("-frame_duration"); add("60") }
                     // Varsayılan compression_level=10 en yavaş/en yüksek kalite moddur.
                     // 8'e düşürmek, algısal kalitede ciddi bir kayıp olmadan encode
                     // süresini belirgin şekilde kısaltır.
@@ -297,7 +324,11 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     add("-c:a"); add("libmp3lame")
                 }
             }
-            add("-b:a"); add("${bitrate}k")
+            // libmp3lame 8kbps altını desteklemiyor; kullanıcı 6-7 girse bile
+            // MP3 tarafında sessizce 8kbps'e sabitleniyor (Opus tarafı 6kbps'i
+            // sorunsuz destekliyor, orada dokunulmuyor).
+            val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
+            add("-b:a"); add("${effectiveBitrate}k")
             add(outputPath)
         }.toTypedArray()
     }
