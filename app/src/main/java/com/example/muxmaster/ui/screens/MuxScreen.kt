@@ -10,17 +10,20 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.muxmaster.R
 import com.example.muxmaster.ui.components.AudioTrackCard
 import com.example.muxmaster.ui.components.BottomMuxBar
 import com.example.muxmaster.ui.components.SubtitleTrackCard
@@ -37,22 +40,34 @@ fun MuxScreen(
     onPickAudio: () -> Unit,
     onPickSubtitle: () -> Unit,
     onPickOutputFolder: () -> Unit,
-    onNavigateToConverter: () -> Unit
+    onNavigateToConverter: () -> Unit,
+    onNavigateToSettings: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { 2 })
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
-    val expandedAudioIds = remember { mutableStateMapOf<Int, Boolean>() }
-    val expandedSubtitleIds = remember { mutableStateMapOf<Int, Boolean>() }
+    // Track export sonucu (Dışa Aktar) kısa bir snackbar olarak gösterilir.
+    LaunchedEffect(viewModel.exportMessage) {
+        val msg = viewModel.exportMessage
+        if (msg != null) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearExportResult()
+        }
+    }
 
     Scaffold(
         containerColor = BgDark,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text("MuxMaster", fontWeight = FontWeight.Bold, color = TextPrimary) },
                 actions = {
+                    IconButton(onClick = onNavigateToSettings) {
+                        Icon(Icons.Filled.Settings, stringResource(R.string.nav_settings_desc), tint = TextSec)
+                    }
                     IconButton(onClick = onNavigateToConverter) {
-                        Icon(Icons.Filled.Tune, "Ses Dönüştürücü", tint = TextSec)
+                        Icon(Icons.Filled.Tune, stringResource(R.string.nav_converter_desc), tint = TextSec)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark)
@@ -98,12 +113,12 @@ fun MuxScreen(
                     Tab(
                         selected = pagerState.currentPage == 0,
                         onClick = { scope.launch { pagerState.animateScrollToPage(0) } },
-                        text = { Text("Sesler (${viewModel.audioTracks.size})") }
+                        text = { Text(stringResource(R.string.tab_audio, viewModel.audioTracks.size)) }
                     )
                     Tab(
                         selected = pagerState.currentPage == 1,
                         onClick = { scope.launch { pagerState.animateScrollToPage(1) } },
-                        text = { Text("Altyazılar (${viewModel.subtitleTracks.size})") }
+                        text = { Text(stringResource(R.string.tab_subtitle, viewModel.subtitleTracks.size)) }
                     )
                 }
 
@@ -113,7 +128,10 @@ fun MuxScreen(
                     TextButton(onClick = if (pagerState.currentPage == 0) onPickAudio else onPickSubtitle) {
                         Icon(Icons.Filled.Add, null, tint = Purple, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text(if (pagerState.currentPage == 0) "Ses Dosyası Ekle" else "Altyazı Dosyası Ekle", color = Purple, fontSize = 13.sp)
+                        Text(
+                            if (pagerState.currentPage == 0) stringResource(R.string.add_audio_button) else stringResource(R.string.add_subtitle_button),
+                            color = Purple, fontSize = 13.sp
+                        )
                     }
                 }
 
@@ -123,7 +141,7 @@ fun MuxScreen(
                 ) { page ->
                     if (page == 0) {
                         if (viewModel.audioTracks.isEmpty()) {
-                            EmptyHint("Bu videoda ses track'i yok. + ile ekleyebilirsin.")
+                            EmptyHint(stringResource(R.string.empty_audio_hint))
                         } else {
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
                                 itemsIndexed(viewModel.audioTracks, key = { _, t -> t.id }) { idx, track ->
@@ -131,14 +149,18 @@ fun MuxScreen(
                                         track = track,
                                         canMoveUp = idx > 0,
                                         canMoveDown = idx < viewModel.audioTracks.size - 1,
-                                        expanded = expandedAudioIds[track.id] ?: true,
+                                        // Not: viewModel.expandedAudioIds kasıtlı olarak ViewModel'de
+                                        // tutuluyor ki Muxlayıcı ↔ Dönüştürücü/Ayarlar arasında geçince
+                                        // (composable tamamen unmount olsa bile) durum sıfırlanmasın.
+                                        expanded = viewModel.expandedAudioIds[track.id] ?: true,
                                         onToggleExpand = {
-                                            expandedAudioIds[track.id] = !(expandedAudioIds[track.id] ?: true)
+                                            viewModel.expandedAudioIds[track.id] = !(viewModel.expandedAudioIds[track.id] ?: true)
                                         },
                                         onUpdate = viewModel::updateAudio,
                                         onRemove = { viewModel.removeAudio(track.id) },
                                         onMoveUp = { viewModel.moveAudioUp(track.id) },
                                         onMoveDown = { viewModel.moveAudioDown(track.id) },
+                                        onExport = { viewModel.exportAudioTrack(track) },
                                         modifier = Modifier.animateItemPlacement(
                                             spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMediumLow)
                                         )
@@ -148,7 +170,7 @@ fun MuxScreen(
                         }
                     } else {
                         if (viewModel.subtitleTracks.isEmpty()) {
-                            EmptyHint("Bu videoda altyazı yok. + ile ekleyebilirsin.")
+                            EmptyHint(stringResource(R.string.empty_subtitle_hint))
                         } else {
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
                                 itemsIndexed(viewModel.subtitleTracks, key = { _, t -> t.id }) { idx, track ->
@@ -156,14 +178,15 @@ fun MuxScreen(
                                         track = track,
                                         canMoveUp = idx > 0,
                                         canMoveDown = idx < viewModel.subtitleTracks.size - 1,
-                                        expanded = expandedSubtitleIds[track.id] ?: true,
+                                        expanded = viewModel.expandedSubtitleIds[track.id] ?: true,
                                         onToggleExpand = {
-                                            expandedSubtitleIds[track.id] = !(expandedSubtitleIds[track.id] ?: true)
+                                            viewModel.expandedSubtitleIds[track.id] = !(viewModel.expandedSubtitleIds[track.id] ?: true)
                                         },
                                         onUpdate = viewModel::updateSubtitle,
                                         onRemove = { viewModel.removeSubtitle(track.id) },
                                         onMoveUp = { viewModel.moveSubtitleUp(track.id) },
                                         onMoveDown = { viewModel.moveSubtitleDown(track.id) },
+                                        onExport = { viewModel.exportSubtitleTrack(track) },
                                         modifier = Modifier.animateItemPlacement(
                                             spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMediumLow)
                                         )
