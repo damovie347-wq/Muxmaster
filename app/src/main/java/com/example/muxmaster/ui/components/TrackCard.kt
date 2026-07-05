@@ -8,7 +8,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -32,9 +32,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.muxmaster.R
 import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
 import com.example.muxmaster.model.TrackSource
@@ -48,7 +50,10 @@ private val LANGUAGE_CHOICES = listOf(
 
 @Composable
 private fun SourceBadge(source: TrackSource) {
-    val (label, color) = if (source == TrackSource.EXISTING) "ORİJİNAL" to Amber else "YENİ" to Green
+    val (label, color) = if (source == TrackSource.EXISTING)
+        stringResource(R.string.source_original) to Amber
+    else
+        stringResource(R.string.source_new) to Green
     Box(
         modifier = Modifier
             .background(color.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
@@ -82,36 +87,48 @@ private fun TrackHeaderRow(
     onToggleExpand: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    onExport: () -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         IconBadge(icon, iconColor)
         Spacer(Modifier.width(10.dp))
-        Column(
-            Modifier
-                .weight(1f)
-                .clickable(onClick = onToggleExpand)
-        ) {
-            Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
-            Text(subtitle, color = TextSec, fontSize = 12.sp, maxLines = 1)
+        Box(modifier = Modifier.weight(1f)) {
+            Column(
+                Modifier.combinedClickable(
+                    onClick = onToggleExpand,
+                    onLongClick = { showMenu = true }
+                )
+            ) {
+                Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
+                Text(subtitle, color = TextSec, fontSize = 12.sp, maxLines = 1)
+            }
+            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_export)) },
+                    onClick = { showMenu = false; onExport() }
+                )
+            }
         }
         IconButton(onClick = onToggleExpand, modifier = Modifier.size(32.dp)) {
             Icon(
                 if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "Daralt" else "Genişlet",
+                contentDescription = if (expanded) stringResource(R.string.collapse_desc) else stringResource(R.string.expand_desc),
                 tint = TextSec
             )
         }
         SourceBadge(source)
         Spacer(Modifier.width(4.dp))
         IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(32.dp)) {
-            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Yukarı taşı", tint = if (canMoveUp) TextSec else TextMuted)
+            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = stringResource(R.string.move_up_desc), tint = if (canMoveUp) TextSec else TextMuted)
         }
         IconButton(onClick = onMoveDown, enabled = canMoveDown, modifier = Modifier.size(32.dp)) {
-            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Aşağı taşı", tint = if (canMoveDown) TextSec else TextMuted)
+            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = stringResource(R.string.move_down_desc), tint = if (canMoveDown) TextSec else TextMuted)
         }
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
-            Icon(Icons.Filled.Delete, contentDescription = "Sil", tint = Red)
+            Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.delete_desc), tint = Red)
         }
     }
 }
@@ -125,7 +142,7 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var isDragging by remember { mutableStateOf(false) }
 
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        Text("Delay", color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
+        Text(stringResource(R.string.delay_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
 
         BoxWithConstraints(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
             Slider(
@@ -184,6 +201,23 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     }
 }
 
+private const val GAIN_MAX_DB = 15f
+
+@Composable
+private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Text(stringResource(R.string.gain_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(90.dp))
+        Slider(
+            value = gainDb,
+            onValueChange = onGainChange,
+            valueRange = 0f..GAIN_MAX_DB,
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            colors = SliderDefaults.colors(thumbColor = Amber, activeTrackColor = Amber)
+        )
+        Text("+%.1f dB".format(gainDb), color = TextSec, fontSize = 11.sp, modifier = Modifier.width(58.dp))
+    }
+}
+
 @Composable
 private fun LanguageRow(language: String, onLanguageChange: (String) -> Unit) {
     LazyRow(
@@ -217,6 +251,7 @@ fun AudioTrackCard(
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onExport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -227,7 +262,7 @@ fun AudioTrackCard(
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
-                if (track.source == TrackSource.EXISTING) "Ses Parçası #${track.existingStreamIndex}" else track.fileDisplayName
+                if (track.source == TrackSource.EXISTING) stringResource(R.string.audio_track_fallback_title, track.existingStreamIndex) else track.fileDisplayName
             }
             val subtitle = if (track.source == TrackSource.EXISTING) {
                 "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
@@ -237,7 +272,8 @@ fun AudioTrackCard(
                 icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
                 expanded = expanded, onToggleExpand = onToggleExpand,
-                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
+                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove,
+                onExport = onExport
             )
 
             AnimatedVisibility(
@@ -248,16 +284,17 @@ fun AudioTrackCard(
                 Column {
                     DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
                     LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
+                    GainRow(track.gainDb) { onUpdate(track.copy(gainDb = it)) }
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                        Text("Varsayılan", color = TextSec, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Text(stringResource(R.string.label_default), color = TextSec, fontSize = 12.sp, modifier = Modifier.weight(1f))
                         Switch(
                             checked = track.isDefault,
                             onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
                             colors = SwitchDefaults.colors(checkedThumbColor = Purple, checkedTrackColor = PurpleLight.copy(alpha = 0.4f))
                         )
                         Spacer(Modifier.width(12.dp))
-                        Text("Aktif", color = TextSec, fontSize = 12.sp)
+                        Text(stringResource(R.string.label_active), color = TextSec, fontSize = 12.sp)
                         Spacer(Modifier.width(6.dp))
                         Switch(
                             checked = track.isEnabled,
@@ -282,6 +319,7 @@ fun SubtitleTrackCard(
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onExport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -292,7 +330,7 @@ fun SubtitleTrackCard(
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
-                if (track.source == TrackSource.EXISTING) "Altyazı #${track.existingStreamIndex}" else track.fileDisplayName
+                if (track.source == TrackSource.EXISTING) stringResource(R.string.subtitle_track_fallback_title, track.existingStreamIndex) else track.fileDisplayName
             }
             val subtitle = if (track.source == TrackSource.EXISTING) track.existingCodec.uppercase() else track.fileDisplayName
 
@@ -300,7 +338,8 @@ fun SubtitleTrackCard(
                 icon = Icons.Filled.Subtitles, iconColor = PurpleLight, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
                 expanded = expanded, onToggleExpand = onToggleExpand,
-                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove
+                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove,
+                onExport = onExport
             )
 
             AnimatedVisibility(
@@ -313,28 +352,28 @@ fun SubtitleTrackCard(
                     LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
 
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                        Text("Default", color = TextSec, fontSize = 11.sp)
+                        Text(stringResource(R.string.label_default), color = TextSec, fontSize = 11.sp)
                         Switch(
                             checked = track.isDefault,
                             onCheckedChange = { onUpdate(track.copy(isDefault = it)) },
                             colors = SwitchDefaults.colors(checkedThumbColor = Purple, checkedTrackColor = PurpleLight.copy(alpha = 0.4f))
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Forced", color = TextSec, fontSize = 11.sp)
+                        Text(stringResource(R.string.label_forced), color = TextSec, fontSize = 11.sp)
                         Switch(
                             checked = track.isForced,
                             onCheckedChange = { onUpdate(track.copy(isForced = it)) },
                             colors = SwitchDefaults.colors(checkedThumbColor = Amber, checkedTrackColor = Amber.copy(alpha = 0.4f))
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("HI", color = TextSec, fontSize = 11.sp)
+                        Text(stringResource(R.string.label_hi), color = TextSec, fontSize = 11.sp)
                         Switch(
                             checked = track.isHearingImpaired,
                             onCheckedChange = { onUpdate(track.copy(isHearingImpaired = it)) },
                             colors = SwitchDefaults.colors(checkedThumbColor = Blue, checkedTrackColor = Blue.copy(alpha = 0.4f))
                         )
                         Spacer(Modifier.weight(1f))
-                        Text("Aktif", color = TextSec, fontSize = 11.sp)
+                        Text(stringResource(R.string.label_active), color = TextSec, fontSize = 11.sp)
                         Switch(
                             checked = track.isEnabled,
                             onCheckedChange = { onUpdate(track.copy(isEnabled = it)) },
@@ -347,6 +386,11 @@ fun SubtitleTrackCard(
     }
 }
 
+@Composable
 private fun channelLabel(channels: Int): String = when (channels) {
-    1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> "${channels}ch"
+    1 -> stringResource(R.string.channel_mono)
+    2 -> stringResource(R.string.channel_stereo)
+    6 -> stringResource(R.string.channel_51)
+    8 -> stringResource(R.string.channel_71)
+    else -> stringResource(R.string.channel_generic, channels)
 }

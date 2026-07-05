@@ -12,9 +12,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.muxmaster.R
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.theme.*
 
@@ -61,7 +63,7 @@ fun VideoCard(
                     Icon(Icons.Filled.Movie, contentDescription = null, tint = TextMuted, modifier = Modifier.size(28.dp))
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        if (isLoading) loadingMessage.ifBlank { "Video analiz ediliyor..." } else "Henüz video seçilmedi",
+                        if (isLoading) loadingMessage.ifBlank { stringResource(R.string.video_analyzing) } else stringResource(R.string.video_none_selected),
                         color = TextSec,
                         modifier = Modifier.weight(1f)
                     )
@@ -78,7 +80,7 @@ fun VideoCard(
                 ) {
                     Icon(Icons.Filled.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("VİDEO SEÇ (MKV / MP4 / AVI)")
+                    Text(stringResource(R.string.video_pick_button))
                 }
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -96,7 +98,7 @@ fun VideoCard(
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Purple)
                     } else {
                         IconButton(onClick = onClear, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Filled.Close, contentDescription = "Kaldır", tint = TextSec)
+                            Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.video_remove_desc), tint = TextSec)
                         }
                     }
                 }

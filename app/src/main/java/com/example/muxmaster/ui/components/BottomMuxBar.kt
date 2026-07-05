@@ -19,9 +19,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.muxmaster.R
 import com.example.muxmaster.ui.theme.*
 
 @Composable
@@ -53,12 +55,12 @@ fun BottomMuxBar(
                 Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    outputFolderUri?.lastPathSegment ?: "Çıktı klasörü seçilmedi",
+                    outputFolderUri?.lastPathSegment ?: stringResource(R.string.output_folder_none),
                     color = if (outputFolderUri != null) TextPrimary else TextMuted,
                     fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = onPickFolder, enabled = !isMuxing) {
-                    Text(if (outputFolderUri == null) "SEÇ" else "DEĞİŞTİR", color = PurpleLight, fontSize = 12.sp)
+                    Text(if (outputFolderUri == null) stringResource(R.string.action_select) else stringResource(R.string.action_change), color = PurpleLight, fontSize = 12.sp)
                 }
             }
 
@@ -67,7 +69,7 @@ fun BottomMuxBar(
             OutlinedTextField(
                 value = outputFileName,
                 onValueChange = onFileNameChange,
-                label = { Text("Çıktı dosya adı", fontSize = 11.sp) },
+                label = { Text(stringResource(R.string.output_filename_label), fontSize = 11.sp) },
                 singleLine = true,
                 enabled = !isMuxing,
                 textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
@@ -89,7 +91,7 @@ fun BottomMuxBar(
                             color = Purple, trackColor = SurfaceHigh
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("%$muxProgress", color = TextSec, fontSize = 12.sp)
+                        Text(stringResource(R.string.progress_percent, muxProgress), color = TextSec, fontSize = 12.sp)
                     }
                 }
             }
@@ -111,7 +113,7 @@ fun BottomMuxBar(
                         Spacer(Modifier.width(8.dp))
                         Text(resultMessage, color = fg, fontSize = 13.sp, modifier = Modifier.weight(1f))
                         IconButton(onClick = onDismissResult, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Filled.Close, "Kapat", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+                            Icon(Icons.Filled.Close, stringResource(R.string.action_close), tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
                         }
                     }
                 }
@@ -132,7 +134,7 @@ fun BottomMuxBar(
                     ) {
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = PurpleLight)
                         Spacer(Modifier.width(10.dp))
-                        Text("İşleniyor... %$muxProgress", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        Text(stringResource(R.string.muxing_progress, muxProgress), fontWeight = FontWeight.SemiBold, color = TextPrimary)
                     }
                     // İptal (X) butonu
                     IconButton(
@@ -142,7 +144,7 @@ fun BottomMuxBar(
                             .clip(RoundedCornerShape(12.dp))
                             .background(Red.copy(alpha = 0.15f))
                     ) {
-                        Icon(Icons.Filled.Close, "İptal et", tint = Red, modifier = Modifier.size(22.dp))
+                        Icon(Icons.Filled.Close, stringResource(R.string.cancel_desc), tint = Red, modifier = Modifier.size(22.dp))
                     }
                 } else {
                     Button(
@@ -154,7 +156,7 @@ fun BottomMuxBar(
                     ) {
                         Icon(Icons.Filled.PlayArrow, null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("START MUXING", fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.start_muxing_button), fontWeight = FontWeight.Bold)
                     }
                 }
             }
