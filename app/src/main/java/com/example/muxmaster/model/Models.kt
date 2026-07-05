@@ -40,7 +40,11 @@ data class AudioTrackItem(
     val title: String = "",
     val delayMs: Long = 0L,
     val isDefault: Boolean = false,
-    val isEnabled: Boolean = true
+    val isEnabled: Boolean = true,
+
+    // Ses yükseltme (dB). 0f = değişiklik yok. Muxlama sırasında bu track
+    // için ffmpeg "volume" filtresi uygulanır (bkz. MuxViewModel).
+    val gainDb: Float = 0f
 )
 
 /** Tek bir altyazı track'i. Alan anlamları AudioTrackItem ile aynı mantıkta. */
