@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
 import com.example.muxmaster.ui.screens.ConverterScreen
 import com.example.muxmaster.ui.screens.MuxScreen
+import com.example.muxmaster.ui.screens.SettingsScreen
 import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.viewmodel.ConverterViewModel
 import com.example.muxmaster.viewmodel.MuxViewModel
@@ -27,6 +28,7 @@ class MainActivity : ComponentActivity() {
     private val converterViewModel: ConverterViewModel by viewModels()
 
     // Compose dışından (onNewIntent) hangi ekranda olduğumuzu değiştirebilmek için.
+    // 0 = Muxlayıcı, 1 = Ses Dönüştürücü, 2 = Ayarlar
     private var screenState: MutableState<Int>? = null
 
     private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -49,6 +51,14 @@ class MainActivity : ComponentActivity() {
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
     }
+    // Ayarlar ekranındaki "Varsayılan Çıktı Klasörü" seçicisi: seçilen klasör
+    // hem her iki ViewModel'in o anki oturumuna hem de kalıcı varsayılana yazılır.
+    private val pickDefaultOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            muxViewModel.setOutputFolder(uri)
+            converterViewModel.setOutputFolder(uri)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,17 +75,23 @@ class MainActivity : ComponentActivity() {
                 when (screen) {
                     0 -> MuxScreen(
                         viewModel = muxViewModel,
-                        onPickVideo = { pickVideoLauncher.launch(arrayOf("video/*")) },
+                        onPickVideo = { pickVideoLauncher.launch(arrayOf("video/*", "*/*")) },
                         onPickAudio = { pickMuxAudioLauncher.launch(arrayOf("audio/*", "video/*", "*/*")) },
                         onPickSubtitle = { pickSubtitleLauncher.launch(arrayOf("text/*", "application/x-subrip", "*/*")) },
                         onPickOutputFolder = { pickMuxOutputFolderLauncher.launch(null) },
-                        onNavigateToConverter = { screen = 1 }
+                        onNavigateToConverter = { screen = 1 },
+                        onNavigateToSettings = { screen = 2 }
                     )
-                    else -> ConverterScreen(
+                    1 -> ConverterScreen(
                         viewModel = converterViewModel,
                         onPickAudio = { pickConverterAudioLauncher.launch(arrayOf("audio/*", "video/*", "*/*")) },
                         onPickOutputFolder = { pickConverterOutputFolderLauncher.launch(null) },
                         onNavigateToMux = { screen = 0 }
+                    )
+                    else -> SettingsScreen(
+                        outputFolderUri = muxViewModel.outputFolderUri,
+                        onPickOutputFolder = { pickDefaultOutputFolderLauncher.launch(null) },
+                        onNavigateBack = { screen = 0 }
                     )
                 }
             }
