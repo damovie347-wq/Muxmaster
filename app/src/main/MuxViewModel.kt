@@ -61,14 +61,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     var isSuccess by mutableStateOf(false)
         private set
 
-    // Sesler/Altyazılar sekmesi içindeki kartların açık/kapalı durumu.
-    // Bilerek ViewModel'de tutuluyor: MuxScreen ↔ ConverterScreen arasında
-    // gidip gelince (composable tamamen unmount olduğunda) bu state artık
-    // KAYBOLMUYOR, çünkü ViewModel Activity ömrü boyunca hayatta kalıyor.
     val expandedAudioIds = mutableStateMapOf<Int, Boolean>()
     val expandedSubtitleIds = mutableStateMapOf<Int, Boolean>()
 
-    // Tek bir track'i dışa aktarma (export) durumu.
     var isExporting by mutableStateOf(false)
         private set
     var exportMessage by mutableStateOf<String?>(null)
@@ -79,7 +74,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     private var muxJob: Job? = null
 
     init {
-        // Ayarlar'da seçilmiş varsayılan çıktı klasörü varsa otomatik yükle.
         prefs.defaultOutputFolder?.let { outputFolderUri = it }
     }
 
@@ -206,12 +200,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         outputFolderUri = uri
         try { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         catch (_: SecurityException) {}
-        // Manuel seçilen klasör aynı zamanda yeni varsayılan klasör olur.
         prefs.defaultOutputFolder = uri
     }
     fun updateOutputFileName(name: String) { outputFileName = name }
-
-    // ───────────────────────── DIŞA AKTARMA (EXPORT) ─────────────────────────
 
     fun exportAudioTrack(track: AudioTrackItem) {
         val folder = outputFolderUri
@@ -326,8 +317,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun sanitizeFileName(name: String): String =
         name.trim().ifBlank { "track" }.map { c -> if (c in "\\/:*?\"<>|") '_' else c }.joinToString("")
-
-    // ───────────────────────────── MUXLAMA ─────────────────────────────
 
     fun startMux() {
         val video = videoFile
@@ -474,9 +463,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         args += listOf("-c:v","copy")
         if (hasOffset) args += listOf("-avoid_negative_ts","make_zero")
 
-        // Ses yükseltme (gainDb) uygulanan track'ler artık "copy" DEĞİL, yeniden
-        // encode edilmek zorunda (filtre ancak decode edilmiş sinyale uygulanabilir).
-        // Gain'i olmayan track'ler eskisi gibi lossless "copy" kalır.
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
             if (hasGain) {
