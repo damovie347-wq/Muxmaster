@@ -18,10 +18,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.muxmaster.R
 import com.example.muxmaster.viewmodel.ConvertQueueItem
 import com.example.muxmaster.viewmodel.ConvertStatus
 import com.example.muxmaster.viewmodel.ConverterViewModel
@@ -42,10 +44,10 @@ fun ConverterScreen(
         containerColor = BgDark,
         topBar = {
             TopAppBar(
-                title = { Text("Ses Dönüştürücü", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                title = { Text(stringResource(R.string.converter_title), fontWeight = FontWeight.Bold, color = TextPrimary) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateToMux) {
-                        Icon(Icons.Filled.ArrowBack, "Muxlayıcıya dön", tint = TextSec)
+                        Icon(Icons.Filled.ArrowBack, stringResource(R.string.nav_back_to_mux_desc), tint = TextSec)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark)
@@ -62,11 +64,11 @@ fun ConverterScreen(
 
             // ── 1) KAYNAK DOSYALAR (çoklu) ────────────────────────────────────
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                SectionTitle("Kaynak Ses Dosyaları" + if (viewModel.queue.isNotEmpty()) " (${viewModel.queue.size})" else "")
+                SectionTitle(stringResource(R.string.source_files_title) + if (viewModel.queue.isNotEmpty()) " (${viewModel.queue.size})" else "")
                 Spacer(Modifier.weight(1f))
                 if (viewModel.queue.isNotEmpty() && !viewModel.isConverting) {
                     TextButton(onClick = viewModel::clearQueue, contentPadding = PaddingValues(0.dp)) {
-                        Text("TÜMÜNÜ TEMİZLE", color = TextSec, fontSize = 11.sp)
+                        Text(stringResource(R.string.clear_all), color = TextSec, fontSize = 11.sp)
                     }
                 }
             }
@@ -82,7 +84,7 @@ fun ConverterScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.MusicNote, null, tint = TextMuted, modifier = Modifier.size(28.dp))
                             Spacer(Modifier.width(10.dp))
-                            Text("Henüz dosya seçilmedi", color = TextSec, modifier = Modifier.weight(1f))
+                            Text(stringResource(R.string.no_file_selected), color = TextSec, modifier = Modifier.weight(1f))
                         }
                         Spacer(Modifier.height(12.dp))
                     } else {
@@ -112,7 +114,7 @@ fun ConverterScreen(
                     ) {
                         Icon(Icons.Filled.FileOpen, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text(if (viewModel.queue.isEmpty()) "SES DOSYALARI SEÇ (çoklu seçilebilir)" else "DAHA FAZLA DOSYA EKLE")
+                        Text(if (viewModel.queue.isEmpty()) stringResource(R.string.pick_audio_multi) else stringResource(R.string.add_more_files))
                     }
                 }
             }
@@ -120,7 +122,7 @@ fun ConverterScreen(
             Spacer(Modifier.height(20.dp))
 
             // ── 2) HEDEF FORMAT ───────────────────────────────────────────────
-            SectionTitle("Hedef Format")
+            SectionTitle(stringResource(R.string.target_format_title))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutputFormat.entries.forEach { fmt ->
                     val selected = viewModel.outputFormat == fmt
@@ -141,7 +143,7 @@ fun ConverterScreen(
             Spacer(Modifier.height(20.dp))
 
             // ── 3) HEDEF BİTRATE ──────────────────────────────────────────────
-            SectionTitle("Hedef Bitrate (${viewModel.outputFormat.label})")
+            SectionTitle(stringResource(R.string.target_bitrate_title, viewModel.outputFormat.label))
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 BITRATE_PRESETS.forEach { preset ->
@@ -165,11 +167,11 @@ fun ConverterScreen(
             OutlinedTextField(
                 value = viewModel.bitrateKbpsText,
                 onValueChange = viewModel::updateBitrateText,
-                label = { Text("Özel bitrate (kbps)", fontSize = 11.sp) },
+                label = { Text(stringResource(R.string.custom_bitrate_label), fontSize = 11.sp) },
                 singleLine = true,
                 enabled = !viewModel.isConverting,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                suffix = { Text("kbps", fontSize = 12.sp, color = TextMuted) },
+                suffix = { Text(stringResource(R.string.kbps_suffix), fontSize = 12.sp, color = TextMuted) },
                 modifier = Modifier.fillMaxWidth(),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Purple, unfocusedBorderColor = Outline,
@@ -179,19 +181,19 @@ fun ConverterScreen(
 
             val parsedBr = viewModel.bitrateKbpsText.toIntOrNull()
             val brHint = when {
-                parsedBr == null || parsedBr < 6 -> "⚠ Geçersiz (min. 6 kbps)"
-                parsedBr < 48  -> "Çok düşük — sadece konuşma için"
-                parsedBr < 96  -> "Düşük kalite müzik"
-                parsedBr <= 128 -> "İyi kalite — önerilen"
-                parsedBr <= 192 -> "Yüksek kalite"
-                else -> "Çok yüksek — dosya büyük olur"
+                parsedBr == null || parsedBr < 6 -> stringResource(R.string.bitrate_invalid)
+                parsedBr < 48  -> stringResource(R.string.bitrate_speech_only)
+                parsedBr < 96  -> stringResource(R.string.bitrate_low_music)
+                parsedBr <= 128 -> stringResource(R.string.bitrate_good)
+                parsedBr <= 192 -> stringResource(R.string.bitrate_high)
+                else -> stringResource(R.string.bitrate_too_high)
             }
             Text(brHint, color = if (parsedBr != null && parsedBr >= 6) TextSec else Red, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
 
             Spacer(Modifier.height(20.dp))
 
             // ── 4) ÇIKTI KLASÖRÜ ──────────────────────────────────────────────
-            SectionTitle("Çıktı Klasörü")
+            SectionTitle(stringResource(R.string.output_folder_title))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
@@ -202,16 +204,16 @@ fun ConverterScreen(
                 Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    viewModel.outputFolderUri?.lastPathSegment ?: "Çıktı klasörü seçilmedi",
+                    viewModel.outputFolderUri?.lastPathSegment ?: stringResource(R.string.output_folder_none),
                     color = if (viewModel.outputFolderUri != null) TextPrimary else TextMuted,
                     fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = onPickOutputFolder, enabled = !viewModel.isConverting) {
-                    Text(if (viewModel.outputFolderUri == null) "SEÇ" else "DEĞİŞTİR", color = PurpleLight, fontSize = 12.sp)
+                    Text(if (viewModel.outputFolderUri == null) stringResource(R.string.action_select) else stringResource(R.string.action_change), color = PurpleLight, fontSize = 12.sp)
                 }
             }
             Text(
-                "Her dosya, orijinal adı + seçili formatın uzantısıyla bu klasöre kaydedilir.",
+                stringResource(R.string.output_folder_hint),
                 color = TextMuted, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp)
             )
 
@@ -233,7 +235,7 @@ fun ConverterScreen(
                         Spacer(Modifier.width(8.dp))
                         Text(msg, color = fg, fontSize = 13.sp, modifier = Modifier.weight(1f))
                         IconButton(onClick = { if (viewModel.isSuccess) viewModel.dismissAndReset() else viewModel.clearResult() }, modifier = Modifier.size(28.dp)) {
-                            Icon(Icons.Filled.Close, "Kapat", tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+                            Icon(Icons.Filled.Close, stringResource(R.string.action_close), tint = fg.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
                         }
                     }
                     Spacer(Modifier.height(12.dp))
@@ -250,11 +252,11 @@ fun ConverterScreen(
                             color = Purple, trackColor = SurfaceHigh
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("%${viewModel.convertProgress}", color = TextSec, fontSize = 12.sp)
+                        Text(stringResource(R.string.progress_percent, viewModel.convertProgress), color = TextSec, fontSize = 12.sp)
                     }
                     if (viewModel.currentFileName.isNotBlank()) {
                         Text(
-                            "İşleniyor: ${viewModel.currentFileName}",
+                            stringResource(R.string.converting_file, viewModel.currentFileName),
                             color = TextMuted, fontSize = 11.sp, maxLines = 1,
                             modifier = Modifier.padding(top = 4.dp)
                         )
@@ -269,13 +271,13 @@ fun ConverterScreen(
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = PurpleLight)
                             Spacer(Modifier.width(10.dp))
-                            Text("Dönüştürülüyor... %${viewModel.convertProgress}", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                            Text(stringResource(R.string.converting_label, viewModel.convertProgress), fontWeight = FontWeight.SemiBold, color = TextPrimary)
                         }
                         IconButton(
                             onClick = viewModel::cancelConvert,
                             modifier = Modifier.size(50.dp).clip(RoundedCornerShape(12.dp)).background(Red.copy(alpha = 0.15f))
                         ) {
-                            Icon(Icons.Filled.Close, "İptal", tint = Red, modifier = Modifier.size(22.dp))
+                            Icon(Icons.Filled.Close, stringResource(R.string.cancel_desc), tint = Red, modifier = Modifier.size(22.dp))
                         }
                     }
                 }
@@ -290,8 +292,12 @@ fun ConverterScreen(
                 ) {
                     Icon(Icons.Filled.Autorenew, null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    val label = if (pendingCount > 1) "$pendingCount DOSYAYI" else "DOSYAYI"
-                    Text("$label ${viewModel.outputFormat.label.uppercase()} FORMATINA DÖNÜŞTÜR", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    val label = if (pendingCount > 1) {
+                        stringResource(R.string.convert_button_multi, pendingCount, viewModel.outputFormat.label.uppercase())
+                    } else {
+                        stringResource(R.string.convert_button_single, viewModel.outputFormat.label.uppercase())
+                    }
+                    Text(label, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
 
@@ -321,16 +327,16 @@ private fun QueueItemRow(item: ConvertQueueItem, onRemove: () -> Unit, removeEna
         Column(Modifier.weight(1f)) {
             Text(item.displayName, color = TextPrimary, fontSize = 13.sp, maxLines = 1, fontWeight = FontWeight.Medium)
             val subtitle = when (item.status) {
-                ConvertStatus.PENDING -> "${item.sourceCodec} · ${channelLabel(item.sourceChannels)} · %.1f MB".format(item.fileSizeMb)
-                ConvertStatus.CONVERTING -> "Dönüştürülüyor... %${item.progress}"
-                ConvertStatus.DONE -> "Tamamlandı — %.1f MB".format(item.outputSizeMb ?: 0f)
-                ConvertStatus.ERROR -> item.errorMessage ?: "Hata"
+                ConvertStatus.PENDING -> stringResource(R.string.queue_item_subtitle, item.sourceCodec, channelLabel(item.sourceChannels), item.fileSizeMb)
+                ConvertStatus.CONVERTING -> stringResource(R.string.converting_label, item.progress)
+                ConvertStatus.DONE -> stringResource(R.string.done_label, item.outputSizeMb ?: 0f)
+                ConvertStatus.ERROR -> item.errorMessage ?: stringResource(R.string.err_ffmpeg_code, "?")
             }
             Text(subtitle, color = if (item.status == ConvertStatus.ERROR) Red else TextSec, fontSize = 11.sp, maxLines = 1)
         }
         if (removeEnabled && item.status != ConvertStatus.CONVERTING) {
             IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Filled.Close, "Kaldır", tint = TextSec, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.Close, stringResource(R.string.delete_desc), tint = TextSec, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -341,4 +347,11 @@ private fun SectionTitle(text: String) {
     Text(text, color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 8.dp))
 }
 
-private fun channelLabel(ch: Int) = when(ch) { 1->"Mono"; 2->"Stereo"; 6->"5.1"; 8->"7.1"; else->"${ch}ch" }
+@Composable
+private fun channelLabel(ch: Int): String = when (ch) {
+    1 -> stringResource(R.string.channel_mono)
+    2 -> stringResource(R.string.channel_stereo)
+    6 -> stringResource(R.string.channel_51)
+    8 -> stringResource(R.string.channel_71)
+    else -> stringResource(R.string.channel_generic, ch)
+}
