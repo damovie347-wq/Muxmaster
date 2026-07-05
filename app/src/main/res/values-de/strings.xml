@@ -1,1 +1,112 @@
+<resources>
+    <string name="app_name">MuxMaster</string>
 
+    <string name="action_select">AUSWÄHLEN</string>
+    <string name="action_change">ÄNDERN</string>
+    <string name="action_close">Schließen</string>
+    <string name="action_export">Exportieren</string>
+
+    <string name="nav_converter_desc">Audio-Konverter</string>
+    <string name="nav_settings_desc">Einstellungen</string>
+    <string name="tab_audio">Audio (%1$d)</string>
+    <string name="tab_subtitle">Untertitel (%1$d)</string>
+    <string name="add_audio_button">Audiodatei hinzufügen</string>
+    <string name="add_subtitle_button">Untertiteldatei hinzufügen</string>
+    <string name="empty_audio_hint">Dieses Video hat keine Audiospur. Mit + hinzufügen.</string>
+    <string name="empty_subtitle_hint">Dieses Video hat keine Untertitel. Mit + hinzufügen.</string>
+
+    <string name="video_analyzing">Video wird analysiert...</string>
+    <string name="video_none_selected">Noch kein Video ausgewählt</string>
+    <string name="video_pick_button">VIDEO AUSWÄHLEN (MKV / MP4 / AVI)</string>
+    <string name="video_remove_desc">Entfernen</string>
+
+    <string name="output_folder_none">Kein Ausgabeordner ausgewählt</string>
+    <string name="output_filename_label">Ausgabedateiname</string>
+    <string name="muxing_progress">Verarbeitung... %%%1$d</string>
+    <string name="progress_percent">%%%1$d</string>
+    <string name="cancel_desc">Abbrechen</string>
+    <string name="start_muxing_button">MUXEN STARTEN</string>
+
+    <string name="source_original">ORIGINAL</string>
+    <string name="source_new">NEU</string>
+    <string name="expand_desc">Erweitern</string>
+    <string name="collapse_desc">Einklappen</string>
+    <string name="move_up_desc">Nach oben</string>
+    <string name="move_down_desc">Nach unten</string>
+    <string name="delete_desc">Löschen</string>
+    <string name="delay_label">Delay</string>
+    <string name="label_default">Standard</string>
+    <string name="label_active">Aktiv</string>
+    <string name="label_forced">Erzwungen</string>
+    <string name="label_hi">HI</string>
+    <string name="audio_track_fallback_title">Audiospur #%1$d</string>
+    <string name="subtitle_track_fallback_title">Untertitel #%1$d</string>
+    <string name="gain_label">Lautstärke-Verstärkung</string>
+
+    <string name="converter_title">Audio-Konverter</string>
+    <string name="nav_back_to_mux_desc">Zurück zum Muxer</string>
+    <string name="source_files_title">Quell-Audiodateien</string>
+    <string name="clear_all">ALLE LÖSCHEN</string>
+    <string name="no_file_selected">Noch keine Datei ausgewählt</string>
+    <string name="pick_audio_multi">AUDIODATEIEN AUSWÄHLEN (Mehrfachauswahl)</string>
+    <string name="add_more_files">WEITERE DATEIEN HINZUFÜGEN</string>
+    <string name="target_format_title">Zielformat</string>
+    <string name="target_bitrate_title">Ziel-Bitrate (%1$s)</string>
+    <string name="custom_bitrate_label">Eigene Bitrate (kbps)</string>
+    <string name="kbps_suffix">kbps</string>
+    <string name="bitrate_invalid">⚠ Ungültig (min. 6 kbps)</string>
+    <string name="bitrate_speech_only">Sehr niedrig — nur für Sprache</string>
+    <string name="bitrate_low_music">Niedrige Musikqualität</string>
+    <string name="bitrate_good">Gute Qualität — empfohlen</string>
+    <string name="bitrate_high">Hohe Qualität</string>
+    <string name="bitrate_too_high">Sehr hoch — Datei wird groß</string>
+    <string name="output_folder_title">Ausgabeordner</string>
+    <string name="output_folder_hint">Jede Datei wird mit Originalname und der Endung des gewählten Formats in diesem Ordner gespeichert.</string>
+    <string name="converting_label">Konvertierung... %%%1$d</string>
+    <string name="converting_file">Verarbeitung: %1$s</string>
+    <string name="convert_button_single">DATEI ZU %1$s KONVERTIEREN</string>
+    <string name="convert_button_multi">%1$d DATEIEN ZU %2$s KONVERTIEREN</string>
+    <string name="done_label">Fertig — %1$.1f MB</string>
+    <string name="queue_item_subtitle">%1$s · %2$s · %3$.1f MB</string>
+    <string name="channel_mono">Mono</string>
+    <string name="channel_stereo">Stereo</string>
+    <string name="channel_51">5.1</string>
+    <string name="channel_71">7.1</string>
+    <string name="channel_generic">%1$dch</string>
+
+    <string name="err_no_files_analyzed">Ausgewählte Datei(en) konnten nicht gelesen werden / kein Audiostream gefunden.</string>
+    <string name="err_no_pending_files">Keine Dateien in der Warteschlange.</string>
+    <string name="err_no_output_folder">Kein Ausgabeordner ausgewählt.</string>
+    <string name="err_invalid_bitrate">Gültige Bitrate eingeben (6-512 kbps).</string>
+    <string name="err_ffmpeg_code">FFmpeg-Fehler (Code: %1$s).</string>
+    <string name="err_save_failed">Speichern im Zielordner fehlgeschlagen.</string>
+    <string name="result_convert_success_all">✅ Fertig! %1$d/%2$d Datei(en) zu %3$s konvertiert.</string>
+    <string name="result_convert_partial">⚠ %1$d/%2$d fertig, %3$d Datei(en) fehlgeschlagen.</string>
+    <string name="result_cancelled">Vorgang abgebrochen.</string>
+
+    <string name="err_video_read_failed">Video konnte nicht gelesen / kopiert werden.</string>
+    <string name="err_audio_extract_failed">Audiospur konnte nicht extrahiert werden (#%1$d)</string>
+    <string name="err_sub_extract_failed">Untertitel konnte nicht extrahiert werden (#%1$d)</string>
+    <string name="err_audio_file_missing">Audiodatei nicht gefunden: %1$s</string>
+    <string name="err_sub_file_missing">Untertiteldatei nicht gefunden: %1$s</string>
+    <string name="err_audio_read_failed">Audiodatei konnte nicht gelesen werden: %1$s</string>
+    <string name="err_sub_read_failed">Untertitel konnte nicht gelesen werden: %1$s</string>
+    <string name="err_no_video">Zuerst eine Videodatei auswählen.</string>
+    <string name="err_output_zero_bytes">Fehler: Ausgabedatei wurde nicht erstellt (0 Byte).</string>
+    <string name="err_save_to_folder_failed">Fehler: Datei konnte nicht im Zielordner gespeichert werden.</string>
+    <string name="result_mux_success">✅ Fertig! %1$.1f MB</string>
+    <string name="result_mux_cancelled">❌ Vorgang abgebrochen.</string>
+    <string name="export_success">✅ Exportiert: %1$s</string>
+    <string name="export_failed">Export fehlgeschlagen.</string>
+    <string name="export_no_output_folder">Zuerst einen Ausgabeordner auswählen (Einstellungen oder der AUSWÄHLEN-Button unten).</string>
+
+    <string name="settings_title">Einstellungen</string>
+    <string name="settings_nav_back_desc">Zurück</string>
+    <string name="settings_language_title">App-Sprache</string>
+    <string name="settings_language_tr">Türkçe</string>
+    <string name="settings_language_en">English</string>
+    <string name="settings_language_de">Deutsch</string>
+    <string name="settings_output_folder_title">Standard-Ausgabeordner</string>
+    <string name="settings_output_folder_desc">Standardordner für gemuxte Dateien und exportierte Audio-/Untertiteldateien.</string>
+    <string name="settings_output_folder_none">Nicht ausgewählt</string>
+</resources>
