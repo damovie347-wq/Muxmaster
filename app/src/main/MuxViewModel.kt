@@ -429,29 +429,33 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun resolveAudioPlan(track: AudioTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan = withContext(Dispatchers.IO) {
-        if (track.source == TrackSource.EXISTING) {
-            if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
-            val extracted = File(workDir, "extract_audio_${track.id}_${System.currentTimeMillis()}.mkv")
-            val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
-            if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
-            runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
-        } else {
-            if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
-            MapPlan.Separate(track.fileCachePath, track.delayMs)
+    private suspend fun resolveAudioPlan(track: AudioTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
+        return withContext(Dispatchers.IO) {
+            if (track.source == TrackSource.EXISTING) {
+                if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
+                val extracted = File(workDir, "extract_audio_${track.id}_${System.currentTimeMillis()}.mkv")
+                val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
+                if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
+                runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
+            } else {
+                if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
+                MapPlan.Separate(track.fileCachePath, track.delayMs)
+            }
         }
     }
 
-    private suspend fun resolveSubtitlePlan(track: SubtitleTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan = withContext(Dispatchers.IO) {
-        if (track.source == TrackSource.EXISTING) {
-            if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
-            val extracted = File(workDir, "extract_sub_${track.id}_${System.currentTimeMillis()}.mkv")
-            val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
-            if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_extract_failed, track.existingStreamIndex))
-            runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
-        } else {
-            if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_file_missing, track.fileDisplayName))
-            MapPlan.Separate(track.fileCachePath, track.delayMs)
+    private suspend fun resolveSubtitlePlan(track: SubtitleTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
+        return withContext(Dispatchers.IO) {
+            if (track.source == TrackSource.EXISTING) {
+                if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
+                val extracted = File(workDir, "extract_sub_${track.id}_${System.currentTimeMillis()}.mkv")
+                val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
+                if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_extract_failed, track.existingStreamIndex))
+                runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
+            } else {
+                if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_file_missing, track.fileDisplayName))
+                MapPlan.Separate(track.fileCachePath, track.delayMs)
+            }
         }
     }
 
