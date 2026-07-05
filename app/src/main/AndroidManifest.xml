@@ -19,6 +19,7 @@
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.MuxMaster"
+        android:localeConfig="@xml/locales_config"
         tools:targetApi="34">
 
         <activity
