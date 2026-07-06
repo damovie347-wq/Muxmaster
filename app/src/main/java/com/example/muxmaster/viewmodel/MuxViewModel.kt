@@ -221,13 +221,15 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     )
                     if (track.source == TrackSource.EXISTING) {
                         val video = videoFile ?: return@runCatching null
+                        val (ext, mime) = audioExportContainerFor(track.existingCodec)
                         val workDir = File(app.cacheDir, "mux_work").also { it.mkdirs() }
-                        val tmp = File(workDir, "export_audio_${track.id}_${System.currentTimeMillis()}.mka")
+                        val tmp = File(workDir, "export_audio_${track.id}_${System.currentTimeMillis()}.$ext")
                         val s = FFmpegKit.executeWithArguments(arrayOf(
-                            "-y", "-i", video.cachePath, "-map", "0:${track.existingStreamIndex}", "-c", "copy", tmp.absolutePath
+                            "-y", "-i", video.cachePath, "-map", "0:${track.existingStreamIndex}",
+                            "-c", "copy", "-avoid_negative_ts", "make_zero", tmp.absolutePath
                         ))
                         val good = ReturnCode.isSuccess(s.returnCode) && tmp.exists() && tmp.length() > 0L
-                        val result = if (good) copyFileToTree(tmp, folder, "$baseName.mka", "audio/x-matroska") else null
+                        val result = if (good) copyFileToTree(tmp, folder, "$baseName.$ext", mime) else null
                         runCatching { tmp.delete() }
                         result
                     } else {
@@ -307,6 +309,20 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             outDoc.name ?: fileName
         } catch (_: Exception) { null }
     }
+
+    private fun audioExportContainerFor(codec: String): Pair<String, String> = when (codec.lowercase()) {
+        "aac" -> "m4a" to "audio/mp4"
+        "mp3" -> "mp3" to "audio/mpeg"
+        "ac3" -> "ac3" to "audio/ac3"
+        "eac3" -> "eac3" to "audio/eac3"
+        "dts" -> "dts" to "audio/vnd.dts"
+        "opus" -> "opus" to "audio/ogg"
+        "vorbis" -> "ogg" to "audio/ogg"
+        "flac" -> "flac" to "audio/flac"
+        "pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_u8" -> "wav" to "audio/wav"
+        else -> "mka" to "audio/x-matroska"
+}
+    
 
     private fun copyUriToTree(src: Uri, folder: Uri, fileName: String): String? {
         return try {
