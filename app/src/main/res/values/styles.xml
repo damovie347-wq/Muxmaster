@@ -1,7 +1,7 @@
 <resources>
     <!-- Compose kendi Material3 temasını çiziyor; bu sadece Activity açılırken
          splash flicker'ı önlemek için kullanılan minimal bir native tema. -->
-    <style name="Theme.MuxMaster" parent="android:Theme.Material.NoActionBar">
+    <style name="Theme.MuxMaster" parent="Theme.AppCompat.NoActionBar">
         <item name="android:statusBarColor">#0F0F10</item>
         <item name="android:navigationBarColor">#0F0F10</item>
         <item name="android:windowBackground">#0F0F10</item>
