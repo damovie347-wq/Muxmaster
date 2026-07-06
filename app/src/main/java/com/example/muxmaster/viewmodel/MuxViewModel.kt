@@ -61,14 +61,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     var isSuccess by mutableStateOf(false)
         private set
 
-    // Sesler/Altyazılar sekmesi içindeki kartların açık/kapalı durumu.
-    // Bilerek ViewModel'de tutuluyor: MuxScreen ↔ ConverterScreen arasında
-    // gidip gelince (composable tamamen unmount olduğunda) bu state artık
-    // KAYBOLMUYOR, çünkü ViewModel Activity ömrü boyunca hayatta kalıyor.
     val expandedAudioIds = mutableStateMapOf<Int, Boolean>()
     val expandedSubtitleIds = mutableStateMapOf<Int, Boolean>()
 
-    // Tek bir track'i dışa aktarma (export) durumu.
     var isExporting by mutableStateOf(false)
         private set
     var exportMessage by mutableStateOf<String?>(null)
@@ -79,7 +74,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     private var muxJob: Job? = null
 
     init {
-        // Ayarlar'da seçilmiş varsayılan çıktı klasörü varsa otomatik yükle.
         prefs.defaultOutputFolder?.let { outputFolderUri = it }
     }
 
@@ -206,12 +200,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         outputFolderUri = uri
         try { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         catch (_: SecurityException) {}
-        // Manuel seçilen klasör aynı zamanda yeni varsayılan klasör olur.
         prefs.defaultOutputFolder = uri
     }
     fun updateOutputFileName(name: String) { outputFileName = name }
-
-    // ───────────────────────── DIŞA AKTARMA (EXPORT) ─────────────────────────
 
     fun exportAudioTrack(track: AudioTrackItem) {
         val folder = outputFolderUri
@@ -305,29 +296,35 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun copyFileToTree(src: File, folder: Uri, fileName: String, mime: String): String? = try {
-        val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
-        val outUri = outDoc?.uri ?: return null
-        app.contentResolver.openOutputStream(outUri)?.use { o -> src.inputStream().use { it.copyTo(o, 8 * 1024 * 1024) } }
-            ?: return null
-        outDoc.name ?: fileName
-    } catch (_: Exception) { null }
+    private fun copyFileToTree(src: File, folder: Uri, fileName: String, mime: String): String? {
+        return try {
+            val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
+            if (outDoc == null) return null
+            val outUri = outDoc.uri
+            val stream = app.contentResolver.openOutputStream(outUri)
+            if (stream == null) return null
+            stream.use { o -> src.inputStream().use { it.copyTo(o, 8 * 1024 * 1024) } }
+            outDoc.name ?: fileName
+        } catch (_: Exception) { null }
+    }
 
-    private fun copyUriToTree(src: Uri, folder: Uri, fileName: String): String? = try {
-        val mime = app.contentResolver.getType(src) ?: "application/octet-stream"
-        val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
-        val outUri = outDoc?.uri ?: return null
-        app.contentResolver.openInputStream(src)?.use { input ->
-            app.contentResolver.openOutputStream(outUri)?.use { output -> input.copyTo(output, 8 * 1024 * 1024) }
-                ?: return null
-        } ?: return null
-        outDoc.name ?: fileName
-    } catch (_: Exception) { null }
+    private fun copyUriToTree(src: Uri, folder: Uri, fileName: String): String? {
+        return try {
+            val mime = app.contentResolver.getType(src) ?: "application/octet-stream"
+            val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
+            if (outDoc == null) return null
+            val outUri = outDoc.uri
+            val input = app.contentResolver.openInputStream(src)
+            if (input == null) return null
+            val output = app.contentResolver.openOutputStream(outUri)
+            if (output == null) { input.close(); return null }
+            input.use { i -> output.use { o -> i.copyTo(o, 8 * 1024 * 1024) } }
+            outDoc.name ?: fileName
+        } catch (_: Exception) { null }
+    }
 
     private fun sanitizeFileName(name: String): String =
         name.trim().ifBlank { "track" }.map { c -> if (c in "\\/:*?\"<>|") '_' else c }.joinToString("")
-
-    // ───────────────────────────── MUXLAMA ─────────────────────────────
 
     fun startMux() {
         val video = videoFile
@@ -429,29 +426,33 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun resolveAudioPlan(track: AudioTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan = withContext(Dispatchers.IO) {
-        if (track.source == TrackSource.EXISTING) {
-            if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
-            val extracted = File(workDir, "extract_audio_${track.id}_${System.currentTimeMillis()}.mkv")
-            val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
-            if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
-            runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
-        } else {
-            if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
-            MapPlan.Separate(track.fileCachePath, track.delayMs)
+    private suspend fun resolveAudioPlan(track: AudioTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
+        return withContext(Dispatchers.IO) {
+            if (track.source == TrackSource.EXISTING) {
+                if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
+                val extracted = File(workDir, "extract_audio_${track.id}_${System.currentTimeMillis()}.mkv")
+                val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
+                if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
+                runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
+            } else {
+                if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
+                MapPlan.Separate(track.fileCachePath, track.delayMs)
+            }
         }
     }
 
-    private suspend fun resolveSubtitlePlan(track: SubtitleTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan = withContext(Dispatchers.IO) {
-        if (track.source == TrackSource.EXISTING) {
-            if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
-            val extracted = File(workDir, "extract_sub_${track.id}_${System.currentTimeMillis()}.mkv")
-            val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
-            if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_extract_failed, track.existingStreamIndex))
-            runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
-        } else {
-            if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_file_missing, track.fileDisplayName))
-            MapPlan.Separate(track.fileCachePath, track.delayMs)
+    private suspend fun resolveSubtitlePlan(track: SubtitleTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
+        return withContext(Dispatchers.IO) {
+            if (track.source == TrackSource.EXISTING) {
+                if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
+                val extracted = File(workDir, "extract_sub_${track.id}_${System.currentTimeMillis()}.mkv")
+                val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
+                if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_extract_failed, track.existingStreamIndex))
+                runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
+            } else {
+                if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_file_missing, track.fileDisplayName))
+                MapPlan.Separate(track.fileCachePath, track.delayMs)
+            }
         }
     }
 
@@ -470,9 +471,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         args += listOf("-c:v","copy")
         if (hasOffset) args += listOf("-avoid_negative_ts","make_zero")
 
-        // Ses yükseltme (gainDb) uygulanan track'ler artık "copy" DEĞİL, yeniden
-        // encode edilmek zorunda (filtre ancak decode edilmiş sinyale uygulanabilir).
-        // Gain'i olmayan track'ler eskisi gibi lossless "copy" kalır.
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
             if (hasGain) {
@@ -522,3 +520,4 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         } catch (_: Exception) { }
     }
 }
+
