@@ -512,3 +512,4 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         } catch (_: Exception) { }
     }
 }
+
