@@ -296,24 +296,32 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun copyFileToTree(src: File, folder: Uri, fileName: String, mime: String): String? = try {
-        val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
-        val outUri = outDoc?.uri ?: return null
-        app.contentResolver.openOutputStream(outUri)?.use { o -> src.inputStream().use { it.copyTo(o, 8 * 1024 * 1024) } }
-            ?: return null
-        outDoc.name ?: fileName
-    } catch (_: Exception) { null }
+    private fun copyFileToTree(src: File, folder: Uri, fileName: String, mime: String): String? {
+        return try {
+            val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
+            if (outDoc == null) return null
+            val outUri = outDoc.uri
+            val stream = app.contentResolver.openOutputStream(outUri)
+            if (stream == null) return null
+            stream.use { o -> src.inputStream().use { it.copyTo(o, 8 * 1024 * 1024) } }
+            outDoc.name ?: fileName
+        } catch (_: Exception) { null }
+    }
 
-    private fun copyUriToTree(src: Uri, folder: Uri, fileName: String): String? = try {
-        val mime = app.contentResolver.getType(src) ?: "application/octet-stream"
-        val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
-        val outUri = outDoc?.uri ?: return null
-        app.contentResolver.openInputStream(src)?.use { input ->
-            app.contentResolver.openOutputStream(outUri)?.use { output -> input.copyTo(output, 8 * 1024 * 1024) }
-                ?: return null
-        } ?: return null
-        outDoc.name ?: fileName
-    } catch (_: Exception) { null }
+    private fun copyUriToTree(src: Uri, folder: Uri, fileName: String): String? {
+        return try {
+            val mime = app.contentResolver.getType(src) ?: "application/octet-stream"
+            val outDoc = DocumentFile.fromTreeUri(app, folder)?.createFile(mime, fileName)
+            if (outDoc == null) return null
+            val outUri = outDoc.uri
+            val input = app.contentResolver.openInputStream(src)
+            if (input == null) return null
+            val output = app.contentResolver.openOutputStream(outUri)
+            if (output == null) { input.close(); return null }
+            input.use { i -> output.use { o -> i.copyTo(o, 8 * 1024 * 1024) } }
+            outDoc.name ?: fileName
+        } catch (_: Exception) { null }
+    }
 
     private fun sanitizeFileName(name: String): String =
         name.trim().ifBlank { "track" }.map { c -> if (c in "\\/:*?\"<>|") '_' else c }.joinToString("")
