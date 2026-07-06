@@ -490,7 +490,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
             if (hasGain) {
-                args += listOf("-filter:a:$i", "volume=${"%.1f".format(t.gainDb)}dB")
+                args += listOf("-filter:a:$i", "volume=${"%.1f".format(java.util.Locale.US, t.gainDb)}dB")
                 args += listOf("-c:a:$i", "aac", "-b:a:$i", "192k")
             } else {
                 args += listOf("-c:a:$i", "copy")
