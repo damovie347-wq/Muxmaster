@@ -289,8 +289,10 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         // Düşük bitrate'lerde bu ilk saniyelerdeki ani geçiş (transient) çok
         // daha belirgin duyulduğu için fade süresi bitrate'e göre ölçekleniyor.
         val fadeDuration = when {
-            bitrate <= 20 -> 0.25
-            bitrate <= 32 -> 0.12
+            bitrate <= 8 -> 3.0
+            bitrate <= 16 -> 2.2
+            bitrate <= 24 -> 1.4
+            bitrate <= 32 -> 0.8
             else -> 0.05
         }
         val audioFilters = "highpass=f=20,afade=t=in:st=0:d=$fadeDuration:curve=tri"
