@@ -22,7 +22,7 @@ import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.viewmodel.ConverterViewModel
 import com.example.muxmaster.viewmodel.MuxViewModel
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
 
     private val muxViewModel: MuxViewModel by viewModels()
     private val converterViewModel: ConverterViewModel by viewModels()
