@@ -204,8 +204,12 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
 
 private const val GAIN_MAX_DB = 15f
 
+private fun dbToBoostPercent(db: Float): Float =
+    (100.0 * Math.pow(10.0, db / 20.0) - 100.0).toFloat()
+
 @Composable
 private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
+    var showPercent by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.gain_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(90.dp))
         Slider(
@@ -215,7 +219,16 @@ private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             colors = SliderDefaults.colors(thumbColor = Amber, activeTrackColor = Amber)
         )
-        Text("+%.1f dB".format(gainDb), color = TextSec, fontSize = 11.sp, modifier = Modifier.width(58.dp))
+        Text(
+            if (showPercent) "+%.0f%%".format(java.util.Locale.US, dbToBoostPercent(gainDb))
+            else "+%.1f dB".format(java.util.Locale.US, gainDb),
+            color = TextSec, fontSize = 11.sp, modifier = Modifier.width(58.dp)
+        )
+        Text(
+            if (showPercent) "%" else "dB",
+            color = Amber, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clickable { showPercent = !showPercent }.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
     }
 }
 
