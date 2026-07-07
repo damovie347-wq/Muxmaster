@@ -30,7 +30,9 @@ import com.example.muxmaster.ui.theme.*
 fun SettingsScreen(
     outputFolderUri: Uri?,
     onPickOutputFolder: () -> Unit,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit
 ) {
     val context = LocalContext.current
     // Şu anda GERÇEKTEN ekranda kullanılan dili (sistem varsayılanına
