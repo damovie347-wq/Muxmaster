@@ -288,14 +288,16 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         // kadar geçen ~1-2sn içinde duyulabilir çıtırtı/pompalama oluşuyordu.
         // Düşük bitrate'lerde bu ilk saniyelerdeki ani geçiş (transient) çok
         // daha belirgin duyulduğu için fade süresi bitrate'e göre ölçekleniyor.
-        val fadeDuration = when {
-            bitrate <= 8 -> 3.0
-            bitrate <= 16 -> 2.2
-            bitrate <= 24 -> 1.4
-            bitrate <= 32 -> 0.8
-            else -> 0.05
+        val (primeMs, crossfadeMs) = when {
+            bitrate <= 8  -> 400 to 40
+            bitrate <= 16 -> 300 to 30
+            bitrate <= 24 -> 220 to 25
+            bitrate <= 32 -> 160 to 20
+            else          -> 100 to 15
         }
-        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=$fadeDuration:curve=tri"
+        val primeSec = primeMs / 1000.0
+        val crossfadeSec = crossfadeMs / 1000.0
+        val audioFilters = "adelay=$primeMs:all=1,afade=t=in:st=$primeSec:d=$crossfadeSec:curve=tri,highpass=f=20"
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
             add("-vn"); add("-map"); add("0:a:0")
