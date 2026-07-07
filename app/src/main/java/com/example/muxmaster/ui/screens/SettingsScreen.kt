@@ -35,8 +35,6 @@ fun SettingsScreen(
     onThemeModeChange: (ThemeMode) -> Unit
 ) {
     val context = LocalContext.current
-    // Şu anda GERÇEKTEN ekranda kullanılan dili (sistem varsayılanına
-    // düşülmüş olsa bile) doğru şekilde yansıtmak için Configuration'dan okunuyor.
     val currentLang = LocalConfiguration.current.locales[0].language
 
     val languages = listOf(
@@ -96,6 +94,47 @@ fun SettingsScreen(
                                     AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags(code))
                                     (context as? Activity)?.recreate()
                                 },
+                                colors = RadioButtonDefaults.colors(selectedColor = Purple, unselectedColor = TextMuted)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(label, color = TextPrimary, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // ── Görünüm ──────────────────────────────────────────────────
+            Text(
+                stringResource(R.string.settings_theme_title),
+                color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Surface),
+                border = BorderStroke(1.dp, Outline),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    val themeOptions = listOf(
+                        ThemeMode.SYSTEM to stringResource(R.string.settings_theme_system),
+                        ThemeMode.LIGHT to stringResource(R.string.settings_theme_light),
+                        ThemeMode.DARK to stringResource(R.string.settings_theme_dark)
+                    )
+                    themeOptions.forEachIndexed { index, (mode, label) ->
+                        if (index > 0) Divider(color = Outline, thickness = 0.5.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onThemeModeChange(mode) }
+                                .padding(horizontal = 14.dp, vertical = 4.dp)
+                        ) {
+                            RadioButton(
+                                selected = themeMode == mode,
+                                onClick = { onThemeModeChange(mode) },
                                 colors = RadioButtonDefaults.colors(selectedColor = Purple, unselectedColor = TextMuted)
                             )
                             Spacer(Modifier.width(4.dp))
