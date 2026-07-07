@@ -115,6 +115,10 @@
     <string name="settings_language_tr">Türkçe</string>
     <string name="settings_language_en">English</string>
     <string name="settings_language_de">Deutsch</string>
+    <string name="settings_theme_title">Görünüm</string>
+    <string name="settings_theme_system">Sistem</string>
+    <string name="settings_theme_light">Açık</string>
+    <string name="settings_theme_dark">Koyu</string>
     <string name="settings_output_folder_title">Varsayılan Çıktı Klasörü</string>
     <string name="settings_output_folder_desc">Muxlanan dosyalar ve dışa aktarılan ses/altyazılar için varsayılan klasör.</string>
     <string name="settings_output_folder_none">Seçilmedi</string>
