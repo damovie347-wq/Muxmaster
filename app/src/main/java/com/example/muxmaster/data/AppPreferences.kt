@@ -15,8 +15,13 @@ class AppPreferences(context: Context) {
             prefs.edit().putString(KEY_OUTPUT_FOLDER, value?.toString()).apply()
         }
 
+    var themeMode: String
+        get() = prefs.getString(KEY_THEME_MODE, "dark") ?: "dark"
+        set(value) { prefs.edit().putString(KEY_THEME_MODE, value).apply() }
+
     companion object {
         private const val PREFS_NAME = "muxmaster_prefs"
         private const val KEY_OUTPUT_FOLDER = "default_output_folder"
+        private const val KEY_THEME_MODE = "theme_mode"
     }
 }
