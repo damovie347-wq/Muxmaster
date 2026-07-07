@@ -1,8 +1,5 @@
 package com.example.muxmaster
 
-import androidx.compose.runtime.mutableStateOf
-import com.example.muxmaster.data.AppPreferences
-import com.example.muxmaster.ui.theme.ThemeMode
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -15,13 +12,16 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
+import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.ui.screens.ConverterScreen
 import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.screens.SettingsScreen
 import com.example.muxmaster.ui.theme.MuxMasterTheme
+import com.example.muxmaster.ui.theme.ThemeMode
 import com.example.muxmaster.viewmodel.ConverterViewModel
 import com.example.muxmaster.viewmodel.MuxViewModel
 
@@ -30,8 +30,6 @@ class MainActivity : AppCompatActivity() {
     private val muxViewModel: MuxViewModel by viewModels()
     private val converterViewModel: ConverterViewModel by viewModels()
 
-    // Compose dışından (onNewIntent) hangi ekranda olduğumuzu değiştirebilmek için.
-    // 0 = Muxlayıcı, 1 = Ses Dönüştürücü, 2 = Ayarlar
     private var screenState: MutableState<Int>? = null
 
     private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -54,8 +52,6 @@ class MainActivity : AppCompatActivity() {
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
     }
-    // Ayarlar ekranındaki "Varsayılan Çıktı Klasörü" seçicisi: seçilen klasör
-    // hem her iki ViewModel'in o anki oturumuna hem de kalıcı varsayılana yazılır.
     private val pickDefaultOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             muxViewModel.setOutputFolder(uri)
@@ -63,16 +59,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val appPrefs by lazy { AppPreferences(applicationContext) }
+
+    private fun ThemeMode.toPrefValue(): String = when (this) {
+        ThemeMode.LIGHT -> "light"; ThemeMode.DARK -> "dark"; ThemeMode.SYSTEM -> "system"
+    }
+    private fun String.toThemeMode(): ThemeMode = when (this) {
+        "light" -> ThemeMode.LIGHT; "system" -> ThemeMode.SYSTEM; else -> ThemeMode.DARK
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MuxMasterTheme {
+            var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
+            MuxMasterTheme(themeMode = themeMode) {
                 val screenHolder = remember { mutableIntStateOf(0) }
                 screenState = screenHolder
                 var screen by screenHolder
 
-                // Soğuk başlangıç: uygulama bir dosya yöneticisinden "Birlikte Aç" /
-                // "Paylaş" ile açıldıysa geleni burada işle.
                 LaunchedEffect(Unit) { handleIncomingIntent(intent) }
 
                 when (screen) {
@@ -94,16 +98,18 @@ class MainActivity : AppCompatActivity() {
                     else -> SettingsScreen(
                         outputFolderUri = muxViewModel.outputFolderUri,
                         onPickOutputFolder = { pickDefaultOutputFolderLauncher.launch(null) },
-                        onNavigateBack = { screen = 0 }
+                        onNavigateBack = { screen = 0 },
+                        themeMode = themeMode,
+                        onThemeModeChange = { mode ->
+                            themeMode = mode
+                            appPrefs.themeMode = mode.toPrefValue()
+                        }
                     )
                 }
             }
         }
     }
 
-    // Uygulama zaten açıkken başka bir dosya yöneticisinden "Birlikte Aç" / "Paylaş"
-    // ile tekrar çağrılırsa (launchMode="singleTask" sayesinde) onCreate değil bu
-    // çağrılır.
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
