@@ -121,7 +121,8 @@ fun SettingsScreen(
                     val themeOptions = listOf(
                         ThemeMode.SYSTEM to stringResource(R.string.settings_theme_system),
                         ThemeMode.LIGHT to stringResource(R.string.settings_theme_light),
-                        ThemeMode.DARK to stringResource(R.string.settings_theme_dark)
+                        ThemeMode.DARK to stringResource(R.string.settings_theme_dark),
+                        ThemeMode.AMOLED to stringResource(R.string.settings_theme_amoled)
                     )
                     themeOptions.forEachIndexed { index, (mode, label) ->
                         if (index > 0) Divider(color = Outline, thickness = 0.5.dp)
