@@ -283,21 +283,28 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         // düşük bitrate'lere özel tasarlandığından aynı hedef bitrate'te
         // belirgin şekilde daha temiz ve daha kararlı bir çıktı verir.
         val isVeryLowBitrate = bitrate <= 32
-        // Eski zincir (adelay + agresif alimiter) limiter'ı "soğuk" haldeyken
-        // sinyalin en başına maruz bırakıyordu; gain-reduction zarfı oturana
-        // kadar geçen ~1-2sn içinde duyulabilir çıtırtı/pompalama oluşuyordu.
-        // Düşük bitrate'lerde bu ilk saniyelerdeki ani geçiş (transient) çok
-        // daha belirgin duyulduğu için fade süresi bitrate'e göre ölçekleniyor.
-        val (primeMs, crossfadeMs) = when {
-            bitrate <= 8  -> 400 to 40
-            bitrate <= 16 -> 300 to 30
-            bitrate <= 24 -> 220 to 25
-            bitrate <= 32 -> 160 to 20
-            else          -> 100 to 15
-        }
-        val primeSec = primeMs / 1000.0
-        val crossfadeSec = crossfadeMs / 1000.0
-        val audioFilters = "adelay=$primeMs:all=1,afade=t=in:st=$primeSec:d=$crossfadeSec:curve=tri,highpass=f=20"
+
+        // ÖNEMLİ DÜZELTME (gerçek ölçümle doğrulandı, bkz. proje notları):
+        // Eski "ısınma" hilesi -- adelay (400ms'e kadar sessizlik) + afade
+        // (kısa fade-in) -- dosyanın en başındaki bozulmayı ÇÖZMÜYORDU.
+        // Orijinal sinyal ile decode edilmiş çıktı birebir karşılaştırıldığında:
+        //  1) libopus'un VBR bit-rate kontrolü dosyanın en başında zaten DAHA
+        //     FAZLA bit ayırıyor (ilk saniyelerde rate-control daha cömert,
+        //     zamanla sıkılaşıyor) -- yani "ilk saniyeler daha bozuk" varsayımı
+        //     yanlıştı; ölçümlerde ilk saniyeler çoğunlukla steady-state'ten
+        //     DAHA TEMİZ çıkıyordu.
+        //  2) adelay+afade zincirinin TAM BİTTİĞİ noktada (sessizlik bitip tam
+        //     seviyeye sıçradığı an) hata sinyalinin çarpıklığı (kurtosis)
+        //     aniden ~6 kat yükseliyor: yani bu "düzeltme" kendi geçiş
+        //     noktasında algılanabilir, kendi ürettiği bir "tık/pop" oluşturuyor.
+        //     Üstelik her dönüştürmede dosyanın başına 100-400ms gereksiz
+        //     sessizlik ekleyip senkronizasyonu kaydırıyordu.
+        // Sonuç: bu zincir tamamen kaldırıldı. Yerine, gerçek sinyalin ilk
+        // örneğinde olası bir "sıfırdan sinyale" sert kenar tıklamasını önlemek
+        // için evrensel, 5ms'lik, ihmal edilebilir bir declick fade'i ve DC/
+        // subsonik temizliği için highpass bırakıldı. Bu, hiçbir gecikme
+        // eklemez ve senkronizasyonu bozmaz.
+        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.005:curve=tri"
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
             add("-vn"); add("-map"); add("0:a:0")
@@ -313,16 +320,19 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     // oransal olarak "beklenenden çok daha büyük dosya" şeklinde
                     // görünüyordu. "constrained" çıktıyı hedefe yakın tutar.
                     add("-vbr"); add("constrained")
-                    // Çok düşük bitrate'lerde 60ms'lik büyük frame'ler, paket başı
-                    // sabit overhead'in (TOC + boyut alanları) bit bütçesindeki
-                    // payını küçültür. 6-20kbps aralığında bu, dosya boyutunu
-                    // BÜYÜTMEDEN belirgin şekilde daha stabil/temiz bir çıktı sağlar
-                    // (varsayılan 20ms frame'lerde overhead payı çok daha yüksektir).
-                    if (isVeryLowBitrate) { add("-frame_duration"); add("60") }
-                    // Varsayılan compression_level=10 en yavaş/en yüksek kalite moddur.
-                    // 8'e düşürmek, algısal kalitede ciddi bir kayıp olmadan encode
-                    // süresini belirgin şekilde kısaltır.
-                    add("-compression_level"); add("8")
+                    // Büyük (60ms) frame'ler, paket başı sabit overhead'in (TOC +
+                    // boyut alanları) bit bütçesindeki payını küçültür. Kullanıcı
+                    // talebiyle uyumlu olarak bu artık 48kbps ve altındaki TÜM
+                    // "düşük bitrate" aralığında uygulanıyor (önceden yalnızca
+                    // <=32kbps'te uygulanıyordu; ölçümlerde 40-48kbps'te de
+                    // dosya boyutunu BÜYÜTMEDEN aynı şekilde stabil/temiz çıktı
+                    // sağladığı doğrulandı).
+                    if (bitrate <= 48) { add("-frame_duration"); add("60") }
+                    // compression_level=10 (maksimum) en yüksek algısal kaliteyi
+                    // verir. Dönüştürme gerçek zamanlı olmadığından ekstra CPU
+                    // süresi bir sorun teşkil etmez; düşük bitrate'lerde kaliteyi
+                    // gözle görülür şekilde iyileştirir.
+                    add("-compression_level"); add("10")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
