@@ -62,10 +62,10 @@ class MainActivity : AppCompatActivity() {
     private val appPrefs by lazy { AppPreferences(applicationContext) }
 
     private fun ThemeMode.toPrefValue(): String = when (this) {
-        ThemeMode.LIGHT -> "light"; ThemeMode.DARK -> "dark"; ThemeMode.SYSTEM -> "system"
+        ThemeMode.LIGHT -> "light"; ThemeMode.DARK -> "dark"; ThemeMode.AMOLED -> "amoled"; ThemeMode.SYSTEM -> "system"
     }
     private fun String.toThemeMode(): ThemeMode = when (this) {
-        "light" -> ThemeMode.LIGHT; "system" -> ThemeMode.SYSTEM; else -> ThemeMode.DARK
+        "light" -> ThemeMode.LIGHT; "system" -> ThemeMode.SYSTEM; "amoled" -> ThemeMode.AMOLED; else -> ThemeMode.DARK
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
