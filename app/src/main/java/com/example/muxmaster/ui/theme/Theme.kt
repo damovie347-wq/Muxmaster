@@ -7,7 +7,9 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 
-enum class ThemeMode { SYSTEM, LIGHT, DARK }
+// AMOLED artık Koyu temanın bir alt seçeneği değil, doğrudan seçilebilen 4.
+// bir mod: Sistem / Açık / Koyu / AMOLED (tam siyah arka plan).
+enum class ThemeMode { SYSTEM, LIGHT, DARK, AMOLED }
 
 private val MuxDarkColors = darkColorScheme(
     primary = PurpleDarkRaw, onPrimary = TextPrimaryDarkRaw,
@@ -27,16 +29,34 @@ private val MuxLightColors = lightColorScheme(
     outline = OutlineLightRaw, error = Red, onError = SurfaceLightRaw
 )
 
+// AMOLED: Koyu temayla birebir aynı metin/vurgu renkleri, ama arka plan ve
+// surface tam siyah (#000000) -- AMOLED ekranlarda o pikselleri tamamen
+// kapatarak pil tasarrufu sağlar.
+private val MuxAmoledColors = darkColorScheme(
+    primary = PurpleDarkRaw, onPrimary = TextPrimaryDarkRaw,
+    secondary = PurpleLightDarkRaw, onSecondary = BgAmoledRaw,
+    background = BgAmoledRaw, onBackground = TextPrimaryDarkRaw,
+    surface = SurfaceAmoledRaw, onSurface = TextPrimaryDarkRaw,
+    surfaceVariant = SurfaceHighAmoledRaw, onSurfaceVariant = TextSecDarkRaw,
+    outline = OutlineAmoledRaw, error = Red, onError = TextPrimaryDarkRaw
+)
+
 @Composable
 fun MuxMasterTheme(themeMode: ThemeMode = ThemeMode.DARK, content: @Composable () -> Unit) {
-    val isLight = when (themeMode) {
-        ThemeMode.LIGHT -> true
-        ThemeMode.DARK -> false
-        ThemeMode.SYSTEM -> !isSystemInDarkTheme()
+    val variant = when (themeMode) {
+        ThemeMode.LIGHT -> ThemeVariant.LIGHT
+        ThemeMode.DARK -> ThemeVariant.DARK
+        ThemeMode.AMOLED -> ThemeVariant.AMOLED
+        ThemeMode.SYSTEM -> if (isSystemInDarkTheme()) ThemeVariant.DARK else ThemeVariant.LIGHT
     }
-    CompositionLocalProvider(LocalIsLightTheme provides isLight) {
+    val colorScheme = when (variant) {
+        ThemeVariant.LIGHT -> MuxLightColors
+        ThemeVariant.DARK -> MuxDarkColors
+        ThemeVariant.AMOLED -> MuxAmoledColors
+    }
+    CompositionLocalProvider(LocalThemeVariant provides variant) {
         MaterialTheme(
-            colorScheme = if (isLight) MuxLightColors else MuxDarkColors,
+            colorScheme = colorScheme,
             typography = MuxTypography,
             content = content
         )
