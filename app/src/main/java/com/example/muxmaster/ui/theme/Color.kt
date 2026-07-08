@@ -4,6 +4,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
+/** Aktif görünüm varyantı: Açık, Koyu veya AMOLED (tam siyah arka plan). */
+enum class ThemeVariant { LIGHT, DARK, AMOLED }
+
+val LocalThemeVariant = staticCompositionLocalOf { ThemeVariant.DARK }
+
+// Geriye dönük uyumluluk için tutuluyor (artık kullanılmıyor, LocalThemeVariant tercih edilir).
+@Deprecated("Use LocalThemeVariant instead", ReplaceWith("LocalThemeVariant"))
 val LocalIsLightTheme = staticCompositionLocalOf { false }
 
 internal val BgDarkRaw        = Color(0xFF0F0F10)
@@ -26,26 +33,50 @@ internal val TextMutedLightRaw = Color(0xFFAEAEB4)
 internal val PurpleLightRaw       = Color(0xFF6E56CF)
 internal val PurpleLightAccentLightRaw = Color(0xFF8F7FE0)
 
+// AMOLED: arka plan/surface tam siyah (#000000), ekranı tamamen kapatan
+// pikselleri kapatarak AMOLED ekranlarda pil tasarrufu sağlar. Metin ve
+// vurgu renkleri Koyu tema ile aynı kalır (kontrast korunur).
+internal val BgAmoledRaw        = Color(0xFF000000)
+internal val SurfaceAmoledRaw   = Color(0xFF000000)
+internal val SurfaceHighAmoledRaw = Color(0xFF121212)
+internal val OutlineAmoledRaw   = Color(0xFF1E1E1E)
+
 val Green = Color(0xFF34D399)
 val Red   = Color(0xFFE24B4A)
 val Blue  = Color(0xFF60A5FA)
 val Amber = Color(0xFFFBBF24)
 
 val BgDark: Color
-    @Composable get() = if (LocalIsLightTheme.current) BgLightRaw else BgDarkRaw
+    @Composable get() = when (LocalThemeVariant.current) {
+        ThemeVariant.LIGHT -> BgLightRaw
+        ThemeVariant.DARK -> BgDarkRaw
+        ThemeVariant.AMOLED -> BgAmoledRaw
+    }
 val Surface: Color
-    @Composable get() = if (LocalIsLightTheme.current) SurfaceLightRaw else SurfaceDarkRaw
+    @Composable get() = when (LocalThemeVariant.current) {
+        ThemeVariant.LIGHT -> SurfaceLightRaw
+        ThemeVariant.DARK -> SurfaceDarkRaw
+        ThemeVariant.AMOLED -> SurfaceAmoledRaw
+    }
 val SurfaceHigh: Color
-    @Composable get() = if (LocalIsLightTheme.current) SurfaceHighLightRaw else SurfaceHighDarkRaw
+    @Composable get() = when (LocalThemeVariant.current) {
+        ThemeVariant.LIGHT -> SurfaceHighLightRaw
+        ThemeVariant.DARK -> SurfaceHighDarkRaw
+        ThemeVariant.AMOLED -> SurfaceHighAmoledRaw
+    }
 val Outline: Color
-    @Composable get() = if (LocalIsLightTheme.current) OutlineLightRaw else OutlineDarkRaw
+    @Composable get() = when (LocalThemeVariant.current) {
+        ThemeVariant.LIGHT -> OutlineLightRaw
+        ThemeVariant.DARK -> OutlineDarkRaw
+        ThemeVariant.AMOLED -> OutlineAmoledRaw
+    }
 val TextPrimary: Color
-    @Composable get() = if (LocalIsLightTheme.current) TextPrimaryLightRaw else TextPrimaryDarkRaw
+    @Composable get() = if (LocalThemeVariant.current == ThemeVariant.LIGHT) TextPrimaryLightRaw else TextPrimaryDarkRaw
 val TextSec: Color
-    @Composable get() = if (LocalIsLightTheme.current) TextSecLightRaw else TextSecDarkRaw
+    @Composable get() = if (LocalThemeVariant.current == ThemeVariant.LIGHT) TextSecLightRaw else TextSecDarkRaw
 val TextMuted: Color
-    @Composable get() = if (LocalIsLightTheme.current) TextMutedLightRaw else TextMutedDarkRaw
+    @Composable get() = if (LocalThemeVariant.current == ThemeVariant.LIGHT) TextMutedLightRaw else TextMutedDarkRaw
 val Purple: Color
-    @Composable get() = if (LocalIsLightTheme.current) PurpleLightRaw else PurpleDarkRaw
+    @Composable get() = if (LocalThemeVariant.current == ThemeVariant.LIGHT) PurpleLightRaw else PurpleDarkRaw
 val PurpleLight: Color
-    @Composable get() = if (LocalIsLightTheme.current) PurpleLightAccentLightRaw else PurpleLightDarkRaw
+    @Composable get() = if (LocalThemeVariant.current == ThemeVariant.LIGHT) PurpleLightAccentLightRaw else PurpleLightDarkRaw
