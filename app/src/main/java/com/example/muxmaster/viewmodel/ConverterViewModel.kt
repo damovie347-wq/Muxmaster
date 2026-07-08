@@ -270,15 +270,15 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    // ************************ NİHAİ DÜZELTME ************************
+    // ************************ KESİN ÇÖZÜM ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
 
-        // ★★★ BAŞLANGIÇ BOZULMASINI SESSİZLİKLE YOK EDEN FİLTRE ★★★
-        // 1. Her kanala 50 ms sessizlik ekle (encoder'ın ilk patlaması buraya denk gelir)
-        // 2. 50 ms sonrasından başlayarak 20 ms'lik yumuşak fade-in yap
-        // 3. DC offset'i temizle
-        val audioFilters = "adelay=50|50,afade=t=in:st=0.05:d=0.02:curve=tri,highpass=f=20"
+        // ★★★ BAŞLANGIÇTAKİ BOZULMAYI SESSİZLİĞE GÖMEN FİLTRE ★★★
+        // 100 ms sessizlik ekle → encoder bu sırada çatırdasa da duyulmaz
+        // 100 ms sonrasından itibaren 300 ms'lik yumuşak fade‑in ile sesi yavaşça aç
+        // + DC offset temizliği
+        val audioFilters = "adelay=100|100,afade=t=in:st=0.1:d=0.3:curve=tri,highpass=f=20"
 
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
@@ -291,11 +291,12 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
                     add("-application"); add("audio")
-                    add("-vbr"); add("on")
-                    // Küçük frame (20ms) → kodlayıcı başlangıçta daha hızlı adapte olur
-                    add("-frame_duration"); add("20")
-                    // Kaliteyi yüksek tut (süre sıkıntı olursa 5 yap)
-                    add("-compression_level"); add("8")
+                    // Sabit bit oranı (CBR) – ilk kareden itibaren temiz
+                    add("-vbr"); add("off")
+                    // Düşük bitrate'lerde büyük frame (60ms) kaliteyi yükseltir
+                    if (bitrate <= 48) { add("-frame_duration"); add("60") }
+                    // Maksimum kalite (hız istersen 5 yapabilirsin)
+                    add("-compression_level"); add("10")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
