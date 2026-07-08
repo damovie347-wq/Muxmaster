@@ -110,6 +110,7 @@
     <string name="settings_theme_system">System</string>
     <string name="settings_theme_light">Hell</string>
     <string name="settings_theme_dark">Dunkel</string>
+    <string name="settings_theme_amoled">AMOLED (Reines Schwarz)</string>
     <string name="settings_output_folder_title">Standard-Ausgabeordner</string>
     <string name="settings_output_folder_desc">Standardordner für gemuxte Dateien und exportierte Audio-/Untertiteldateien.</string>
     <string name="settings_output_folder_none">Nicht ausgewählt</string>
