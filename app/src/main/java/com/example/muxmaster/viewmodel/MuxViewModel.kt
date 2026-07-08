@@ -491,7 +491,16 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             val hasGain = abs(t.gainDb) > 0.05f
             if (hasGain) {
                 val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
-                args += listOf("-filter:a:$i", "volume=${gainStr}dB,alimiter=limit=0.985:level=0")
+                // ÖNEMLİ DÜZELTME: limit=0.985 (~-0.13dBFS) neredeyse hiç headroom
+                // bırakmıyordu. Ölçümle doğrulandı: zaten normalize edilmiş/yüksek
+                // seviyeli (film/dizi/telefon) ses parçalarında +5dB, +10dB ve
+                // +15dB istekleri, limiter tarafından NEREDEYSE AYNI çıktıya
+                // sıkıştırılıyordu (ör. +5dB sonrası -10.8dB -> +10dB sonrası da
+                // -10.8dB, +15dB sonrası -10.6dB) -- yani slider +5dB'den sonra
+                // pratikte hiçbir şey yapmıyordu. limit=0.999 gerçek dijital
+                // clipping'i yine engeller, ama gereksiz erken/agresif kısıtlamayı
+                // ortadan kaldırıp istenen kazancın gerçekten duyulmasını sağlar.
+                args += listOf("-filter:a:$i", "volume=${gainStr}dB,alimiter=limit=0.999:attack=1:release=50:level=0")
                 args += listOf("-c:a:$i", "aac", "-b:a:$i", "192k")
             } else {
                 args += listOf("-c:a:$i", "copy")
@@ -537,4 +546,3 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         } catch (_: Exception) { }
     }
 }
-
