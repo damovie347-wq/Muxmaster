@@ -23,13 +23,11 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 
-/** Dönüştürme hedefi format. */
 enum class OutputFormat(val extension: String, val mimeType: String, val label: String) {
     OPUS("opus", "audio/ogg", "Opus"),
     MP3("mp3", "audio/mpeg", "MP3")
 }
 
-/** Kuyruktaki tek bir dosyanın işlem durumu. */
 enum class ConvertStatus { PENDING, CONVERTING, DONE, ERROR }
 
 @Immutable
@@ -80,7 +78,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     private var nextId = 0L
 
     init {
-        // Ayarlar'da seçilmiş varsayılan çıktı klasörü varsa otomatik yükle.
         prefs.defaultOutputFolder?.let { outputFolderUri = it }
     }
 
@@ -162,7 +159,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
         } catch (_: SecurityException) { }
-        // Manuel seçilen klasör aynı zamanda yeni varsayılan klasör olur.
         prefs.defaultOutputFolder = uri
     }
 
@@ -274,13 +270,15 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    // ************************ DÜZELTİLMİŞ FONKSİYON ************************
+    // ************************ NİHAİ DÜZELTME ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
 
-        // Başlangıçtaki olası tıkırtıyı kesmek için çok hafif fade‑in ve
-        // DC offset gidermek için highpass (tamamen güvenli, sesi bozmaz).
-        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.005:curve=tri"
+        // ★★★ BAŞLANGIÇ BOZULMASINI SESSİZLİKLE YOK EDEN FİLTRE ★★★
+        // 1. Her kanala 50 ms sessizlik ekle (encoder'ın ilk patlaması buraya denk gelir)
+        // 2. 50 ms sonrasından başlayarak 20 ms'lik yumuşak fade-in yap
+        // 3. DC offset'i temizle
+        val audioFilters = "adelay=50|50,afade=t=in:st=0.05:d=0.02:curve=tri,highpass=f=20"
 
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
@@ -292,36 +290,23 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    // ★ DÜZELTME 1 – “voip” yerine “audio” modu ★
-                    // "voip" sadece konuşma içindir, müzik/film karışımlarında
-                    // cızırtı/patlak ses yapar. “audio” her türlü içeriğe uyar.
                     add("-application"); add("audio")
-
-                    // ★ DÜZELTME 2 – “constrained” yerine “on” (standart VBR) ★
-                    // Constrained VBR bit rezervuarı ilk saniyelerde boş olduğu
-                    // için çok agresif kırpma yapar → ilk 2‑3 saniye bozulur.
                     add("-vbr"); add("on")
-
-                    // Düşük bitrate’lerde büyük frame (60 ms) sabit yükü azaltır,
-                    // 48 kbps’e kadar gayet temiz çıkar.
-                    if (bitrate <= 48) { add("-frame_duration"); add("60") }
-
-                    // Maksimum kalite – eğer dönüşüm süresini azaltmak istersen
-                    // 10 yerine 5 yapabilirsin (kalite kaybı çok az, hız artar).
-                    add("-compression_level"); add("7")
+                    // Küçük frame (20ms) → kodlayıcı başlangıçta daha hızlı adapte olur
+                    add("-frame_duration"); add("20")
+                    // Kaliteyi yüksek tut (süre sıkıntı olursa 5 yap)
+                    add("-compression_level"); add("8")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
                 }
             }
-
-            // libmp3lame 8 kbps altını kabul etmez, o yüzden MP3 için emniyet.
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
             add("-b:a"); add("${effectiveBitrate}k")
             add(outputPath)
         }.toTypedArray()
     }
-    // **********************************************************************
+    // ****************************************************************
 
     private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
         suspendCancellableCoroutine { cont ->
