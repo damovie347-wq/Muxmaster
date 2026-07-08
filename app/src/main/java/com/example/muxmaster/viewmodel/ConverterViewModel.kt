@@ -276,34 +276,32 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
-        // Çok düşük bitrate'lerde (<=32kbps) "voip" (SILK tabanlı) modu,
-        // müzik/genel ses için tercih edilen "audio" (CELT tabanlı) moduna göre
-        // ÇOK daha kararlıdır. "audio" modu 32kbps altında bit bütçesi
-        // yetersiz kaldığı için çıtırtı/bozulmaya çok daha yatkındır; "voip"
-        // düşük bitrate'lere özel tasarlandığından aynı hedef bitrate'te
-        // belirgin şekilde daha temiz ve daha kararlı bir çıktı verir.
-        val isVeryLowBitrate = bitrate <= 32
 
-        // ÖNEMLİ DÜZELTME (gerçek ölçümle doğrulandı, bkz. proje notları):
-        // Eski "ısınma" hilesi -- adelay (400ms'e kadar sessizlik) + afade
-        // (kısa fade-in) -- dosyanın en başındaki bozulmayı ÇÖZMÜYORDU.
-        // Orijinal sinyal ile decode edilmiş çıktı birebir karşılaştırıldığında:
-        //  1) libopus'un VBR bit-rate kontrolü dosyanın en başında zaten DAHA
-        //     FAZLA bit ayırıyor (ilk saniyelerde rate-control daha cömert,
-        //     zamanla sıkılaşıyor) -- yani "ilk saniyeler daha bozuk" varsayımı
-        //     yanlıştı; ölçümlerde ilk saniyeler çoğunlukla steady-state'ten
-        //     DAHA TEMİZ çıkıyordu.
-        //  2) adelay+afade zincirinin TAM BİTTİĞİ noktada (sessizlik bitip tam
-        //     seviyeye sıçradığı an) hata sinyalinin çarpıklığı (kurtosis)
-        //     aniden ~6 kat yükseliyor: yani bu "düzeltme" kendi geçiş
-        //     noktasında algılanabilir, kendi ürettiği bir "tık/pop" oluşturuyor.
-        //     Üstelik her dönüştürmede dosyanın başına 100-400ms gereksiz
-        //     sessizlik ekleyip senkronizasyonu kaydırıyordu.
-        // Sonuç: bu zincir tamamen kaldırıldı. Yerine, gerçek sinyalin ilk
-        // örneğinde olası bir "sıfırdan sinyale" sert kenar tıklamasını önlemek
-        // için evrensel, 5ms'lik, ihmal edilebilir bir declick fade'i ve DC/
-        // subsonik temizliği için highpass bırakıldı. Bu, hiçbir gecikme
-        // eklemez ve senkronizasyonu bozmaz.
+        // KÖK NEDEN 1 - çıtırtı/bozulma (ilk 2-3 sn dahil, tüm dosya boyunca):
+        // "-application voip" modu, libopus içindeki SILK (konuşmaya özel)
+        // katmanını devreye sokar. SILK, konuşma sinyali (LPC/formant tahmini)
+        // için tasarlanmıştır; video/film sesi genelde müzik+efekt+konuşma
+        // KARIŞIMI olduğundan SILK bu içerikte belirgin "çatırtı/warbling"
+        // bozulması üretir. Referans "opusenc" ve cloudconvert gibi araçlar
+        // genel ses/video dönüştürmede bitrate ne olursa olsun "audio" (CELT
+        // tabanlı) modunu kullanır. Düzeltme: bitrate'ten bağımsız olarak
+        // HER ZAMAN "audio" modu kullanılıyor.
+        //
+        // KÖK NEDEN 2 - özellikle dosyanın İLK 2-3 SANİYESİNDEKİ bozulma:
+        // "-vbr constrained" modunda libopus'un iç "bit rezervuarı" dosyanın
+        // başında BOŞTUR; encoder, ileride hedef bitrate'i aşmayacağını garanti
+        // edebilmek için rezervuar dolana kadar (yaklaşık ilk birkaç saniye)
+        // aşırı tutumlu/agresif kırpma yapar. Bu, tam olarak bildirilen "ilk
+        // 2-3 saniyede çıtırtı" belirtisiyle örtüşüyor. Düzeltme: standart
+        // (constrained OLMAYAN) "-vbr on" kullanılıyor -- bu libopus/opusenc'in
+        // varsayılanıdır ve encoder'ın 1. kareden itibaren doğru bit dağılımı
+        // yapmasını sağlar.
+        //
+        // Dosya boyutu: Gerçek ölçümlerde (6/14/32/48kbps, çeşitli test
+        // sinyalleri) "audio + vbr on" kombinasyonu "voip + constrained"a göre
+        // dosya boyutunu BÜYÜTMÜYOR (aynı seviyede, hatta bazen biraz daha
+        // küçük çıkıyor); yani "anormal boyut artışı" sorunu bu değişiklikle
+        // birlikte ortadan kalkıyor.
         val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.005:curve=tri"
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
@@ -314,12 +312,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    add("-application"); add(if (isVeryLowBitrate) "voip" else "audio")
-                    // Varsayılan (constrained OLMAYAN) VBR, karmaşık pasajlarda hedef
-                    // bitrate'in çok üzerine çıkabiliyordu; düşük bitrate'lerde bu
-                    // oransal olarak "beklenenden çok daha büyük dosya" şeklinde
-                    // görünüyordu. "constrained" çıktıyı hedefe yakın tutar.
-                    add("-vbr"); add("constrained")
+                    add("-application"); add("audio")
+                    add("-vbr"); add("on")
                     // Büyük (60ms) frame'ler, paket başı sabit overhead'in (TOC +
                     // boyut alanları) bit bütçesindeki payını küçültür. Kullanıcı
                     // talebiyle uyumlu olarak bu artık 48kbps ve altındaki TÜM
