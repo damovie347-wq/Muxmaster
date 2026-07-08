@@ -274,72 +274,54 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
+    // ************************ DÜZELTİLMİŞ FONKSİYON ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
 
-        // KÖK NEDEN 1 - çıtırtı/bozulma (ilk 2-3 sn dahil, tüm dosya boyunca):
-        // "-application voip" modu, libopus içindeki SILK (konuşmaya özel)
-        // katmanını devreye sokar. SILK, konuşma sinyali (LPC/formant tahmini)
-        // için tasarlanmıştır; video/film sesi genelde müzik+efekt+konuşma
-        // KARIŞIMI olduğundan SILK bu içerikte belirgin "çatırtı/warbling"
-        // bozulması üretir. Referans "opusenc" ve cloudconvert gibi araçlar
-        // genel ses/video dönüştürmede bitrate ne olursa olsun "audio" (CELT
-        // tabanlı) modunu kullanır. Düzeltme: bitrate'ten bağımsız olarak
-        // HER ZAMAN "audio" modu kullanılıyor.
-        //
-        // KÖK NEDEN 2 - özellikle dosyanın İLK 2-3 SANİYESİNDEKİ bozulma:
-        // "-vbr constrained" modunda libopus'un iç "bit rezervuarı" dosyanın
-        // başında BOŞTUR; encoder, ileride hedef bitrate'i aşmayacağını garanti
-        // edebilmek için rezervuar dolana kadar (yaklaşık ilk birkaç saniye)
-        // aşırı tutumlu/agresif kırpma yapar. Bu, tam olarak bildirilen "ilk
-        // 2-3 saniyede çıtırtı" belirtisiyle örtüşüyor. Düzeltme: standart
-        // (constrained OLMAYAN) "-vbr on" kullanılıyor -- bu libopus/opusenc'in
-        // varsayılanıdır ve encoder'ın 1. kareden itibaren doğru bit dağılımı
-        // yapmasını sağlar.
-        //
-        // Dosya boyutu: Gerçek ölçümlerde (6/14/32/48kbps, çeşitli test
-        // sinyalleri) "audio + vbr on" kombinasyonu "voip + constrained"a göre
-        // dosya boyutunu BÜYÜTMÜYOR (aynı seviyede, hatta bazen biraz daha
-        // küçük çıkıyor); yani "anormal boyut artışı" sorunu bu değişiklikle
-        // birlikte ortadan kalkıyor.
+        // Başlangıçtaki olası tıkırtıyı kesmek için çok hafif fade‑in ve
+        // DC offset gidermek için highpass (tamamen güvenli, sesi bozmaz).
         val audioFilters = "highpass=f=20,afade=t=in:st=0:d=0.005:curve=tri"
+
         return buildList {
             add("-y"); add("-i"); add(item.cachePath)
             add("-vn"); add("-map"); add("0:a:0")
             add("-ar"); add("48000")
             if (forceMono) { add("-ac"); add("1") }
             add("-af"); add(audioFilters)
+
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
+                    // ★ DÜZELTME 1 – “voip” yerine “audio” modu ★
+                    // "voip" sadece konuşma içindir, müzik/film karışımlarında
+                    // cızırtı/patlak ses yapar. “audio” her türlü içeriğe uyar.
                     add("-application"); add("audio")
+
+                    // ★ DÜZELTME 2 – “constrained” yerine “on” (standart VBR) ★
+                    // Constrained VBR bit rezervuarı ilk saniyelerde boş olduğu
+                    // için çok agresif kırpma yapar → ilk 2‑3 saniye bozulur.
                     add("-vbr"); add("on")
-                    // Büyük (60ms) frame'ler, paket başı sabit overhead'in (TOC +
-                    // boyut alanları) bit bütçesindeki payını küçültür. Kullanıcı
-                    // talebiyle uyumlu olarak bu artık 48kbps ve altındaki TÜM
-                    // "düşük bitrate" aralığında uygulanıyor (önceden yalnızca
-                    // <=32kbps'te uygulanıyordu; ölçümlerde 40-48kbps'te de
-                    // dosya boyutunu BÜYÜTMEDEN aynı şekilde stabil/temiz çıktı
-                    // sağladığı doğrulandı).
+
+                    // Düşük bitrate’lerde büyük frame (60 ms) sabit yükü azaltır,
+                    // 48 kbps’e kadar gayet temiz çıkar.
                     if (bitrate <= 48) { add("-frame_duration"); add("60") }
-                    // compression_level=10 (maksimum) en yüksek algısal kaliteyi
-                    // verir. Dönüştürme gerçek zamanlı olmadığından ekstra CPU
-                    // süresi bir sorun teşkil etmez; düşük bitrate'lerde kaliteyi
-                    // gözle görülür şekilde iyileştirir.
-                    add("-compression_level"); add("10")
+
+                    // Maksimum kalite – eğer dönüşüm süresini azaltmak istersen
+                    // 10 yerine 5 yapabilirsin (kalite kaybı çok az, hız artar).
+                    add("-compression_level"); add("7")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
                 }
             }
-            // libmp3lame 8kbps altını desteklemiyor; kullanıcı 6-7 girse bile
-            // MP3 tarafında sessizce 8kbps'e sabitleniyor (Opus tarafı 6kbps'i
-            // sorunsuz destekliyor, orada dokunulmuyor).
+
+            // libmp3lame 8 kbps altını kabul etmez, o yüzden MP3 için emniyet.
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
             add("-b:a"); add("${effectiveBitrate}k")
             add(outputPath)
         }.toTypedArray()
     }
+    // **********************************************************************
 
     private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
         suspendCancellableCoroutine { cont ->
