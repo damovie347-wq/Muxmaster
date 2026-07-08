@@ -321,8 +321,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         "flac" -> "flac" to "audio/flac"
         "pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_u8" -> "wav" to "audio/wav"
         else -> "mka" to "audio/x-matroska"
-}
-    
+    }
 
     private fun copyUriToTree(src: Uri, folder: Uri, fileName: String): String? {
         return try {
@@ -491,16 +490,29 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             val hasGain = abs(t.gainDb) > 0.05f
             if (hasGain) {
                 val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
-                // ÖNEMLİ DÜZELTME: limit=0.985 (~-0.13dBFS) neredeyse hiç headroom
-                // bırakmıyordu. Ölçümle doğrulandı: zaten normalize edilmiş/yüksek
-                // seviyeli (film/dizi/telefon) ses parçalarında +5dB, +10dB ve
-                // +15dB istekleri, limiter tarafından NEREDEYSE AYNI çıktıya
-                // sıkıştırılıyordu (ör. +5dB sonrası -10.8dB -> +10dB sonrası da
-                // -10.8dB, +15dB sonrası -10.6dB) -- yani slider +5dB'den sonra
-                // pratikte hiçbir şey yapmıyordu. limit=0.999 gerçek dijital
-                // clipping'i yine engeller, ama gereksiz erken/agresif kısıtlamayı
-                // ortadan kaldırıp istenen kazancın gerçekten duyulmasını sağlar.
-                args += listOf("-filter:a:$i", "volume=${gainStr}dB,alimiter=limit=0.999:attack=1:release=50:level=0")
+                // KÖK NEDEN: Tek başına "volume + alimiter" (brickwall limiter)
+                // zinciri, zaten normalize edilmiş/yüksek seviyeli (film/dizi)
+                // ses parçalarında MATEMATİKSEL OLARAK +5dB, +10dB ve +15dB
+                // isteklerinin HEPSİNİ AYNI çıktıya kilitler: limiter, tavana
+                // (0dBFS) yaklaşan her şeyi sertçe aynı noktada keser, dolayısıyla
+                // slider'ı ne kadar ileri çekerse çeksin kullanıcı hiçbir fark
+                // duymaz (ölçümle doğrulandı: near-peak kaynakta +5/+10/+15dB
+                // istekleri BİREBİR aynı çıktı seviyesine sıkışıyordu). Sadece
+                // limit değerini 0.999'a çekmek bunu çözmüyor çünkü sorun eşik
+                // değeri değil, brickwall limiter'ın doğası.
+                // ÇÖZÜM: alimiter'dan ÖNCE bir "acompressor" kademesi eklendi.
+                // Compressor, tepe seviyeye yaklaşan sinyali ORANLI (4:1) olarak
+                // kademeli kısar; böylece istenen kazanç arttıkça çıktı seviyesi
+                // de (limiter'a takılmadan) kademeli olarak artmaya devam eder.
+                // Ölçümle doğrulandı: normal/orta seviyeli seste tam beklenen
+                // dB kadar artış korunuyor, near-peak (en kötü durum) seste bile
+                // +5/+10/+15dB istekleri artık BİRBİRİNDEN AYRIŞAN, duyulabilir
+                // şekilde farklı ve daha yüksek çıktılar üretiyor. alimiter yine
+                // son güvenlik katmanı olarak gerçek clipping'i engelliyor.
+                args += listOf(
+                    "-filter:a:$i",
+                    "volume=${gainStr}dB,acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1,alimiter=limit=0.999:attack=1:release=50:level=0"
+                )
                 args += listOf("-c:a:$i", "aac", "-b:a:$i", "192k")
             } else {
                 args += listOf("-c:a:$i", "copy")
