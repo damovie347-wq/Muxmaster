@@ -204,18 +204,25 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
 
 private const val GAIN_MAX_DB = 15f
 
+// dB <-> yüzde (%) dönüşümleri. +X% ses artışı = 20*log10(1 + X/100) dB kazanç.
 private fun dbToBoostPercent(db: Float): Float =
     (100.0 * Math.pow(10.0, db / 20.0) - 100.0).toFloat()
+
+private fun percentToDb(percent: Float): Float =
+    (20.0 * Math.log10(1.0 + percent / 100.0)).toFloat()
 
 @Composable
 private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
     var showPercent by remember { mutableStateOf(false) }
+    val maxPercent = remember { dbToBoostPercent(GAIN_MAX_DB) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.gain_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(90.dp))
         Slider(
-            value = gainDb,
-            onValueChange = onGainChange,
-            valueRange = 0f..GAIN_MAX_DB,
+            // Yüzde modunda slider doğrudan % biriminde çalışır; dB'ye çevrilip
+            // aynı gainDb state'ine yazılır (tek gerçek kaynak hep dB'dir).
+            value = if (showPercent) dbToBoostPercent(gainDb) else gainDb,
+            onValueChange = { newVal -> onGainChange(if (showPercent) percentToDb(newVal) else newVal) },
+            valueRange = if (showPercent) 0f..maxPercent else 0f..GAIN_MAX_DB,
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             colors = SliderDefaults.colors(thumbColor = Amber, activeTrackColor = Amber)
         )
