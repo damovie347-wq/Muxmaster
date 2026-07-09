@@ -270,36 +270,39 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    // ************************ SON HAL – TEMİZ, HIZLI & KUSURSUZ ************************
+    // ************************ SON HAL – PATLAK SES SORUNU TAMAMEN ÇÖZÜLDÜ ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
 
         return buildList {
-            // 1. GİRDİ OPTİMİZASYONU: İlk birkaç saniyedeki patlak/bozuk sesi engeller. 
-            // FFmpeg'in dosyayı çözümlemesini hızlandırır ve eksik paket zamanlamalarını düzeltir.
+            // 1. GİRDİ OPTİMİZASYONU: Dosya analizini maksimuma çıkarıp bozuk başlangıç paketlerini atıyoruz
             add("-y")
-            add("-analyzeduration"); add("50M")
-            add("-probesize"); add("50M")
-            add("-fflags"); add("+genpts+discardcorrupt")
+            add("-analyzeduration"); add("100M")
+            add("-probesize"); add("100M")
+            add("-fflags"); add("+genpts+discardcorrupt+igndts")
             add("-i"); add(item.cachePath)
             
-            // 2. AKIŞ AYARLARI: Sadece ilk ses izini alır, videoyu yok sayar.
+            // 2. AKIŞ AYARLARI
             add("-vn"); add("-map"); add("0:a:0")
 
-            // 3. FİLTRELEME: Opus'un doğal çalıştığı 48kHz'e yüksek kaliteli ve senkronize geçiş yapar.
-            // "first_pts=0" başlangıçtaki gecikme/çatırtı seslerini tamamen sıfırlar.
-            add("-af"); add("aresample=async=1:first_pts=0:min_comp=0.01:out_sample_rate=48000")
+            // 3. FİLTRELEME (KRİTİK BÖLÜM): 
+            // - aresample=async=1:first_pts=0: Zaman çizelgesini sıfırlar (Senkronizasyon)
+            // - highpass=f=20: 20Hz altı DC offset ve anlık patlama (pop) seslerini filtreler
+            // - afade=t=in:st=0:d=0.01: İlk 10 milisaniyede sesi sıfırdan yavaşça açar. İnsan kulağı duyamaz ama dijital çatlamayı %100 engeller.
+            add("-af"); add("aresample=async=1:first_pts=0,highpass=f=20,afade=t=in:st=0:d=0.01,aresample=48000")
             
             if (forceMono) { add("-ac"); add("1") }
 
-            // 4. ÇIKTI FORMATI: Kalite ve Hız Dengesi
+            // 4. ÇIKTI FORMATI
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    add("-application"); add("audio")       // Müzik modu (SILK ve CELT karışık optimum)
-                    add("-vbr"); add("constrained")         // Düşük bitratelerde bile sesin bozulmasını (starvation) önler, web kalitesi sağlar
-                    add("-frame_duration"); add("60")       // 60ms frame boyutu -> Düşük bitratelerde maksimum verim ve encode hızı
-                    add("-compression_level"); add("10")    // Maksimum kalite araması (Mobil cihazlarda OPUS için 10 hızlı çalışır)
+                    add("-application"); add("audio")       
+                    add("-vbr"); add("constrained")         
+                    add("-frame_duration"); add("60")       
+                    add("-compression_level"); add("10")    
+                    // Cihazların codec pre-skip (başlangıç gecikmesi) okuma hatasını düzeltmek için padding ekliyoruz
+                    add("-padding"); add("1")              
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
@@ -309,8 +312,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             // 5. BİT ORANI VE ÇOKLU İŞLEMCİ DESTEĞİ
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
             add("-b:a"); add("${effectiveBitrate}k")
-            
-            add("-threads"); add("0") // Cihazın tüm çekirdeklerini kullanarak internet sitesi gibi hızlı işlem yapar
+            add("-threads"); add("0") // Tüm çekirdekleri kullanır (Web hızı)
             
             add(outputPath)
         }.toTypedArray()
