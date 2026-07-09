@@ -484,31 +484,31 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         subPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> subInputIdx[subTracks[i].id]?.let { args += listOf("-map","$it:s:0") }; is MapPlan.Failed -> {} } }
 
         args += listOf("-c:v","copy")
-        if (hasOffset) args += listOf("-avoid_negative_ts","make_zero")
+        // KÖK NEDEN 1 (sesin birkaç dakika sonra tamamen kesilmesi):
+        // MKV muxer'ın varsayılan interleave penceresi (max_interleave_delta ~10sn)
+        // gecikmeli (itsoffset) bir ses/altyazı akışıyla birlikte kullanıldığında,
+        // muxer bekleyen paket kuyruğunu 10sn sonra zorla boşaltıyor ve gecikmeli
+        // akışın latency'si bu pencereyi aştığında o akışın paketleri sessizce
+        // atlanıyor/senkron kayboluyor (video oynamaya devam ederken ses susuyor).
+        // ÇÖZÜM: max_interleave_delta'yı 0 yaparak (sınırsız tamponlama) tüm
+        // akışların dosyanın sonuna kadar doğru şekilde iç içe (interleave)
+        // yazılmasını garanti ediyoruz.
+        args += listOf("-max_interleave_delta", "0")
+        // KÖK NEDEN 2 (videonun başında otomatik ileri sarma/atlama):
+        // "-avoid_negative_ts make_zero" TÜM akışları (dokunulmamış video dahil)
+        // ortak bir sıfır noktasına göre kaydırıyordu; video akışının kendi
+        // start_time'ı tam sıfır olmadığında (çoğu mp4/mkv kaynağında normaldir)
+        // bu, video akışının birkaç kare ileri kaymasına, yani oynatılırken
+        // başın atlanmış/hızlı sarılmış gibi görünmesine neden oluyordu.
+        // ÇÖZÜM: "make_non_negative" yalnızca gerçekten negatif zaman damgasına
+        // sahip akışı (negatif gecikme uygulanan parça) düzeltir, diğer
+        // akışları (video gibi) olduğu gibi bırakır.
+        if (hasOffset) args += listOf("-avoid_negative_ts", "make_non_negative")
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
             if (hasGain) {
                 val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
-                // KÖK NEDEN: Tek başına "volume + alimiter" (brickwall limiter)
-                // zinciri, zaten normalize edilmiş/yüksek seviyeli (film/dizi)
-                // ses parçalarında MATEMATİKSEL OLARAK +5dB, +10dB ve +15dB
-                // isteklerinin HEPSİNİ AYNI çıktıya kilitler: limiter, tavana
-                // (0dBFS) yaklaşan her şeyi sertçe aynı noktada keser, dolayısıyla
-                // slider'ı ne kadar ileri çekerse çeksin kullanıcı hiçbir fark
-                // duymaz (ölçümle doğrulandı: near-peak kaynakta +5/+10/+15dB
-                // istekleri BİREBİR aynı çıktı seviyesine sıkışıyordu). Sadece
-                // limit değerini 0.999'a çekmek bunu çözmüyor çünkü sorun eşik
-                // değeri değil, brickwall limiter'ın doğası.
-                // ÇÖZÜM: alimiter'dan ÖNCE bir "acompressor" kademesi eklendi.
-                // Compressor, tepe seviyeye yaklaşan sinyali ORANLI (4:1) olarak
-                // kademeli kısar; böylece istenen kazanç arttıkça çıktı seviyesi
-                // de (limiter'a takılmadan) kademeli olarak artmaya devam eder.
-                // Ölçümle doğrulandı: normal/orta seviyeli seste tam beklenen
-                // dB kadar artış korunuyor, near-peak (en kötü durum) seste bile
-                // +5/+10/+15dB istekleri artık BİRBİRİNDEN AYRIŞAN, duyulabilir
-                // şekilde farklı ve daha yüksek çıktılar üretiyor. alimiter yine
-                // son güvenlik katmanı olarak gerçek clipping'i engelliyor.
                 args += listOf(
                     "-filter:a:$i",
                     "volume=${gainStr}dB,acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1,alimiter=limit=0.999:attack=1:release=50:level=0"
