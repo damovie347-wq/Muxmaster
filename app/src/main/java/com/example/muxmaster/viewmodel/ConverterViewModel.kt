@@ -270,26 +270,25 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    // ************************ SON HAL – PATLAK SES SORUNU TAMAMEN ÇÖZÜLDÜ ************************
+    // ************************ SON HAL – STABİL & HIZLI & KUSURSUZ ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
 
         return buildList {
-            // 1. GİRDİ OPTİMİZASYONU: Dosya analizini maksimuma çıkarıp bozuk başlangıç paketlerini atıyoruz
+            // 1. GİRDİ OPTİMİZASYONU
             add("-y")
-            add("-analyzeduration"); add("100M")
-            add("-probesize"); add("100M")
-            add("-fflags"); add("+genpts+discardcorrupt+igndts")
+            add("-analyzeduration"); add("50M")
+            add("-probesize"); add("50M")
+            add("-fflags"); add("+genpts+discardcorrupt")
             add("-i"); add(item.cachePath)
             
             // 2. AKIŞ AYARLARI
             add("-vn"); add("-map"); add("0:a:0")
 
-            // 3. FİLTRELEME (KRİTİK BÖLÜM): 
-            // - aresample=async=1:first_pts=0: Zaman çizelgesini sıfırlar (Senkronizasyon)
-            // - highpass=f=20: 20Hz altı DC offset ve anlık patlama (pop) seslerini filtreler
-            // - afade=t=in:st=0:d=0.01: İlk 10 milisaniyede sesi sıfırdan yavaşça açar. İnsan kulağı duyamaz ama dijital çatlamayı %100 engeller.
-            add("-af"); add("aresample=async=1:first_pts=0,highpass=f=20,afade=t=in:st=0:d=0.01,aresample=48000")
+            // 3. FİLTRELEME (SADELEŞTİRİLDİ - HATA YOK)
+            // async=1 ve first_pts=0 zamanlamayı sıfırlar, afade ise patlamayı engeller.
+            add("-af"); add("aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.01")
+            add("-ar"); add("48000")
             
             if (forceMono) { add("-ac"); add("1") }
 
@@ -301,8 +300,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     add("-vbr"); add("constrained")         
                     add("-frame_duration"); add("60")       
                     add("-compression_level"); add("10")    
-                    // Cihazların codec pre-skip (başlangıç gecikmesi) okuma hatasını düzeltmek için padding ekliyoruz
-                    add("-padding"); add("1")              
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
@@ -312,7 +309,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             // 5. BİT ORANI VE ÇOKLU İŞLEMCİ DESTEĞİ
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
             add("-b:a"); add("${effectiveBitrate}k")
-            add("-threads"); add("0") // Tüm çekirdekleri kullanır (Web hızı)
+            add("-threads"); add("0") 
             
             add(outputPath)
         }.toTypedArray()
