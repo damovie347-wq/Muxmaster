@@ -270,33 +270,24 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    // ************************ KESİN ÇÖZÜM ************************
+    // ************************ SON HAL – TEMİZ & HIZLI ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
 
-        // ★★★ BAŞLANGIÇTAKİ BOZULMAYI SESSİZLİĞE GÖMEN FİLTRE ★★★
-        // 100 ms sessizlik ekle → encoder bu sırada çatırdasa da duyulmaz
-        // 100 ms sonrasından itibaren 300 ms'lik yumuşak fade‑in ile sesi yavaşça aç
-        // + DC offset temizliği
-        val audioFilters = "adelay=100|100,afade=t=in:st=0.1:d=0.3:curve=tri,highpass=f=20"
-
         return buildList {
-            add("-y"); add("-i"); add(item.cachePath)
+            add("-y")
+            add("-i"); add(item.cachePath)
             add("-vn"); add("-map"); add("0:a:0")
             add("-ar"); add("48000")
             if (forceMono) { add("-ac"); add("1") }
-            add("-af"); add(audioFilters)
 
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    add("-application"); add("audio")
-                    // Sabit bit oranı (CBR) – ilk kareden itibaren temiz
-                    add("-vbr"); add("off")
-                    // Düşük bitrate'lerde büyük frame (60ms) kaliteyi yükseltir
-                    if (bitrate <= 48) { add("-frame_duration"); add("60") }
-                    // Maksimum kalite (hız istersen 5 yapabilirsin)
-                    add("-compression_level"); add("10")
+                    add("-application"); add("audio")       // müzik modu
+                    add("-vbr"); add("on")                 // standart değişken bit oranı
+                    add("-mapping_family"); add("0")       // salt CELT → konuşma modu (SILK) kapalı
+                    add("-compression_level"); add("7")    // hız/kalite dengesi (5-10 arası)
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
@@ -307,7 +298,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             add(outputPath)
         }.toTypedArray()
     }
-    // ****************************************************************
+    // **********************************************************************
 
     private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
         suspendCancellableCoroutine { cont ->
