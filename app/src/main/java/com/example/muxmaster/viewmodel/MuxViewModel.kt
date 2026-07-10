@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
@@ -471,12 +472,20 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // Bir girdi dosyasını (ayrı ses/altyazı akışı) verilen gecikmeyle birlikte ekler.
-    // Hem pozitif hem negatif gecikmelerde "-itsoffset" kullanıyoruz. 
-    // Negatif değer girilirse (örn: -13.911), "-avoid_negative_ts disabled" sayesinde
-    // FFmpeg videoyu kaydırmaz, sadece sesi o kadar öne çeker.
+    // Negatif değerlerde sesi/altyazıyı baştan kırpıyoruz (-ss), pozitif değerlerde ise 
+    // geciktiriyoruz (-itsoffset). Dikkat: String.format ile Amerikan formatı (27.763)
+    // kullanıyoruz ki FFmpeg virgüllü sayıları (27,763) okuyup işlemi yarıda bırakmasın.
     private fun addDelayedInput(args: MutableList<String>, path: String, delayMs: Long) {
-        if (delayMs != 0L) args += listOf("-itsoffset", (delayMs / 1000.0).toString())
+        when {
+            delayMs > 0L -> {
+                val delayStr = String.format(Locale.US, "%.3f", delayMs / 1000.0)
+                args += listOf("-itsoffset", delayStr)
+            }
+            delayMs < 0L -> {
+                val delayStr = String.format(Locale.US, "%.3f", (-delayMs) / 1000.0)
+                args += listOf("-ss", delayStr)
+            }
+        }
         args += listOf("-i", path)
     }
 
@@ -495,11 +504,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         args += listOf("-c:v","copy")
         
         // max_interleave_delta 0: Sesin dosya sonunda kesilmesini engeller.
-        // avoid_negative_ts disabled: Negatif değer girildiğinde FFmpeg'in videoyu da 
-        // beraber kaydırıp senkronu bozmasını engeller. Video olduğu yerde kalır, 
-        // sadece ses/altyazı negatif veya pozitif kayar.
         args += listOf("-max_interleave_delta", "0")
-        args += listOf("-avoid_negative_ts", "disabled")
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
