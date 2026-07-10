@@ -134,13 +134,25 @@ private fun TrackHeaderRow(
     }
 }
 
-private const val DELAY_RANGE_MS = 10000f
+// Kaydırıcının taban aralığı; sabit bir üst/alt sınır DEĞİLDİR.
+// Girilen değer bu aralığı aşarsa, aşağıdaki dynamicRange hesaplaması
+// aralığı otomatik olarak büyütür; böylece hiçbir gecikme değeri kırpılmaz (clamp edilmez).
+private const val DELAY_BASE_RANGE_MS = 10000f
 
 @Composable
 private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var sliderValue by remember(delayMs) { mutableFloatStateOf(delayMs.toFloat()) }
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     var isDragging by remember { mutableStateOf(false) }
+
+    // Kaydırıcının görsel aralığı, girilen/mevcut değere göre dinamik olarak genişler.
+    // Böylece -13911 veya +186000 gibi DELAY_BASE_RANGE_MS'i aşan değerler asla kırpılmaz;
+    // slider sadece o değeri gösterebilmek için kendi ölçeğini büyütür.
+    val dynamicRange = remember(delayMs, sliderValue) {
+        val neededForCommitted = kotlin.math.abs(delayMs.toFloat())
+        val neededForLive = kotlin.math.abs(sliderValue)
+        maxOf(DELAY_BASE_RANGE_MS, neededForCommitted * 1.2f, neededForLive * 1.2f)
+    }
 
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.delay_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
@@ -155,13 +167,13 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
                     text = finalValue.toString()
                     onDelayChange(finalValue)
                 },
-                valueRange = -DELAY_RANGE_MS..DELAY_RANGE_MS,
+                valueRange = -dynamicRange..dynamicRange,
                 modifier = Modifier.fillMaxWidth(),
                 colors = SliderDefaults.colors(thumbColor = Purple, activeTrackColor = Purple)
             )
 
             if (isDragging) {
-                val fraction = ((sliderValue + DELAY_RANGE_MS) / (2 * DELAY_RANGE_MS)).coerceIn(0f, 1f)
+                val fraction = ((sliderValue + dynamicRange) / (2 * dynamicRange)).coerceIn(0f, 1f)
                 val bubbleWidth = 46.dp
                 val bubbleX = (maxWidth - bubbleWidth) * fraction
                 Box(
@@ -187,10 +199,13 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             value = text,
             onValueChange = { newVal ->
                 text = newVal
+                // DİKKAT: Artık hiçbir üst/alt sınır (coerceIn) uygulanmıyor.
+                // Girilen her geçerli Long değeri doğrudan kabul edilip
+                // hem slider durumuna hem de onDelayChange callback'ine (ve dolayısıyla
+                // muxlama sırasında -itsoffset parametresine) aynen aktarılıyor.
                 newVal.toLongOrNull()?.let { parsed ->
-                    val coerced = parsed.coerceIn(-99999999, 99999999)
-                    sliderValue = coerced.toFloat()
-                    onDelayChange(coerced)
+                    sliderValue = parsed.toFloat()
+                    onDelayChange(parsed)
                 }
             },
             modifier = Modifier.width(86.dp),
