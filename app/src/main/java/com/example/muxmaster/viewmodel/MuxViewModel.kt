@@ -471,13 +471,32 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Bir girdi dosyasını (ayrı ses/altyazı akışı) verilen gecikmeyle birlikte ekler.
+    // - Pozitif gecikme (ör. +186000ms): akış geç başlamalı -> "-itsoffset" ile
+    //   zaman damgalarını ileri kaydırıyoruz. Bu asla negatif bir zaman damgası
+    //   üretmez, bu yüzden güvenlidir.
+    // - Negatif gecikme (ör. -13911ms): akış erken başlamalı -> bunu negatif
+    //   "-itsoffset" ile YAPMIYORUZ (bu negatif pts üretir ve muxer'ın
+    //   "-avoid_negative_ts" telafisi TÜM akışları -video dahil- kaydırarak
+    //   düzeltmeyi sıfırlar). Bunun yerine ilgili girdiden "-ss" ile tam olarak
+    //   |gecikme| kadar baştan kırpıyoruz; kalan içerik kendi 0 noktasından
+    //   başlayarak videonun 0 noktasıyla hizalanır ve istenen "öne alma" etkisini
+    //   hiçbir akışı bozmadan verir.
+    private fun addDelayedInput(args: MutableList<String>, path: String, delayMs: Long) {
+        when {
+            delayMs > 0L -> args += listOf("-itsoffset", (delayMs / 1000.0).toString())
+            delayMs < 0L -> args += listOf("-ss", ((-delayMs) / 1000.0).toString())
+        }
+        args += listOf("-i", path)
+    }
+
     private fun buildFfmpegArgs(videoPath: String, audioPlans: List<MapPlan>, audioTracks: List<AudioTrackItem>, subPlans: List<MapPlan>, subTracks: List<SubtitleTrackItem>, outputPath: String): List<String> {
         val args = mutableListOf("-y"); args += listOf("-i", videoPath)
-        var nextIdx = 1; var hasOffset = false
+        var nextIdx = 1
         val audioInputIdx = mutableMapOf<Int,Int>()
-        audioPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { if (plan.delayMs != 0L) { args += listOf("-itsoffset", (plan.delayMs/1000.0).toString()); hasOffset=true }; args += listOf("-i",plan.path); audioInputIdx[audioTracks[i].id]=nextIdx++ } }
+        audioPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { addDelayedInput(args, plan.path, plan.delayMs); audioInputIdx[audioTracks[i].id]=nextIdx++ } }
         val subInputIdx = mutableMapOf<Int,Int>()
-        subPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { if (plan.delayMs != 0L) { args += listOf("-itsoffset",(plan.delayMs/1000.0).toString()); hasOffset=true }; args += listOf("-i",plan.path); subInputIdx[subTracks[i].id]=nextIdx++ } }
+        subPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { addDelayedInput(args, plan.path, plan.delayMs); subInputIdx[subTracks[i].id]=nextIdx++ } }
 
         args += listOf("-map","0:v:0")
         audioPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> audioInputIdx[audioTracks[i].id]?.let { args += listOf("-map","$it:a:0") }; is MapPlan.Failed -> {} } }
@@ -494,16 +513,20 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         // akışların dosyanın sonuna kadar doğru şekilde iç içe (interleave)
         // yazılmasını garanti ediyoruz.
         args += listOf("-max_interleave_delta", "0")
-        // KÖK NEDEN 2 (videonun başında otomatik ileri sarma/atlama):
-        // "-avoid_negative_ts make_zero" TÜM akışları (dokunulmamış video dahil)
-        // ortak bir sıfır noktasına göre kaydırıyordu; video akışının kendi
-        // start_time'ı tam sıfır olmadığında (çoğu mp4/mkv kaynağında normaldir)
-        // bu, video akışının birkaç kare ileri kaymasına, yani oynatılırken
-        // başın atlanmış/hızlı sarılmış gibi görünmesine neden oluyordu.
-        // ÇÖZÜM: "make_non_negative" yalnızca gerçekten negatif zaman damgasına
-        // sahip akışı (negatif gecikme uygulanan parça) düzeltir, diğer
-        // akışları (video gibi) olduğu gibi bırakır.
-        if (hasOffset) args += listOf("-avoid_negative_ts", "make_non_negative")
+        // KÖK NEDEN 3 (negatif gecikme değerlerinin hiç uygulanmamış gibi görünmesi):
+        // Önceki sürüm, negatif gecikmeleri de "-itsoffset -13.911" gibi negatif bir
+        // değerle veriyordu. Bu, ilgili akışın zaman damgalarını (pts/dts) negatif
+        // yapıyordu. FFmpeg'in muxer'ı (libavformat/mux.c) negatif bir zaman damgası
+        // gördüğünde "-avoid_negative_ts" etkinse TÜM akışlara (dokunulmaması gereken
+        // video akışı dahil) AYNI telafi payını uyguluyor ("all output timestamps are
+        // shifted by the same amount"). Yani gecikmeli ses akışını ileri/geri kaydırmak
+        // yerine, FFmpeg videoyu da sesle birlikte kaydırıyor ve ikisi arasındaki
+        // istenen fark (senkron düzeltmesi) sıfırlanıyor; kullanıcı değeri girse de
+        // hiç uygulanmamış gibi bir sonuç elde ediyordu.
+        // ÇÖZÜM: Negatif gecikmeleri artık "-itsoffset" ile değil, ilgili girdiye özel
+        // "-ss" (baştan kırpma) ile uyguluyoruz (bkz. addDelayedInput). Bu şekilde hiçbir
+        // akışta negatif zaman damgası oluşmuyor, dolayısıyla "-avoid_negative_ts" hiç
+        // gerekmiyor ve video akışı asla kazara kaydırılmıyor.
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
