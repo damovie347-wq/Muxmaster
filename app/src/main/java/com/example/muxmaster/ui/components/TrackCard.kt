@@ -188,7 +188,7 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             onValueChange = { newVal ->
                 text = newVal
                 newVal.toLongOrNull()?.let { parsed ->
-                    val coerced = parsed.coerceIn(-10000, 10000)
+                    val coerced = parsed.coerceIn(-99999999, 99999999)
                     sliderValue = coerced.toFloat()
                     onDelayChange(coerced)
                 }
