@@ -472,21 +472,11 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     // Bir girdi dosyasını (ayrı ses/altyazı akışı) verilen gecikmeyle birlikte ekler.
-    // - Pozitif gecikme (ör. +186000ms): akış geç başlamalı -> "-itsoffset" ile
-    //   zaman damgalarını ileri kaydırıyoruz. Bu asla negatif bir zaman damgası
-    //   üretmez, bu yüzden güvenlidir.
-    // - Negatif gecikme (ör. -13911ms): akış erken başlamalı -> bunu negatif
-    //   "-itsoffset" ile YAPMIYORUZ (bu negatif pts üretir ve muxer'ın
-    //   "-avoid_negative_ts" telafisi TÜM akışları -video dahil- kaydırarak
-    //   düzeltmeyi sıfırlar). Bunun yerine ilgili girdiden "-ss" ile tam olarak
-    //   |gecikme| kadar baştan kırpıyoruz; kalan içerik kendi 0 noktasından
-    //   başlayarak videonun 0 noktasıyla hizalanır ve istenen "öne alma" etkisini
-    //   hiçbir akışı bozmadan verir.
+    // Hem pozitif hem negatif gecikmelerde "-itsoffset" kullanıyoruz. 
+    // Negatif değer girilirse (örn: -13.911), "-avoid_negative_ts disabled" sayesinde
+    // FFmpeg videoyu kaydırmaz, sadece sesi o kadar öne çeker.
     private fun addDelayedInput(args: MutableList<String>, path: String, delayMs: Long) {
-        when {
-            delayMs > 0L -> args += listOf("-itsoffset", (delayMs / 1000.0).toString())
-            delayMs < 0L -> args += listOf("-ss", ((-delayMs) / 1000.0).toString())
-        }
+        if (delayMs != 0L) args += listOf("-itsoffset", (delayMs / 1000.0).toString())
         args += listOf("-i", path)
     }
 
@@ -503,30 +493,13 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         subPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> subInputIdx[subTracks[i].id]?.let { args += listOf("-map","$it:s:0") }; is MapPlan.Failed -> {} } }
 
         args += listOf("-c:v","copy")
-        // KÖK NEDEN 1 (sesin birkaç dakika sonra tamamen kesilmesi):
-        // MKV muxer'ın varsayılan interleave penceresi (max_interleave_delta ~10sn)
-        // gecikmeli (itsoffset) bir ses/altyazı akışıyla birlikte kullanıldığında,
-        // muxer bekleyen paket kuyruğunu 10sn sonra zorla boşaltıyor ve gecikmeli
-        // akışın latency'si bu pencereyi aştığında o akışın paketleri sessizce
-        // atlanıyor/senkron kayboluyor (video oynamaya devam ederken ses susuyor).
-        // ÇÖZÜM: max_interleave_delta'yı 0 yaparak (sınırsız tamponlama) tüm
-        // akışların dosyanın sonuna kadar doğru şekilde iç içe (interleave)
-        // yazılmasını garanti ediyoruz.
+        
+        // max_interleave_delta 0: Sesin dosya sonunda kesilmesini engeller.
+        // avoid_negative_ts disabled: Negatif değer girildiğinde FFmpeg'in videoyu da 
+        // beraber kaydırıp senkronu bozmasını engeller. Video olduğu yerde kalır, 
+        // sadece ses/altyazı negatif veya pozitif kayar.
         args += listOf("-max_interleave_delta", "0")
-        // KÖK NEDEN 3 (negatif gecikme değerlerinin hiç uygulanmamış gibi görünmesi):
-        // Önceki sürüm, negatif gecikmeleri de "-itsoffset -13.911" gibi negatif bir
-        // değerle veriyordu. Bu, ilgili akışın zaman damgalarını (pts/dts) negatif
-        // yapıyordu. FFmpeg'in muxer'ı (libavformat/mux.c) negatif bir zaman damgası
-        // gördüğünde "-avoid_negative_ts" etkinse TÜM akışlara (dokunulmaması gereken
-        // video akışı dahil) AYNI telafi payını uyguluyor ("all output timestamps are
-        // shifted by the same amount"). Yani gecikmeli ses akışını ileri/geri kaydırmak
-        // yerine, FFmpeg videoyu da sesle birlikte kaydırıyor ve ikisi arasındaki
-        // istenen fark (senkron düzeltmesi) sıfırlanıyor; kullanıcı değeri girse de
-        // hiç uygulanmamış gibi bir sonuç elde ediyordu.
-        // ÇÖZÜM: Negatif gecikmeleri artık "-itsoffset" ile değil, ilgili girdiye özel
-        // "-ss" (baştan kırpma) ile uyguluyoruz (bkz. addDelayedInput). Bu şekilde hiçbir
-        // akışta negatif zaman damgası oluşmuyor, dolayısıyla "-avoid_negative_ts" hiç
-        // gerekmiyor ve video akışı asla kazara kaydırılmıyor.
+        args += listOf("-avoid_negative_ts", "disabled")
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
