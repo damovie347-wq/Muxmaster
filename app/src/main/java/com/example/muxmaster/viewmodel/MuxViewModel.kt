@@ -480,13 +480,15 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             delayMs > 0L -> {
                 val delayStr = String.format(Locale.US, "%.3f", delayMs / 1000.0)
                 args += listOf("-itsoffset", delayStr)
+                args += listOf("-i", path)
             }
             delayMs < 0L -> {
                 val delayStr = String.format(Locale.US, "%.3f", (-delayMs) / 1000.0)
                 args += listOf("-ss", delayStr)
+                args += listOf("-i", path)
             }
+            else -> args += listOf("-i", path)
         }
-        args += listOf("-i", path)
     }
 
     private fun buildFfmpegArgs(videoPath: String, audioPlans: List<MapPlan>, audioTracks: List<AudioTrackItem>, subPlans: List<MapPlan>, subTracks: List<SubtitleTrackItem>, outputPath: String): List<String> {
@@ -504,7 +506,10 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         args += listOf("-c:v","copy")
         
         // max_interleave_delta 0: Sesin dosya sonunda kesilmesini engeller.
+        // avoid_negative_ts disabled: +27763 gibi pozitif değerler girildiğinde FFmpeg'in 
+        // videoyu da beraber kaydırıp senkronu sıfırlamasını engeller. Video olduğu yerde kalır!
         args += listOf("-max_interleave_delta", "0")
+        args += listOf("-avoid_negative_ts", "disabled")
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
