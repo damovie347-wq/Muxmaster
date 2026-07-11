@@ -20,16 +20,18 @@ import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
 import com.example.muxmaster.model.TrackSource
 import com.example.muxmaster.model.VideoFile
+import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.math.abs
+import kotlin.math.max
 
 private sealed class MapPlan {
     data class Direct(val streamIndex: Int) : MapPlan()
@@ -61,6 +63,16 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         private set
     var isSuccess by mutableStateOf(false)
         private set
+
+    // KÖK NEDEN (arka planda mux ilerlemesi görünmüyordu): muxProgress sadece
+    // Compose state'iydi; uygulama arka plana alındığında/ekran kapatıldığında
+    // kullanıcının işlemi takip edebileceği hiçbir bildirim yoktu. Artık her
+    // ilerleme güncellemesi AYNI ANDA hem UI state'ini hem de MuxForegroundService
+    // üzerinden gerçek bir Android bildirimini (yüzde ilerlemeli) güncelliyor.
+    private fun setProgress(p: Int, statusText: String? = null) {
+        muxProgress = p
+        MuxForegroundService.update(app, p, statusText ?: app.getString(R.string.notif_muxing_progress))
+    }
 
     val expandedAudioIds = mutableStateMapOf<Int, Boolean>()
     val expandedSubtitleIds = mutableStateMapOf<Int, Boolean>()
@@ -122,10 +134,26 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             }
 
             val videoExt = extensionFromName(displayName).ifBlank { "mkv" }
-            val cacheFile = withContext(Dispatchers.IO) {
+
+            // KÖK NEDEN (video seçimi yavaş yükleniyordu): önceden TÜM video dosyası
+            // (birkaç GB olabilir) cache'e kopyalanana kadar bekleniyor, ffprobe ancak
+            // ONDAN SONRA çalıştırılıyordu — yani "işlem süresi = kopyalama + probe"
+            // idi ve dosya boyutuyla orantılı gereksiz bir bekleme yaratıyordu.
+            // ÇÖZÜM: ffprobe, SAF Uri'sinin file descriptor'ı üzerinden ("/proc/self/fd/N")
+            // DOĞRUDAN ve PARALEL olarak çalıştırılıyor; artık "işlem süresi =
+            // max(kopyalama, probe)". Kopyalama (mux için hâlâ gerekli, tek seferlik
+            // yerel dosya) arka planda aynı anda devam ederken track bilgisi çok daha
+            // hızlı gelir. fd üzerinden probe herhangi bir nedenle başarısız olursa
+            // (bazı OEM/bulut sağlayıcılarda olabilir), kopyalanmış dosya üzerinden
+            // sessizce normal probe'a geri dönülür.
+            val probeDeferred = async(Dispatchers.IO) { probeFromUri(uri) }
+            val cacheDeferred = async(Dispatchers.IO) {
                 copyUriToCache(uri, "input_video_${System.currentTimeMillis()}.$videoExt")
             }
+
+            val cacheFile = cacheDeferred.await()
             if (cacheFile == null) {
+                probeDeferred.cancel()
                 resultMessage = app.getString(R.string.err_video_read_failed)
                 isLoading = false
                 return@launch
@@ -134,7 +162,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             val sizeMb = withContext(Dispatchers.IO) { File(cacheFile).length().toFloat() / (1024 * 1024) }
 
             loadingMessage = "ffprobe..."
-            val probeResult = withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
+            val probeResult = probeDeferred.await()
+                ?: withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
 
             videoFile = VideoFile(
                 uri = uri, displayName = displayName, cachePath = cacheFile,
@@ -350,15 +379,19 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isMuxing) return
 
         muxJob = viewModelScope.launch {
+            // Arka plan bildirimi (bkz. MuxForegroundService): mux işlemi başladığı andan
+            // bitene kadar (uygulama arka plana alınsa/ekran kapansa bile) yüzde ilerlemeli
+            // gerçek bir Android bildirimi gösterilir.
+            MuxForegroundService.start(app)
             try {
-                isMuxing = true; muxProgress = 0; resultMessage = null; isSuccess = false
+                isMuxing = true; resultMessage = null; isSuccess = false
+                setProgress(0)
 
                 val workDir = File(app.cacheDir, "mux_work").also { it.mkdirs() }
                 val runTempFiles = mutableListOf<File>()
                 val enabledAudio = audioTracks.filter { it.isEnabled }
                 val enabledSubs  = subtitleTracks.filter { it.isEnabled }
 
-                muxProgress = 5
                 val preparedAudio = mutableListOf<AudioTrackItem>()
                 for ((i, track) in enabledAudio.withIndex()) {
                     if (track.source == TrackSource.NEW_FILE && track.fileUri != null) {
@@ -367,62 +400,93 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                         if (cp == null) { resultMessage = app.getString(R.string.err_audio_read_failed, track.fileDisplayName); return@launch }
                         runTempFiles.add(File(cp)); preparedAudio.add(track.copy(fileCachePath = cp))
                     } else preparedAudio.add(track)
-                    muxProgress = (5 + (i+1)*5 / (enabledAudio.size.coerceAtLeast(1))).coerceAtMost(10)
+                    setProgress((2 + (i + 1) * 6 / enabledAudio.size.coerceAtLeast(1)).coerceAtMost(8))
                 }
 
                 val preparedSubs = mutableListOf<SubtitleTrackItem>()
-                for (track in enabledSubs) {
+                for ((i, track) in enabledSubs.withIndex()) {
                     if (track.source == TrackSource.NEW_FILE && track.fileUri != null) {
                         val ext = extensionFromName(track.fileDisplayName)
                         val cp = withContext(Dispatchers.IO) { copyUriToCache(track.fileUri, "new_sub_${track.id}.$ext") }
                         if (cp == null) { resultMessage = app.getString(R.string.err_sub_read_failed, track.fileDisplayName); return@launch }
                         runTempFiles.add(File(cp)); preparedSubs.add(track.copy(fileCachePath = cp))
                     } else preparedSubs.add(track)
+                    setProgress((8 + (i + 1) * 2 / enabledSubs.size.coerceAtLeast(1)).coerceAtMost(10))
                 }
 
-                muxProgress = 12
+                setProgress(10)
 
+                // Ses track'leri artık planlama aşamasında ffmpeg çağırmıyor (bkz.
+                // resolveAudioPlan) — bu yüzden bu adımda ilerleme çubuğu ilerletmeye
+                // gerek yok, anında tamamlanıyor.
                 val audioPlans = mutableListOf<MapPlan>()
                 for (track in preparedAudio) {
-                    val plan = resolveAudioPlan(track, video.cachePath, workDir, runTempFiles)
+                    val plan = resolveAudioPlan(track)
                     if (plan is MapPlan.Failed) { resultMessage = plan.reason; return@launch }
                     audioPlans.add(plan)
                 }
+
+                // Altyazı track'leri, gecikmesi olan EXISTING kaynaklar için hâlâ ayrı
+                // dosyaya ayıklanıyor (extract); bu, gerçek zaman alabilen tek adım
+                // olduğundan ilerleme çubuğuna 10-15 aralığında yansıtılıyor.
                 val subPlans = mutableListOf<MapPlan>()
-                for (track in preparedSubs) {
+                for ((i, track) in preparedSubs.withIndex()) {
                     val plan = resolveSubtitlePlan(track, video.cachePath, workDir, runTempFiles)
                     if (plan is MapPlan.Failed) { resultMessage = plan.reason; return@launch }
                     subPlans.add(plan)
+                    setProgress((10 + (i + 1) * 5 / preparedSubs.size.coerceAtLeast(1)).coerceAtMost(15))
                 }
 
-                muxProgress = 20
+                setProgress(15)
                 val tempOutput = File(workDir, "temp_output_${System.currentTimeMillis()}.mkv").also { it.delete() }
                 runTempFiles.add(tempOutput)
 
                 val args = buildFfmpegArgs(video.cachePath, audioPlans, preparedAudio, subPlans, preparedSubs, tempOutput.absolutePath)
                 val rc = runFfmpegAsync(args, video.durationMs)
-                muxProgress = 92
+                setProgress(85)
 
                 if (rc == null || rc != 0) { resultMessage = app.getString(R.string.err_ffmpeg_code, rc.toString()); return@launch }
                 if (!tempOutput.exists() || tempOutput.length() == 0L) { resultMessage = app.getString(R.string.err_output_zero_bytes); return@launch }
 
-                muxProgress = 95
+                setProgress(88, app.getString(R.string.notif_saving_output))
                 val rawName = outputFileName.trim().ifBlank { "output_mux.mkv" }
                 val finalName = if (rawName.endsWith(".mkv", true)) rawName else "$rawName.mkv"
                 val finalBytes = tempOutput.length()
 
+                // KÖK NEDEN (ilerleme çubuğu düşük yüzdeden aniden %100'e zıplıyordu):
+                // çıktı dosyası (birkaç GB olabilir) SAF klasörüne TEK SEFERDE
+                // copyTo() ile kopyalanıyordu; bu adım gerçek zaman alsa da ilerleme
+                // çubuğunda HİÇ yansımıyor, kopyalama bitince değer doğrudan 100'e
+                // atlıyordu. ÇÖZÜM: kopyalama artık kendi byte sayacıyla manuel
+                // parça parça (chunk) yapılıyor ve gerçek kopyalanan oran 88-99
+                // aralığına yansıtılıyor.
                 val copyOk = withContext(Dispatchers.IO) {
                     try {
                         val outDoc = DocumentFile.fromTreeUri(app, outFolder)?.createFile("video/x-matroska", finalName)
                         val outUri = outDoc?.uri ?: return@withContext false
-                        app.contentResolver.openOutputStream(outUri)?.use { o -> tempOutput.inputStream().use { it.copyTo(o, 8*1024*1024) } } ?: return@withContext false
+                        app.contentResolver.openOutputStream(outUri)?.use { o ->
+                            tempOutput.inputStream().use { input ->
+                                val buffer = ByteArray(4 * 1024 * 1024)
+                                var copied = 0L
+                                var lastPct = -1
+                                while (true) {
+                                    val read = input.read(buffer)
+                                    if (read <= 0) break
+                                    o.write(buffer, 0, read)
+                                    copied += read
+                                    val within = if (finalBytes > 0) ((copied.toFloat() / finalBytes) * 11f).toInt() else 11
+                                    val pct = (88 + within).coerceIn(88, 99)
+                                    if (pct != lastPct) { lastPct = pct; setProgress(pct, app.getString(R.string.notif_saving_output)) }
+                                }
+                            }
+                        } ?: return@withContext false
                         triggerMediaScan(outUri)
                         true
                     } catch (_: Exception) { false }
                 }
 
                 withContext(Dispatchers.IO) { runTempFiles.forEach { runCatching { it.delete() } } }
-                muxProgress = 100
+                setProgress(100)
 
                 if (copyOk) {
                     resultMessage = app.getString(R.string.result_mux_success, finalBytes / (1024f*1024f))
@@ -438,22 +502,30 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                 throw c
             } finally {
                 isMuxing = false
+                MuxForegroundService.stop(app, resultMessage, isSuccess)
             }
         }
     }
 
-    private suspend fun resolveAudioPlan(track: AudioTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
-        return withContext(Dispatchers.IO) {
-            if (track.source == TrackSource.EXISTING) {
-                if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
-                val extracted = File(workDir, "extract_audio_${track.id}_${System.currentTimeMillis()}.mkv")
-                val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
-                if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
-                runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
-            } else {
-                if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
-                MapPlan.Separate(track.fileCachePath, track.delayMs)
-            }
+    private fun resolveAudioPlan(track: AudioTrackItem): MapPlan {
+        // KÖK NEDEN (delay girilse de sese HİÇBİR ŞEKİLDE yansımıyordu — ne pozitif
+        // ne negatif değerde): önceki sürüm, gecikmesi olan EXISTING track'leri ayrı
+        // bir dosyaya "extract" edip "-itsoffset" ile ayrı input olarak veriyordu.
+        // Bu, "-avoid_negative_ts" ve muxer'ın interleave davranışıyla birlikte
+        // ÇALIŞMASI GEREKEN ama pratikte container zaman damgası seviyesinde
+        // sessizce iptal olabilen kırılgan bir mekanizmaydı. ÇÖZÜM: ses gecikmesi
+        // artık container/timestamp oyunlarıyla DEĞİL, doğrudan örnek (sample)
+        // seviyesinde "adelay"/"atrim" ses filtreleriyle uygulanıyor (bkz.
+        // buildFfmpegArgs) — hangi player/muxer olursa olsun deterministik ve
+        // garanti çalışır. Bu sayede EXISTING track'ler delay için ARTIK HİÇ
+        // extract edilmiyor: her zaman doğrudan orijinal videodan map'lenir
+        // (ayrıca daha hızlı, çünkü fazladan bir ffmpeg çağrısı yapılmıyor).
+        return if (track.source == TrackSource.EXISTING) {
+            MapPlan.Direct(track.existingStreamIndex)
+        } else if (track.fileCachePath.isBlank()) {
+            MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
+        } else {
+            MapPlan.Separate(track.fileCachePath, 0L)
         }
     }
 
@@ -472,53 +544,81 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // Negatif değerlerde sesi/altyazıyı baştan kırpıyoruz (-ss), pozitif değerlerde ise 
-    // geciktiriyoruz (-itsoffset). Dikkat: String.format ile Amerikan formatı (27.763)
-    // kullanıyoruz ki FFmpeg virgüllü sayıları (27,763) okuyup işlemi yarıda bırakmasın.
-    private fun addDelayedInput(args: MutableList<String>, path: String, delayMs: Long) {
-        when {
-            delayMs > 0L -> {
-                val delayStr = String.format(Locale.US, "%.3f", delayMs / 1000.0)
-                args += listOf("-itsoffset", delayStr)
-                args += listOf("-i", path)
-            }
-            delayMs < 0L -> {
-                val delayStr = String.format(Locale.US, "%.3f", (-delayMs) / 1000.0)
-                args += listOf("-ss", delayStr)
-                args += listOf("-i", path)
-            }
-            else -> args += listOf("-i", path)
-        }
-    }
-
     private fun buildFfmpegArgs(videoPath: String, audioPlans: List<MapPlan>, audioTracks: List<AudioTrackItem>, subPlans: List<MapPlan>, subTracks: List<SubtitleTrackItem>, outputPath: String): List<String> {
         val args = mutableListOf("-y"); args += listOf("-i", videoPath)
         var nextIdx = 1
+        var hasSubOffset = false
+        var maxAbsSubDelayMs = 0L
+
+        // Ses input'ları: ARTIK "-itsoffset" uygulanmıyor. Gecikme, aşağıdaki
+        // "-filter:a:$i" bölümünde adelay/atrim ile örnek seviyesinde veriliyor.
         val audioInputIdx = mutableMapOf<Int,Int>()
-        audioPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { addDelayedInput(args, plan.path, plan.delayMs); audioInputIdx[audioTracks[i].id]=nextIdx++ } }
+        audioPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { args += listOf("-i",plan.path); audioInputIdx[audioTracks[i].id]=nextIdx++ } }
+
+        // Altyazı input'ları: metin tabanlı cue zaman damgaları için "-itsoffset"
+        // hâlâ standart ve doğru yöntem; değiştirilmedi.
         val subInputIdx = mutableMapOf<Int,Int>()
-        subPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { addDelayedInput(args, plan.path, plan.delayMs); subInputIdx[subTracks[i].id]=nextIdx++ } }
+        subPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { if (plan.delayMs != 0L) { args += listOf("-itsoffset",(plan.delayMs/1000.0).toString()); hasSubOffset=true; maxAbsSubDelayMs = max(maxAbsSubDelayMs, abs(plan.delayMs)) }; args += listOf("-i",plan.path); subInputIdx[subTracks[i].id]=nextIdx++ } }
 
         args += listOf("-map","0:v:0")
         audioPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> audioInputIdx[audioTracks[i].id]?.let { args += listOf("-map","$it:a:0") }; is MapPlan.Failed -> {} } }
         subPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> subInputIdx[subTracks[i].id]?.let { args += listOf("-map","$it:s:0") }; is MapPlan.Failed -> {} } }
 
         args += listOf("-c:v","copy")
-        
-        // max_interleave_delta 0: Sesin dosya sonunda kesilmesini engeller.
-        // avoid_negative_ts disabled: +27763 gibi pozitif değerler girildiğinde FFmpeg'in 
-        // videoyu da beraber kaydırıp senkronu sıfırlamasını engeller. Video olduğu yerde kalır!
-        args += listOf("-max_interleave_delta", "0")
-        args += listOf("-avoid_negative_ts", "disabled")
+
+        // KÖK NEDEN (ses seviyesi/kazanç artırıldığında muxlama AŞIRI yavaşlıyordu):
+        // "-max_interleave_delta" daha önce "0" (TAMAMEN SINIRSIZ tamponlama) idi.
+        // Video "-c:v copy" ile neredeyse anında akarken, kazanç (gain) uygulanan
+        // ses track'i YENİDEN KODLANIYOR (decode+filter+encode) — yani video
+        // paketleri sesten çok daha hızlı üretiliyor. Sınırsız pencerede muxer,
+        // yavaş sesin yetişmesini beklerken TÜM video paketlerini bellekte
+        // biriktirmek zorunda kalıyordu; büyük dosyalarda bu bellek/G-Ç baskısı
+        // mux süresini dakikalarca uzatıyordu. ÇÖZÜM: pencereyi tamamen sınırsız
+        // bırakmak yerine, gerçekte kullanılan en büyük altyazı gecikmesinin biraz
+        // üzerinde SONLU bir değere sabitliyoruz — hem eski senkron/kesilme
+        // sorununu çözüyor hem de sınırsız tamponlanmayı (dolayısıyla aşırı
+        // yavaşlamayı) engelliyor. (Ses artık itsoffset kullanmadığı için bu
+        // hesaplamaya dahil değil — bkz. yukarısı.)
+        val interleaveWindowUs = if (hasSubOffset) {
+            ((maxAbsSubDelayMs + 15_000L) * 1000L).coerceAtLeast(15_000_000L)
+        } else {
+            10_000_000L // ffmpeg varsayılanı (10sn); offset yoksa dokunmaya gerek yok
+        }
+        args += listOf("-max_interleave_delta", interleaveWindowUs.toString())
+
+        // KÖK NEDEN 2 (videonun başında otomatik ileri sarma/atlama):
+        // "-avoid_negative_ts make_zero" TÜM akışları (dokunulmamış video dahil)
+        // ortak bir sıfır noktasına göre kaydırıyordu; video akışının kendi
+        // start_time'ı tam sıfır olmadığında (çoğu mp4/mkv kaynağında normaldir)
+        // bu, video akışının birkaç kare ileri kaymasına, yani oynatılırken
+        // başın atlanmış/hızlı sarılmış gibi görünmesine neden oluyordu.
+        // ÇÖZÜM: "make_non_negative" yalnızca gerçekten negatif zaman damgasına
+        // sahip akışı (negatif gecikme uygulanan altyazı) düzeltir, diğer
+        // akışları (video gibi) olduğu gibi bırakır.
+        if (hasSubOffset) args += listOf("-avoid_negative_ts", "make_non_negative")
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
-            if (hasGain) {
-                val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
-                args += listOf(
-                    "-filter:a:$i",
-                    "volume=${gainStr}dB,acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1,alimiter=limit=0.999:attack=1:release=50:level=0"
-                )
+            val hasDelay = t.delayMs != 0L
+            if (hasGain || hasDelay) {
+                val filters = mutableListOf<String>()
+                // Gecikme: örnek seviyesinde, deterministik uygulama.
+                // Pozitif değer  -> ses GEÇ başlasın: başa sessizlik eklenir (adelay).
+                // Negatif değer  -> ses ERKEN başlasın: baştan o kadarı kesilir (atrim).
+                if (t.delayMs > 0L) {
+                    filters += "adelay=delays=${t.delayMs}:all=1"
+                } else if (t.delayMs < 0L) {
+                    val trimSec = "%.3f".format(java.util.Locale.US, (-t.delayMs) / 1000.0)
+                    filters += "atrim=start=$trimSec"
+                    filters += "asetpts=PTS-STARTPTS"
+                }
+                if (hasGain) {
+                    val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
+                    filters += "volume=${gainStr}dB"
+                    filters += "acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1"
+                    filters += "alimiter=limit=0.999:attack=1:release=50:level=0"
+                }
+                args += listOf("-filter:a:$i", filters.joinToString(","))
                 args += listOf("-c:a:$i", "aac", "-b:a:$i", "192k")
             } else {
                 args += listOf("-c:a:$i", "copy")
@@ -536,7 +636,15 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     private suspend fun runFfmpegAsync(args: List<String>, durationMs: Long): Int? = suspendCancellableCoroutine { cont ->
         val session = FFmpegKit.executeWithArgumentsAsync(args.toTypedArray(),
             { s -> val rc = s.returnCode?.value; if (cont.isActive) cont.resume(rc) }, null
-        ) { stats -> if (durationMs > 0) { val p = (((stats.time.toFloat()/durationMs)*70f)+20f).toInt().coerceIn(20,90); viewModelScope.launch { muxProgress = p } } }
+        ) { stats ->
+            if (durationMs > 0) {
+                // Ana ffmpeg encode aşaması ilerleme çubuğunda 15-85 aralığına
+                // yansıtılıyor; hazırlık (0-15) ve kaydetme (85-100) adımlarıyla
+                // birlikte artık uçtan uca gerçekçi/monoton bir ilerleme elde ediliyor.
+                val p = (((stats.time.toFloat()/durationMs)*70f)+15f).toInt().coerceIn(15,85)
+                viewModelScope.launch { setProgress(p) }
+            }
+        }
         cont.invokeOnCancellation { runCatching { session.cancel() } }
     }
 
@@ -547,6 +655,23 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             input.use { i -> f.outputStream().use { o -> i.copyTo(o, 8*1024*1024) } }
             if (f.exists() && f.length() > 0) f.absolutePath else null
         } catch (_: Exception) { null }
+    }
+
+    // Uri'nin SAF file descriptor'ını "/proc/self/fd/N" yolu olarak ffprobe'a doğrudan
+    // verir; tam kopyalamayı beklemeden video track bilgisini okumayı sağlar (bkz.
+    // onVideoSelected). videoCodec "Unknown" dönerse (fd okunamadı/desteklenmiyor)
+    // null döndürülür ve çağıran taraf kopyalanmış dosya üzerinden tekrar dener.
+    private suspend fun probeFromUri(uri: Uri): TrackProber.ProbeResult? = withContext(Dispatchers.IO) {
+        var pfd: android.os.ParcelFileDescriptor? = null
+        try {
+            pfd = app.contentResolver.openFileDescriptor(uri, "r") ?: return@withContext null
+            val result = TrackProber.probe("/proc/self/fd/${pfd.fd}")
+            if (result.videoCodec != "Unknown") result else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            try { pfd?.close() } catch (_: Exception) { }
+        }
     }
 
     private fun extensionFromName(n: String): String { val d = n.lastIndexOf('.'); return if (d<0||d==n.length-1) "" else n.substring(d+1).lowercase().filter { it.isLetterOrDigit() } }
