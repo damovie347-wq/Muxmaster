@@ -24,6 +24,14 @@
     <string name="output_filename_label">Output file name</string>
     <string name="muxing_progress">Processing... %%%1$d</string>
     <string name="progress_percent">%%%1$d</string>
+
+    <!-- MuxForegroundService (background notification) -->
+    <string name="notif_channel_name">Mux Progress</string>
+    <string name="notif_channel_desc">Shows progress while video muxing continues in the background</string>
+    <string name="notif_muxing_title">MuxMaster</string>
+    <string name="notif_muxing_progress">Muxing…</string>
+    <string name="notif_progress_text">Muxing… %%%1$d</string>
+    <string name="notif_saving_output">Saving output…</string>
     <string name="cancel_desc">Cancel</string>
     <string name="start_muxing_button">START MUXING</string>
 
