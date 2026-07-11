@@ -24,6 +24,14 @@
     <string name="output_filename_label">Ausgabedateiname</string>
     <string name="muxing_progress">Verarbeitung... %%%1$d</string>
     <string name="progress_percent">%%%1$d</string>
+
+    <!-- MuxForegroundService (Hintergrundbenachrichtigung) -->
+    <string name="notif_channel_name">Mux-Fortschritt</string>
+    <string name="notif_channel_desc">Zeigt den Fortschritt, während das Video-Muxing im Hintergrund fortgesetzt wird</string>
+    <string name="notif_muxing_title">MuxMaster</string>
+    <string name="notif_muxing_progress">Wird gemuxt…</string>
+    <string name="notif_progress_text">Wird gemuxt… %%%1$d</string>
+    <string name="notif_saving_output">Ausgabe wird gespeichert…</string>
     <string name="cancel_desc">Abbrechen</string>
     <string name="start_muxing_button">MUXEN STARTEN</string>
 
