@@ -58,6 +58,8 @@ class MainActivity : AppCompatActivity() {
             converterViewModel.setOutputFolder(uri)
         }
     }
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* sonuç ne olursa olsun akış devam eder */ }
 
     private val appPrefs by lazy { AppPreferences(applicationContext) }
 
@@ -70,6 +72,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Arka planda mux ilerleme bildirimi gösterilebilmesi için (Android 13+/API 33+
+        // bildirim izni ister); reddedilirse mux yine çalışır, sadece bildirim görünmez.
+        if (Build.VERSION.SDK_INT >= 33) {
+            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
         setContent {
             var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
             MuxMasterTheme(themeMode = themeMode) {
