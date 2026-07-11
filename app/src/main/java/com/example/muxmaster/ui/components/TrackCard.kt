@@ -42,6 +42,8 @@ import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
 import com.example.muxmaster.model.TrackSource
 import com.example.muxmaster.ui.theme.*
+import kotlin.math.abs
+import kotlin.math.max
 
 private val LANGUAGE_CHOICES = listOf(
     "tur" to "TR", "eng" to "EN", "deu" to "DE", "fra" to "FR",
@@ -134,9 +136,9 @@ private fun TrackHeaderRow(
     }
 }
 
-// Kaydırıcının taban aralığı; sabit bir üst/alt sınır DEĞİLDİR.
-// Girilen değer bu aralığı aşarsa, aşağıdaki dynamicRange hesaplaması
-// aralığı otomatik olarak büyütür; böylece hiçbir gecikme değeri kırpılmaz (clamp edilmez).
+// Slider'ın taban genişliği. ARTIK BİR ÜST/ALT SINIR DEĞİL — sadece varsayılan
+// görünüm genişliği. Gerçek sınır kaldırıldı; slider aşağıda mevcut değere göre
+// dinamik olarak genişliyor, metin kutusu ise hiçbir coerceIn() uygulamıyor.
 private const val DELAY_BASE_RANGE_MS = 10000f
 
 @Composable
@@ -145,21 +147,21 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     var isDragging by remember { mutableStateOf(false) }
 
-    // Kaydırıcının görsel aralığı, girilen/mevcut değere göre dinamik olarak genişler.
-    // Böylece -13911 veya +186000 gibi DELAY_BASE_RANGE_MS'i aşan değerler asla kırpılmaz;
-    // slider sadece o değeri gösterebilmek için kendi ölçeğini büyütür.
-    val dynamicRange = remember(delayMs, sliderValue) {
-        val neededForCommitted = kotlin.math.abs(delayMs.toFloat())
-        val neededForLive = kotlin.math.abs(sliderValue)
-        maxOf(DELAY_BASE_RANGE_MS, neededForCommitted * 1.2f, neededForLive * 1.2f)
-    }
+    // KÖK NEDEN (slider -10000/+10000'de kilitleniyordu): valueRange SABİT bir
+    // sabitle (-10000f..10000f) tanımlıydı ve metin kutusu da coerceIn(-10000,10000)
+    // ile değeri zorla kırpıyordu. Kullanıcı 27763 veya 186000 gibi bir değer girse
+    // bile hem gösterilen hem de gerçekte uygulanan değer sessizce 10000'e düşüyordu.
+    // ÇÖZÜM: metin kutusunda ARTIK HİÇBİR SINIRLAMA yok (girilen Long değeri olduğu
+    // gibi kabul edilir); slider'ın valueRange'i de mevcut değeri her zaman kapsayacak
+    // şekilde dinamik hesaplanıyor (taban ±10000ms, gerekirse |değer|'in %20 fazlası).
+    val dynamicRange = remember(delayMs) { max(DELAY_BASE_RANGE_MS, abs(delayMs.toFloat()) * 1.2f) }
 
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.delay_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
 
         BoxWithConstraints(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
             Slider(
-                value = sliderValue,
+                value = sliderValue.coerceIn(-dynamicRange, dynamicRange),
                 onValueChange = { isDragging = true; sliderValue = it },
                 onValueChangeFinished = {
                     isDragging = false
@@ -199,11 +201,9 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             value = text,
             onValueChange = { newVal ->
                 text = newVal
-                // DİKKAT: Artık hiçbir üst/alt sınır (coerceIn) uygulanmıyor.
-                // Girilen her geçerli Long değeri doğrudan kabul edilip
-                // hem slider durumuna hem de onDelayChange callback'ine (ve dolayısıyla
-                // muxlama sırasında -itsoffset parametresine) aynen aktarılıyor.
                 newVal.toLongOrNull()?.let { parsed ->
+                    // Artık hiçbir sınırlama yok: pozitif/negatif, ne büyüklükte olursa
+                    // olsun girilen değer olduğu gibi kabul edilir.
                     sliderValue = parsed.toFloat()
                     onDelayChange(parsed)
                 }
