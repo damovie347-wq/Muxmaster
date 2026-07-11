@@ -381,7 +381,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                         val cp = withContext(Dispatchers.IO) { copyUriToCache(track.fileUri, "new_audio_${track.id}.$ext") }
                         if (cp == null) { resultMessage = app.getString(R.string.err_audio_read_failed, track.fileDisplayName); return@launch }
                         runTempFiles.add(File(cp)); preparedAudio.add(track.copy(fileCachePath = cp))
-                        if (abs(track.gainDb) > 0.05f) {
+                        if (abs(track.gainDb) > 0.05f || track.delayMs != 0L) {
                             val probed = withContext(Dispatchers.IO) { TrackProber.probe(cp) }
                             probed.audioStreams.firstOrNull()?.codec?.let { detectedAudioCodecs[track.id] = it }
                         }
@@ -404,7 +404,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
                 val audioPlans = mutableListOf<MapPlan>()
                 for (track in preparedAudio) {
-                    val plan = resolveAudioPlan(track, video.cachePath, workDir, runTempFiles)
+                    val plan = resolveAudioPlan(track)
                     if (plan is MapPlan.Failed) { resultMessage = plan.reason; return@launch }
                     audioPlans.add(plan)
                 }
@@ -480,30 +480,20 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun resolveAudioPlan(track: AudioTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
-        val hasGain = abs(track.gainDb) > 0.05f
-        val hasDelay = track.delayMs != 0L
-        return withContext(Dispatchers.IO) {
-            if (track.source == TrackSource.EXISTING) {
-                if (hasDelay && !hasGain) {
-                    val extracted = File(workDir, "extract_audio_${track.id}_${System.currentTimeMillis()}.mka")
-                    val s = FFmpegKit.executeWithArguments(arrayOf(
-                        "-y", "-i", videoPath, "-map", "0:${track.existingStreamIndex}",
-                        "-c", "copy", extracted.absolutePath
-                    ))
-                    if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length() == 0L) {
-                        return@withContext MapPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
-                    }
-                    runTempFiles.add(extracted)
-                    MapPlan.Separate(extracted.absolutePath, track.delayMs)
-                } else {
-                    MapPlan.Direct(track.existingStreamIndex)
-                }
-            } else if (track.fileCachePath.isBlank()) {
-                MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
-            } else {
-                MapPlan.Separate(track.fileCachePath, if (hasGain) 0L else track.delayMs)
-            }
+    private fun resolveAudioPlan(track: AudioTrackItem): MapPlan {
+        // NOT: audio delay artık ASLA -itsoffset ile uygulanmıyor. -itsoffset stream-copy
+        // edilen bir track'in container zaman damgasını kaydırıyor; muxer interleave ile
+        // birleşince negatif/aralık-dışı DTS, düşen ses paketleri ve bazen tüm MKV'nin
+        // bozularak video oynatmasının bile bozulmasına yol açıyordu. Delay artık her zaman
+        // adelay/atrim filtresiyle sesin içine gömülüyor (bkz. buildFfmpegArgs) - %100 güvenilir.
+        // Bunun sonucunda EXISTING track'ler delay için ayrı bir ffmpeg extraction adımına
+        // ihtiyaç duymuyor - direkt map edilebiliyor, bu da daha hızlı.
+        return if (track.source == TrackSource.EXISTING) {
+            MapPlan.Direct(track.existingStreamIndex)
+        } else if (track.fileCachePath.isBlank()) {
+            MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
+        } else {
+            MapPlan.Separate(track.fileCachePath, 0L)
         }
     }
 
@@ -531,11 +521,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         val audioInputIdx = mutableMapOf<Int,Int>()
         audioPlans.forEachIndexed { i, plan ->
             if (plan is MapPlan.Separate) {
-                if (plan.delayMs != 0L) {
-                    args += listOf("-itsoffset", (plan.delayMs/1000.0).toString())
-                    hasAnyOffset = true
-                    maxAbsDelayMs = max(maxAbsDelayMs, abs(plan.delayMs))
-                }
+                // Burada -itsoffset yok: audio delay aşağıdaki adelay/atrim filtresiyle uygulanıyor.
                 args += listOf("-i", plan.path); audioInputIdx[audioTracks[i].id]=nextIdx++
             }
         }
@@ -560,7 +546,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
         audioTracks.forEachIndexed { i, t ->
             val hasGain = abs(t.gainDb) > 0.05f
-            if (hasGain) {
+            val hasDelay = t.delayMs != 0L
+            if (hasGain || hasDelay) {
                 val filters = mutableListOf<String>()
                 if (t.delayMs > 0L) {
                     filters += "adelay=delays=${t.delayMs}:all=1"
@@ -569,10 +556,12 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     filters += "atrim=start=$trimSec"
                     filters += "asetpts=PTS-STARTPTS"
                 }
-                val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
-                filters += "volume=${gainStr}dB"
-                filters += "acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1"
-                filters += "alimiter=limit=0.999:attack=1:release=50:level=0"
+                if (hasGain) {
+                    val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
+                    filters += "volume=${gainStr}dB"
+                    filters += "acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1"
+                    filters += "alimiter=limit=0.999:attack=1:release=50:level=0"
+                }
                 args += listOf("-filter:a:$i", filters.joinToString(","))
 
                 val sourceCodec = if (t.source == TrackSource.EXISTING) t.existingCodec else (detectedAudioCodecs[t.id] ?: "")
