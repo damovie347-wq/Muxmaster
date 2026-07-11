@@ -23,8 +23,8 @@ import com.example.muxmaster.R
  * kullanıcının işlemi takip edebileceği hiçbir gösterge yoktu, üstelik normal
  * bir Service (foreground olmayan) uzun süre arka planda kaldığında sistem
  * tarafından herhangi bir an sonlandırılabilirdi. ÇÖZÜM: mux başladığında GERÇEK
- * bir foreground service başlatılıyor (bildirim + `mediaProcessing` servis tipi
- * ile süreç canlı tutuluyor), her ilerleme adımında bildirim güncelleniyor,
+ * bir foreground service başlatılıyor (bildirim + `dataSync` servis tipi ile
+ * süreç canlı tutuluyor), her ilerleme adımında bildirim güncelleniyor,
  * işlem bitince (başarı/hata/iptal fark etmeksizin) servis durduruluyor.
  */
 class MuxForegroundService : Service() {
