@@ -12,6 +12,11 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
+    <!-- Arka planda mux ilerleme bildirimi için (bkz. MuxForegroundService) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+
     <application
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
@@ -21,6 +26,11 @@
         android:theme="@style/Theme.MuxMaster"
         android:localeConfig="@xml/locales_config"
         tools:targetApi="34">
+
+        <service
+            android:name=".service.MuxForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProcessing" />
 
         <activity
             android:name=".MainActivity"
