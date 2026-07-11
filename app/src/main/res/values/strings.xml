@@ -28,6 +28,15 @@
     <string name="output_filename_label">Çıktı dosya adı</string>
     <string name="muxing_progress">İşleniyor... %%%1$d</string>
     <string name="progress_percent">%%%1$d</string>
+
+    <!-- MuxForegroundService (arka plan bildirimi) -->
+    <string name="notif_channel_name">Mux İlerlemesi</string>
+    <string name="notif_channel_desc">Video muxlama işlemi arka planda devam ederken ilerleme durumunu gösterir</string>
+    <string name="notif_muxing_title">MuxMaster</string>
+    <string name="notif_muxing_progress">Muxlanıyor…</string>
+    <string name="notif_progress_text">Muxlanıyor… %%%1$d</string>
+    <string name="notif_saving_output">Çıktı kaydediliyor…</string>
+
     <string name="cancel_desc">İptal et</string>
     <string name="start_muxing_button">MUXLAMAYI BAŞLAT</string>
 
