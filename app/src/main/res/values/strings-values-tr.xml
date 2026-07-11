@@ -1,0 +1,135 @@
+<resources>
+    <string name="app_name">MuxMaster</string>
+
+    <!-- Genel -->
+    <string name="action_select">SEÇ</string>
+    <string name="action_change">DEĞİŞTİR</string>
+    <string name="action_close">Kapat</string>
+    <string name="action_export">Dışa Aktar</string>
+
+    <!-- MuxScreen -->
+    <string name="nav_converter_desc">Ses Dönüştürücü</string>
+    <string name="nav_settings_desc">Ayarlar</string>
+    <string name="tab_audio">Sesler (%1$d)</string>
+    <string name="tab_subtitle">Altyazılar (%1$d)</string>
+    <string name="add_audio_button">Ses Dosyası Ekle</string>
+    <string name="add_subtitle_button">Altyazı Dosyası Ekle</string>
+    <string name="empty_audio_hint">Bu videoda ses track\'i yok. + ile ekleyebilirsin.</string>
+    <string name="empty_subtitle_hint">Bu videoda altyazı yok. + ile ekleyebilirsin.</string>
+
+    <!-- VideoCard -->
+    <string name="video_analyzing">Video analiz ediliyor...</string>
+    <string name="video_none_selected">Henüz video seçilmedi</string>
+    <string name="video_pick_button">VİDEO SEÇ (MKV / MP4 / AVI)</string>
+    <string name="video_remove_desc">Kaldır</string>
+
+    <!-- BottomMuxBar -->
+    <string name="output_folder_none">Çıktı klasörü seçilmedi</string>
+    <string name="output_filename_label">Çıktı dosya adı</string>
+    <string name="muxing_progress">İşleniyor... %%%1$d</string>
+    <string name="progress_percent">%%%1$d</string>
+
+    <!-- MuxForegroundService (arka plan bildirimi) -->
+    <string name="notif_channel_name">Mux İlerlemesi</string>
+    <string name="notif_channel_desc">Video muxlama işlemi arka planda devam ederken ilerleme durumunu gösterir</string>
+    <string name="notif_muxing_title">MuxMaster</string>
+    <string name="notif_muxing_progress">Muxlanıyor…</string>
+    <string name="notif_progress_text">Muxlanıyor… %%%1$d</string>
+    <string name="notif_saving_output">Çıktı kaydediliyor…</string>
+
+    <string name="cancel_desc">İptal et</string>
+    <string name="start_muxing_button">MUXLAMAYI BAŞLAT</string>
+
+    <!-- TrackCard -->
+    <string name="source_original">ORİJİNAL</string>
+    <string name="source_new">YENİ</string>
+    <string name="expand_desc">Genişlet</string>
+    <string name="collapse_desc">Daralt</string>
+    <string name="move_up_desc">Yukarı taşı</string>
+    <string name="move_down_desc">Aşağı taşı</string>
+    <string name="delete_desc">Sil</string>
+    <string name="delay_label">Delay</string>
+    <string name="label_default">Varsayılan</string>
+    <string name="label_active">Aktif</string>
+    <string name="label_forced">Zorunlu</string>
+    <string name="label_hi">HI</string>
+    <string name="audio_track_fallback_title">Ses Parçası #%1$d</string>
+    <string name="subtitle_track_fallback_title">Altyazı #%1$d</string>
+    <string name="gain_label">Ses Yükseltme</string>
+
+    <!-- ConverterScreen -->
+    <string name="converter_title">Ses Dönüştürücü</string>
+    <string name="nav_back_to_mux_desc">Muxlayıcıya dön</string>
+    <string name="source_files_title">Kaynak Ses Dosyaları</string>
+    <string name="clear_all">TÜMÜNÜ TEMİZLE</string>
+    <string name="no_file_selected">Henüz dosya seçilmedi</string>
+    <string name="pick_audio_multi">SES DOSYALARI SEÇ (çoklu seçilebilir)</string>
+    <string name="add_more_files">DAHA FAZLA DOSYA EKLE</string>
+    <string name="target_format_title">Hedef Format</string>
+    <string name="target_bitrate_title">Hedef Bitrate (%1$s)</string>
+    <string name="custom_bitrate_label">Özel bitrate (kbps)</string>
+    <string name="kbps_suffix">kbps</string>
+    <string name="bitrate_invalid">⚠ Geçersiz (min. 6 kbps)</string>
+    <string name="bitrate_speech_only">Çok düşük — sadece konuşma için</string>
+    <string name="bitrate_low_music">Düşük kalite müzik</string>
+    <string name="bitrate_good">İyi kalite — önerilen</string>
+    <string name="bitrate_high">Yüksek kalite</string>
+    <string name="bitrate_too_high">Çok yüksek — dosya büyük olur</string>
+    <string name="output_folder_title">Çıktı Klasörü</string>
+    <string name="output_folder_hint">Her dosya, orijinal adı + seçili formatın uzantısıyla bu klasöre kaydedilir.</string>
+    <string name="converting_label">Dönüştürülüyor... %%%1$d</string>
+    <string name="converting_file">İşleniyor: %1$s</string>
+    <string name="convert_button_single">DOSYAYI %1$s FORMATINA DÖNÜŞTÜR</string>
+    <string name="convert_button_multi">%1$d DOSYAYI %2$s FORMATINA DÖNÜŞTÜR</string>
+    <string name="done_label">Tamamlandı — %1$.1f MB</string>
+    <string name="queue_item_subtitle">%1$s · %2$s · %3$.1f MB</string>
+    <string name="channel_mono">Mono</string>
+    <string name="channel_stereo">Stereo</string>
+    <string name="channel_51">5.1</string>
+    <string name="channel_71">7.1</string>
+    <string name="channel_generic">%1$dch</string>
+
+    <!-- ConverterViewModel mesajları -->
+    <string name="err_no_files_analyzed">Seçilen dosya(lar) okunamadı / ses stream\'i bulunamadı.</string>
+    <string name="err_no_pending_files">Kuyrukta dönüştürülecek dosya yok.</string>
+    <string name="err_no_output_folder">Çıktı klasörü seçilmedi.</string>
+    <string name="err_invalid_bitrate">Geçerli bir bitrate girin (6-512 kbps arası).</string>
+    <string name="err_ffmpeg_code">FFmpeg hatası (kod: %1$s).</string>
+    <string name="err_save_failed">Hedef klasöre kaydedilemedi.</string>
+    <string name="result_convert_success_all">✅ Tamamlandı! %1$d/%2$d dosya %3$s formatına dönüştürüldü.</string>
+    <string name="result_convert_partial">⚠ %1$d/%2$d tamamlandı, %3$d dosyada hata oluştu.</string>
+    <string name="result_cancelled">İşlem iptal edildi.</string>
+
+    <!-- MuxViewModel mesajları -->
+    <string name="err_video_read_failed">Video okunamadı / kopyalanamadı.</string>
+    <string name="err_audio_extract_failed">Ses track ayıklanamadı (#%1$d)</string>
+    <string name="err_sub_extract_failed">Altyazı ayıklanamadı (#%1$d)</string>
+    <string name="err_audio_file_missing">Ses dosyası bulunamadı: %1$s</string>
+    <string name="err_sub_file_missing">Altyazı dosyası bulunamadı: %1$s</string>
+    <string name="err_audio_read_failed">Ses dosyası okunamadı: %1$s</string>
+    <string name="err_sub_read_failed">Altyazı okunamadı: %1$s</string>
+    <string name="err_no_video">Önce bir video dosyası seçin.</string>
+    <string name="err_output_zero_bytes">Hata: Çıktı dosyası oluşmadı (0 byte).</string>
+    <string name="err_save_to_folder_failed">Hata: Dosya hedef klasöre kaydedilemedi.</string>
+    <string name="result_mux_success">✅ Tamamlandı! %1$.1f MB</string>
+    <string name="result_mux_cancelled">❌ İşlem iptal edildi.</string>
+    <string name="export_success">✅ Dışa aktarıldı: %1$s</string>
+    <string name="export_failed">Dışa aktarma başarısız oldu.</string>
+    <string name="export_no_output_folder">Önce bir çıktı klasörü seçin (Ayarlar ya da aşağıdaki SEÇ butonu).</string>
+
+    <!-- SettingsScreen -->
+    <string name="settings_title">Ayarlar</string>
+    <string name="settings_nav_back_desc">Geri dön</string>
+    <string name="settings_language_title">Uygulama Dili</string>
+    <string name="settings_language_tr">Türkçe</string>
+    <string name="settings_language_en">English</string>
+    <string name="settings_language_de">Deutsch</string>
+    <string name="settings_theme_title">Görünüm</string>
+    <string name="settings_theme_system">Sistem</string>
+    <string name="settings_theme_light">Açık</string>
+    <string name="settings_theme_dark">Koyu</string>
+    <string name="settings_theme_amoled">AMOLED (Tam Siyah)</string>
+    <string name="settings_output_folder_title">Varsayılan Çıktı Klasörü</string>
+    <string name="settings_output_folder_desc">Muxlanan dosyalar ve dışa aktarılan ses/altyazılar için varsayılan klasör.</string>
+    <string name="settings_output_folder_none">Seçilmedi</string>
+</resources>
