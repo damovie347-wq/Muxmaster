@@ -15,6 +15,7 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.NativeTools
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
@@ -26,17 +27,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
-import kotlin.coroutines.resume
 import kotlin.math.abs
-import kotlin.math.max
 
-private sealed class MapPlan {
-    data class Direct(val streamIndex: Int) : MapPlan()
-    data class Separate(val path: String, val delayMs: Long) : MapPlan()
-    data class Failed(val reason: String) : MapPlan()
+/**
+ * Bir audio/subtitle track'inin mkvmerge komutunda nasıl temsil edileceğini belirtir.
+ *
+ * FromSource -> track, ana video dosyasının İÇİNDEN doğrudan mkvmerge'e -a/-s ile seçilerek
+ *               alınır (ekstraksiyon YOK, tamamen lossless, --sync ile delay uygulanır).
+ * FromFile   -> track, ayrı bir dosya olarak mkvmerge'e eklenir (kullanıcının eklediği harici
+ *               dosya OLABİLİR, ya da ses yükseltme (gain) gerektiği için önce ffmpeg ile
+ *               işlenip yeni bir dosyaya yazılmış OLABİLİR).
+ */
+private sealed class TrackPlan {
+    data class FromSource(val trackId: Int, val delayMs: Long) : TrackPlan()
+    data class FromFile(val path: String, val delayMs: Long) : TrackPlan()
+    data class Failed(val reason: String) : TrackPlan()
 }
 
 class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
@@ -81,6 +88,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private var muxJob: Job? = null
 
+    /** Uygulamanın kendi private çalışma dizini (Termux/paylaşımlı depolamaya gerek yok). */
+    private fun workDir(): File = File(app.cacheDir, "mux_work").also { it.mkdirs() }
+
     init {
         prefs.defaultOutputFolder?.let { outputFolderUri = it }
     }
@@ -94,7 +104,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         resultMessage = null; isSuccess = false; muxProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                File(app.cacheDir, "mux_work").listFiles()
+                workDir().listFiles()
                     ?.filter { !it.name.startsWith("input_video") }
                     ?.forEach { it.delete() }
             }
@@ -109,7 +119,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         resultMessage = null; isSuccess = false; muxProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             if (old != null) runCatching { File(old).delete() }
-            runCatching { File(app.cacheDir, "mux_work").deleteRecursively() }
+            runCatching { workDir().deleteRecursively() }
         }
     }
 
@@ -124,7 +134,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             val old = videoFile?.cachePath
             withContext(Dispatchers.IO) {
                 if (old != null) runCatching { File(old).delete() }
-                runCatching { File(app.cacheDir, "mux_work").listFiles()
+                runCatching { workDir().listFiles()
                     ?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() } }
             }
 
@@ -152,7 +162,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             videoFile = VideoFile(
                 uri = uri, displayName = displayName, cachePath = cacheFile,
                 videoCodec = probeResult.videoCodec, resolution = probeResult.resolution,
-                durationMs = probeResult.durationMs, fileSizeMb = sizeMb
+                durationMs = probeResult.durationMs, fileSizeMb = sizeMb,
+                videoStreamIndex = probeResult.videoStreamIndex
             )
 
             probeResult.audioStreams.forEachIndexed { i, audio ->
@@ -235,14 +246,14 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     )
                     if (track.source == TrackSource.EXISTING) {
                         val video = videoFile ?: return@runCatching null
+                        if (!NativeTools.ensureInstalled(app)) return@runCatching null
                         val (ext, mime) = audioExportContainerFor(track.existingCodec)
-                        val workDir = File(app.cacheDir, "mux_work").also { it.mkdirs() }
-                        val tmp = File(workDir, "export_audio_${track.id}_${System.currentTimeMillis()}.$ext")
-                        val s = FFmpegKit.executeWithArguments(arrayOf(
-                            "-y", "-i", video.cachePath, "-map", "0:${track.existingStreamIndex}",
-                            "-c", "copy", "-avoid_negative_ts", "make_zero", tmp.absolutePath
-                        ))
-                        val good = ReturnCode.isSuccess(s.returnCode) && tmp.exists() && tmp.length() > 0L
+                        val tmp = File(workDir(), "export_audio_${track.id}_${System.currentTimeMillis()}.$ext")
+                        val res = NativeTools.run(
+                            app, NativeTools.mkvextractPath(app),
+                            listOf(video.cachePath, "tracks", "${track.existingStreamIndex}:${tmp.absolutePath}")
+                        )
+                        val good = (res.exitCode == 0 || res.exitCode == 1) && tmp.exists() && tmp.length() > 0L
                         val result = if (good) copyFileToTree(tmp, folder, "$baseName.$ext", mime) else null
                         runCatching { tmp.delete() }
                         result
@@ -277,6 +288,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     )
                     if (track.source == TrackSource.EXISTING) {
                         val video = videoFile ?: return@runCatching null
+                        if (!NativeTools.ensureInstalled(app)) return@runCatching null
                         val codec = track.existingCodec.lowercase()
                         val ext = when (codec) {
                             "subrip", "srt" -> "srt"
@@ -289,12 +301,12 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                             "ass", "ssa" -> "text/x-ssa"
                             else -> "application/x-matroska"
                         }
-                        val workDir = File(app.cacheDir, "mux_work").also { it.mkdirs() }
-                        val tmp = File(workDir, "export_sub_${track.id}_${System.currentTimeMillis()}.$ext")
-                        val s = FFmpegKit.executeWithArguments(arrayOf(
-                            "-y", "-i", video.cachePath, "-map", "0:${track.existingStreamIndex}", "-c", "copy", tmp.absolutePath
-                        ))
-                        val good = ReturnCode.isSuccess(s.returnCode) && tmp.exists() && tmp.length() > 0L
+                        val tmp = File(workDir(), "export_sub_${track.id}_${System.currentTimeMillis()}.$ext")
+                        val res = NativeTools.run(
+                            app, NativeTools.mkvextractPath(app),
+                            listOf(video.cachePath, "tracks", "${track.existingStreamIndex}:${tmp.absolutePath}")
+                        )
+                        val good = (res.exitCode == 0 || res.exitCode == 1) && tmp.exists() && tmp.length() > 0L
                         val result = if (good) copyFileToTree(tmp, folder, "$baseName.$ext", mime) else null
                         runCatching { tmp.delete() }
                         result
@@ -368,23 +380,23 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                 isMuxing = true; resultMessage = null; isSuccess = false
                 setProgress(0)
 
-                val workDir = File(app.cacheDir, "mux_work").also { it.mkdirs() }
+                if (!withContext(Dispatchers.IO) { NativeTools.ensureInstalled(app) }) {
+                    resultMessage = app.getString(R.string.err_native_tools_missing)
+                    return@launch
+                }
+
+                val wd = workDir()
                 val runTempFiles = mutableListOf<File>()
                 val enabledAudio = audioTracks.filter { it.isEnabled }
                 val enabledSubs  = subtitleTracks.filter { it.isEnabled }
 
                 val preparedAudio = mutableListOf<AudioTrackItem>()
-                val detectedAudioCodecs = mutableMapOf<Int, String>()
                 for ((i, track) in enabledAudio.withIndex()) {
                     if (track.source == TrackSource.NEW_FILE && track.fileUri != null) {
                         val ext = extensionFromName(track.fileDisplayName)
                         val cp = withContext(Dispatchers.IO) { copyUriToCache(track.fileUri, "new_audio_${track.id}.$ext") }
                         if (cp == null) { resultMessage = app.getString(R.string.err_audio_read_failed, track.fileDisplayName); return@launch }
                         runTempFiles.add(File(cp)); preparedAudio.add(track.copy(fileCachePath = cp))
-                        if (abs(track.gainDb) > 0.05f || track.delayMs != 0L) {
-                            val probed = withContext(Dispatchers.IO) { TrackProber.probe(cp) }
-                            probed.audioStreams.firstOrNull()?.codec?.let { detectedAudioCodecs[track.id] = it }
-                        }
                     } else preparedAudio.add(track)
                     setProgress((2 + (i + 1) * 6 / enabledAudio.size.coerceAtLeast(1)).coerceAtMost(8))
                 }
@@ -402,30 +414,38 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
                 setProgress(10)
 
-                val audioPlans = mutableListOf<MapPlan>()
+                val audioPlans = mutableListOf<TrackPlan>()
                 for (track in preparedAudio) {
-                    val plan = resolveAudioPlan(track)
-                    if (plan is MapPlan.Failed) { resultMessage = plan.reason; return@launch }
+                    val plan = resolveAudioPlan(track, wd, runTempFiles)
+                    if (plan is TrackPlan.Failed) { resultMessage = plan.reason; return@launch }
                     audioPlans.add(plan)
                 }
 
-                val subPlans = mutableListOf<MapPlan>()
-                for ((i, track) in preparedSubs.withIndex()) {
-                    val plan = resolveSubtitlePlan(track, video.cachePath, workDir, runTempFiles)
-                    if (plan is MapPlan.Failed) { resultMessage = plan.reason; return@launch }
+                val subPlans = mutableListOf<TrackPlan>()
+                for (track in preparedSubs) {
+                    val plan = resolveSubtitlePlan(track)
+                    if (plan is TrackPlan.Failed) { resultMessage = plan.reason; return@launch }
                     subPlans.add(plan)
-                    setProgress((10 + (i + 1) * 5 / preparedSubs.size.coerceAtLeast(1)).coerceAtMost(15))
                 }
 
                 setProgress(15)
-                val tempOutput = File(workDir, "temp_output_${System.currentTimeMillis()}.mkv").also { it.delete() }
+                val tempOutput = File(wd, "temp_output_${System.currentTimeMillis()}.mkv").also { it.delete() }
                 runTempFiles.add(tempOutput)
 
-                val args = buildFfmpegArgs(video.cachePath, audioPlans, preparedAudio, subPlans, preparedSubs, tempOutput.absolutePath, detectedAudioCodecs)
-                val rc = runFfmpegAsync(args, video.durationMs)
+                val args = buildMkvmergeArgs(video, preparedAudio, audioPlans, preparedSubs, subPlans, tempOutput.absolutePath)
+
+                val execResult = NativeTools.run(app, NativeTools.mkvmergePath(app), args) { p ->
+                    viewModelScope.launch { setProgress((15 + (p * 70 / 100)).coerceIn(15, 85)) }
+                }
                 setProgress(85)
 
-                if (rc == null || rc != 0) { resultMessage = app.getString(R.string.err_ffmpeg_code, rc.toString()); return@launch }
+                // mkvmerge exit code: 0 = başarılı, 1 = uyarılarla tamamlandı (yine de geçerli çıktı), 2 = hata
+                if (execResult.exitCode != 0 && execResult.exitCode != 1) {
+                    val detail = execResult.output.trim().takeLast(300)
+                    resultMessage = app.getString(R.string.err_mkvmerge_code, execResult.exitCode) +
+                        if (detail.isNotBlank()) "\n$detail" else ""
+                    return@launch
+                }
                 if (!tempOutput.exists() || tempOutput.length() == 0L) { resultMessage = app.getString(R.string.err_output_zero_bytes); return@launch }
 
                 setProgress(88, app.getString(R.string.notif_saving_output))
@@ -471,7 +491,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             } catch (c: CancellationException) {
                 resultMessage = app.getString(R.string.result_mux_cancelled)
                 isSuccess = false
-                withContext(Dispatchers.IO) { runCatching { File(app.cacheDir, "mux_work").listFiles()?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() } } }
+                withContext(Dispatchers.IO) { runCatching { workDir().listFiles()?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() } } }
                 throw c
             } finally {
                 isMuxing = false
@@ -480,105 +500,140 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun resolveAudioPlan(track: AudioTrackItem): MapPlan {
-        // NOT: audio delay artık ASLA -itsoffset ile uygulanmıyor. -itsoffset stream-copy
-        // edilen bir track'in container zaman damgasını kaydırıyor; muxer interleave ile
-        // birleşince negatif/aralık-dışı DTS, düşen ses paketleri ve bazen tüm MKV'nin
-        // bozularak video oynatmasının bile bozulmasına yol açıyordu. Delay artık her zaman
-        // adelay/atrim filtresiyle sesin içine gömülüyor (bkz. buildFfmpegArgs) - %100 güvenilir.
-        // Bunun sonucunda EXISTING track'ler delay için ayrı bir ffmpeg extraction adımına
-        // ihtiyaç duymuyor - direkt map edilebiliyor, bu da daha hızlı.
+    /**
+     * EXISTING (videonun içinden) track, ses yükseltme (gain) istemiyorsa hiç ekstraksiyon
+     * yapılmadan doğrudan mkvmerge'e -a ile seçtirilir (FromSource). Gain isteniyorsa - mkvmerge
+     * ses filtresi uygulayamadığı için - önce ffmpeg ile volume/compressor/limiter filtresinden
+     * geçirilip yeni bir dosyaya yazılır (FromFile). Delay HER ZAMAN mkvmerge --sync ile
+     * uygulanır (ffmpeg'in adelay/atrim'ine artık hiç gerek yok).
+     */
+    private suspend fun resolveAudioPlan(track: AudioTrackItem, wd: File, runTempFiles: MutableList<File>): TrackPlan {
+        val needsGain = abs(track.gainDb) > 0.05f
         return if (track.source == TrackSource.EXISTING) {
-            MapPlan.Direct(track.existingStreamIndex)
-        } else if (track.fileCachePath.isBlank()) {
-            MapPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
-        } else {
-            MapPlan.Separate(track.fileCachePath, 0L)
-        }
-    }
-
-    private suspend fun resolveSubtitlePlan(track: SubtitleTrackItem, videoPath: String, workDir: File, runTempFiles: MutableList<File>): MapPlan {
-        return withContext(Dispatchers.IO) {
-            if (track.source == TrackSource.EXISTING) {
-                if (track.delayMs == 0L) return@withContext MapPlan.Direct(track.existingStreamIndex)
-                val extracted = File(workDir, "extract_sub_${track.id}_${System.currentTimeMillis()}.mkv")
-                val s = FFmpegKit.executeWithArguments(arrayOf("-y","-i",videoPath,"-map","0:${track.existingStreamIndex}","-c","copy",extracted.absolutePath))
-                if (!ReturnCode.isSuccess(s.returnCode) || !extracted.exists() || extracted.length()==0L) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_extract_failed, track.existingStreamIndex))
-                runTempFiles.add(extracted); MapPlan.Separate(extracted.absolutePath, track.delayMs)
+            if (!needsGain) {
+                TrackPlan.FromSource(track.existingStreamIndex, track.delayMs)
             } else {
-                if (track.fileCachePath.isBlank()) return@withContext MapPlan.Failed(app.getString(R.string.err_sub_file_missing, track.fileDisplayName))
-                MapPlan.Separate(track.fileCachePath, track.delayMs)
+                val video = videoFile ?: return TrackPlan.Failed(app.getString(R.string.err_no_video))
+                val processed = withContext(Dispatchers.IO) {
+                    applyGainFilter(video.cachePath, "0:${track.existingStreamIndex}", track.existingCodec, track.gainDb, wd)
+                } ?: return TrackPlan.Failed(app.getString(R.string.err_audio_extract_failed, track.existingStreamIndex))
+                runTempFiles.add(processed)
+                TrackPlan.FromFile(processed.absolutePath, track.delayMs)
+            }
+        } else {
+            if (track.fileCachePath.isBlank()) return TrackPlan.Failed(app.getString(R.string.err_audio_file_missing, track.fileDisplayName))
+            if (!needsGain) {
+                TrackPlan.FromFile(track.fileCachePath, track.delayMs)
+            } else {
+                val codec = withContext(Dispatchers.IO) { TrackProber.probe(track.fileCachePath) }.audioStreams.firstOrNull()?.codec ?: ""
+                val processed = withContext(Dispatchers.IO) {
+                    applyGainFilter(track.fileCachePath, "0:a:0", codec, track.gainDb, wd)
+                } ?: return TrackPlan.Failed(app.getString(R.string.err_audio_read_failed, track.fileDisplayName))
+                runTempFiles.add(processed)
+                TrackPlan.FromFile(processed.absolutePath, track.delayMs)
             }
         }
     }
 
-    private fun buildFfmpegArgs(videoPath: String, audioPlans: List<MapPlan>, audioTracks: List<AudioTrackItem>, subPlans: List<MapPlan>, subTracks: List<SubtitleTrackItem>, outputPath: String, detectedAudioCodecs: Map<Int, String> = emptyMap()): List<String> {
-        val args = mutableListOf("-y"); args += listOf("-i", videoPath)
-        var nextIdx = 1
-        var hasAnyOffset = false
-        var maxAbsDelayMs = 0L
+    /** Altyazılarda gain kavramı yok; her zaman doğrudan seçilir veya doğrudan eklenir. */
+    private fun resolveSubtitlePlan(track: SubtitleTrackItem): TrackPlan {
+        return if (track.source == TrackSource.EXISTING) {
+            TrackPlan.FromSource(track.existingStreamIndex, track.delayMs)
+        } else if (track.fileCachePath.isBlank()) {
+            TrackPlan.Failed(app.getString(R.string.err_sub_file_missing, track.fileDisplayName))
+        } else {
+            TrackPlan.FromFile(track.fileCachePath, track.delayMs)
+        }
+    }
 
-        val audioInputIdx = mutableMapOf<Int,Int>()
-        audioPlans.forEachIndexed { i, plan ->
-            if (plan is MapPlan.Separate) {
-                // Burada -itsoffset yok: audio delay aşağıdaki adelay/atrim filtresiyle uygulanıyor.
-                args += listOf("-i", plan.path); audioInputIdx[audioTracks[i].id]=nextIdx++
+    /**
+     * mkvmerge komut satırı argümanlarını inşa eder. Video + gain gerektirmeyen mevcut audio/altyazı
+     * track'leri TEK bir kaynak dosya (ana video) segmentinden -d/-a/-s ile seçilir; her track'in
+     * language/track-name/default/forced/hi/sync ayarları o segmentte ilgili track id'sine uygulanır.
+     * Harici dosyalar (yeni eklenen ya da gain-işlenmiş) ayrı segmentler olarak eklenir.
+     * --track-order ile nihai sıralama (video, sonra kullanıcının sıraladığı ses/altyazılar) garanti edilir.
+     */
+    private fun buildMkvmergeArgs(
+        video: VideoFile,
+        audioTracks: List<AudioTrackItem>, audioPlans: List<TrackPlan>,
+        subTracks: List<SubtitleTrackItem>, subPlans: List<TrackPlan>,
+        outputPath: String
+    ): List<String> {
+        val args = mutableListOf("--gui-mode", "-o", outputPath)
+
+        val sourceAudioIds = mutableListOf<Int>()
+        val sourceSubIds = mutableListOf<Int>()
+        audioTracks.forEachIndexed { i, _ -> (audioPlans[i] as? TrackPlan.FromSource)?.let { sourceAudioIds.add(it.trackId) } }
+        subTracks.forEachIndexed { i, _ -> (subPlans[i] as? TrackPlan.FromSource)?.let { sourceSubIds.add(it.trackId) } }
+
+        val sourceOptions = mutableListOf<String>()
+        audioTracks.forEachIndexed { i, t ->
+            val plan = audioPlans[i]
+            if (plan is TrackPlan.FromSource) {
+                val id = plan.trackId
+                sourceOptions += listOf("--language", "$id:${t.language.ifBlank { "und" }}")
+                if (t.title.isNotBlank()) sourceOptions += listOf("--track-name", "$id:${t.title}")
+                sourceOptions += listOf("--default-track", "$id:${if (t.isDefault) "yes" else "no"}")
+                sourceOptions += listOf("--sync", "$id:${plan.delayMs}")
             }
         }
-
-        val subInputIdx = mutableMapOf<Int,Int>()
-        subPlans.forEachIndexed { i, plan -> if (plan is MapPlan.Separate) { if (plan.delayMs != 0L) { args += listOf("-itsoffset",(plan.delayMs/1000.0).toString()); hasAnyOffset=true; maxAbsDelayMs = max(maxAbsDelayMs, abs(plan.delayMs)) }; args += listOf("-i",plan.path); subInputIdx[subTracks[i].id]=nextIdx++ } }
-
-        args += listOf("-map","0:v:0")
-        audioPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> audioInputIdx[audioTracks[i].id]?.let { args += listOf("-map","$it:a:0") }; is MapPlan.Failed -> {} } }
-        subPlans.forEachIndexed { i, plan -> when(plan) { is MapPlan.Direct -> args += listOf("-map","0:${plan.streamIndex}"); is MapPlan.Separate -> subInputIdx[subTracks[i].id]?.let { args += listOf("-map","$it:s:0") }; is MapPlan.Failed -> {} } }
-
-        args += listOf("-c:v","copy")
-
-        val interleaveWindowUs = if (hasAnyOffset) {
-            ((maxAbsDelayMs + 15_000L) * 1000L).coerceAtLeast(15_000_000L)
-        } else {
-            10_000_000L
+        subTracks.forEachIndexed { i, t ->
+            val plan = subPlans[i]
+            if (plan is TrackPlan.FromSource) {
+                val id = plan.trackId
+                sourceOptions += listOf("--language", "$id:${t.language.ifBlank { "und" }}")
+                if (t.title.isNotBlank()) sourceOptions += listOf("--track-name", "$id:${t.title}")
+                sourceOptions += listOf("--default-track", "$id:${if (t.isDefault) "yes" else "no"}")
+                sourceOptions += listOf("--forced-track", "$id:${if (t.isForced) "yes" else "no"}")
+                sourceOptions += listOf("--hearing-impaired-flag", "$id:${if (t.isHearingImpaired) "yes" else "no"}")
+                sourceOptions += listOf("--sync", "$id:${plan.delayMs}")
+            }
         }
-        args += listOf("-max_interleave_delta", interleaveWindowUs.toString())
+        sourceOptions += listOf("-d", video.videoStreamIndex.coerceAtLeast(0).toString())
+        sourceOptions += if (sourceAudioIds.isEmpty()) listOf("-A") else listOf("-a", sourceAudioIds.joinToString(","))
+        sourceOptions += if (sourceSubIds.isEmpty()) listOf("-S") else listOf("-s", sourceSubIds.joinToString(","))
+        sourceOptions += video.cachePath
 
-        if (hasAnyOffset) args += listOf("-avoid_negative_ts", "make_non_negative")
+        args += sourceOptions
+
+        var fileIndex = 1
+        val trackOrder = mutableListOf("0:${video.videoStreamIndex.coerceAtLeast(0)}")
 
         audioTracks.forEachIndexed { i, t ->
-            val hasGain = abs(t.gainDb) > 0.05f
-            val hasDelay = t.delayMs != 0L
-            if (hasGain || hasDelay) {
-                val filters = mutableListOf<String>()
-                if (t.delayMs > 0L) {
-                    filters += "adelay=delays=${t.delayMs}:all=1"
-                } else if (t.delayMs < 0L) {
-                    val trimSec = "%.3f".format(java.util.Locale.US, (-t.delayMs) / 1000.0)
-                    filters += "atrim=start=$trimSec"
-                    filters += "asetpts=PTS-STARTPTS"
+            when (val plan = audioPlans[i]) {
+                is TrackPlan.FromSource -> trackOrder += "0:${plan.trackId}"
+                is TrackPlan.FromFile -> {
+                    args += listOf("--language", "0:${t.language.ifBlank { "und" }}")
+                    if (t.title.isNotBlank()) args += listOf("--track-name", "0:${t.title}")
+                    args += listOf("--default-track", "0:${if (t.isDefault) "yes" else "no"}")
+                    args += listOf("--sync", "0:${plan.delayMs}")
+                    args += plan.path
+                    trackOrder += "$fileIndex:0"
+                    fileIndex++
                 }
-                if (hasGain) {
-                    val gainStr = "%.1f".format(java.util.Locale.US, t.gainDb)
-                    filters += "volume=${gainStr}dB"
-                    filters += "acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1"
-                    filters += "alimiter=limit=0.999:attack=1:release=50:level=0"
-                }
-                args += listOf("-filter:a:$i", filters.joinToString(","))
-
-                val sourceCodec = if (t.source == TrackSource.EXISTING) t.existingCodec else (detectedAudioCodecs[t.id] ?: "")
-                val (encoder, bitrate) = gainEncoderFor(sourceCodec)
-                args += listOf("-c:a:$i", encoder)
-                if (bitrate.isNotBlank()) args += listOf("-b:a:$i", bitrate)
-            } else {
-                args += listOf("-c:a:$i", "copy")
+                is TrackPlan.Failed -> {}
             }
-            if (t.title.isNotBlank()) args += listOf("-metadata:s:a:$i","title=${t.title}")
-            if (t.language.isNotBlank() && t.language!="und") args += listOf("-metadata:s:a:$i","language=${t.language}")
-            args += listOf("-disposition:a:$i", if (t.isDefault) "default" else "0")
+        }
+        subTracks.forEachIndexed { i, t ->
+            when (val plan = subPlans[i]) {
+                is TrackPlan.FromSource -> trackOrder += "0:${plan.trackId}"
+                is TrackPlan.FromFile -> {
+                    args += listOf("--language", "0:${t.language.ifBlank { "und" }}")
+                    if (t.title.isNotBlank()) args += listOf("--track-name", "0:${t.title}")
+                    args += listOf("--default-track", "0:${if (t.isDefault) "yes" else "no"}")
+                    args += listOf("--forced-track", "0:${if (t.isForced) "yes" else "no"}")
+                    args += listOf("--hearing-impaired-flag", "0:${if (t.isHearingImpaired) "yes" else "no"}")
+                    args += listOf("--sync", "0:${plan.delayMs}")
+                    args += plan.path
+                    trackOrder += "$fileIndex:0"
+                    fileIndex++
+                }
+                is TrackPlan.Failed -> {}
+            }
         }
 
-        args += listOf("-c:s","copy")
-        subTracks.forEachIndexed { i, t -> if (t.title.isNotBlank()) args += listOf("-metadata:s:s:$i","title=${t.title}"); if (t.language.isNotBlank() && t.language!="und") args += listOf("-metadata:s:s:$i","language=${t.language}"); val f = buildList { if(t.isDefault) add("default"); if(t.isForced) add("forced"); if(t.isHearingImpaired) add("hearing_impaired") }; args += listOf("-disposition:s:$i",if(f.isEmpty()) "0" else f.joinToString("+")) }
-        args += outputPath; return args
+        args += listOf("--track-order", trackOrder.joinToString(","))
+        return args
     }
 
     private val availableEncoders: Set<String> by lazy { detectAvailableEncoders() }
@@ -607,21 +662,35 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         return if (encoder == "aac" || encoder in availableEncoders) preferred else "aac" to "192k"
     }
 
-    private suspend fun runFfmpegAsync(args: List<String>, durationMs: Long): Int? = suspendCancellableCoroutine { cont ->
-        val session = FFmpegKit.executeWithArgumentsAsync(args.toTypedArray(),
-            { s -> val rc = s.returnCode?.value; if (cont.isActive) cont.resume(rc) }, null
-        ) { stats ->
-            if (durationMs > 0) {
-                val p = (((stats.time.toFloat()/durationMs)*70f)+15f).toInt().coerceIn(15,85)
-                viewModelScope.launch { setProgress(p) }
-            }
-        }
-        cont.invokeOnCancellation { runCatching { session.cancel() } }
+    private fun gainContainerExtFor(encoder: String): String = when (encoder) {
+        "libopus" -> "opus"
+        "libvorbis" -> "ogg"
+        "libmp3lame" -> "mp3"
+        "ac3" -> "ac3"
+        "eac3" -> "eac3"
+        "flac" -> "flac"
+        else -> "m4a"
+    }
+
+    /** Ses yükseltme (volume boost) + compressor/limiter'ı ffmpeg ile uygular, mkvmerge'e verilecek yeni dosyayı döner. */
+    private fun applyGainFilter(inputPath: String, mapSelector: String, codecHint: String, gainDb: Float, wd: File): File? {
+        return try {
+            val (encoder, bitrate) = gainEncoderFor(codecHint)
+            val ext = gainContainerExtFor(encoder)
+            val out = File(wd, "gain_${System.currentTimeMillis()}_${(1000..9999).random()}.$ext")
+            val gainStr = "%.1f".format(java.util.Locale.US, gainDb)
+            val filter = "volume=${gainStr}dB,acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1,alimiter=limit=0.999:attack=1:release=50:level=0"
+            val args = mutableListOf("-y", "-i", inputPath, "-map", mapSelector, "-vn", "-filter:a", filter, "-c:a", encoder)
+            if (bitrate.isNotBlank()) args += listOf("-b:a", bitrate)
+            args += out.absolutePath
+            val s = FFmpegKit.executeWithArguments(args.toTypedArray())
+            if (ReturnCode.isSuccess(s.returnCode) && out.exists() && out.length() > 0L) out else null
+        } catch (_: Exception) { null }
     }
 
     private fun copyUriToCache(uri: Uri, fileName: String): String? {
         return try {
-            val f = File(app.cacheDir, "mux_work/$fileName").also { it.parentFile?.mkdirs() }
+            val f = File(workDir(), fileName)
             val input = app.contentResolver.openInputStream(uri) ?: return null
             input.use { i -> f.outputStream().use { o -> i.copyTo(o, 8*1024*1024) } }
             if (f.exists() && f.length() > 0) f.absolutePath else null
