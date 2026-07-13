@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
 mkvmerge / mkvextract (MKVToolNix) arm64 (aarch64) ikili dosyalarını ve GERÇEKTEN
-ihtiyaç duydukları paylaşılan kütüphaneleri (.so) Termux'un resmi apt deposundan
+ihtiyaç duydukları paylaşılan kütüphaneleri (.so) Termux'un resmi apt depolarından
 indirip app/src/main/assets/mkvtoolnix/ altına koyar.
 
-Bu klasördeki dosyalar Gradle tarafından APK'nın içine gömülür; uygulama ilk
-çalıştığında bunları kendi private dizinine kopyalayıp (chmod +x) doğrudan
-ProcessBuilder ile çalıştırır. Yani APK kurulduktan sonra Termux'a, internete
-veya başka hiçbir kuruluma gerek kalmaz.
+mkvtoolnix paketi Termux'un "main" deposunda DEĞİL, ayrı "x11-repo" deposundadır
+(bu yüzden Termux'ta `pkg install x11-repo` önce gerekiyor) - bu script hem main
+hem x11 deposunun paket indekslerini okur.
 
 Hangi .so dosyalarının gerekli olduğunu TAHMİN ETMİYORUZ: mkvmerge/mkvextract
 ikilileri indirildikten sonra `readelf -d` ile onların GERÇEK (NEEDED) listesi
 okunuyor, sadece o kütüphaneler (ve onların da kendi NEEDED zinciri) indiriliyor.
-Böylece "mkvtoolnix" paketinin METADATA'sında görünen ama CLI ikilileri
-tarafından hiç kullanılmayan Qt/X11 gibi GUI bağımlılıkları asla dahil edilmez.
+Böylece paketin METADATA'sında görünen ama CLI ikilileri tarafından hiç
+kullanılmayan Qt/X11 gibi GUI bağımlılıkları asla dahil edilmez.
 
 Kullanım: python3 scripts/fetch_mkvtoolnix_assets.py
 Gereksinimler (Ubuntu runner'da hazır gelir): ar, tar, readelf, zstd, python3
@@ -30,16 +29,21 @@ import tempfile
 import urllib.request
 
 ARCH = "aarch64"
-REPO_CANDIDATES = [
-    "https://packages.termux.dev/apt/termux-main",
-    "https://packages-cf.termux.dev/apt/termux-main",
+
+# (base URL adayları, dağıtım adı) - main ve x11 (mkvtoolnix burada) depoları
+REPOS = [
+    (["https://packages.termux.dev/apt/termux-main", "https://packages-cf.termux.dev/apt/termux-main"], "stable"),
+    (["https://packages.termux.dev/apt/termux-x11", "https://packages-cf.termux.dev/apt/termux-x11"], "x11"),
 ]
+
+# İndeksin gösterdiği en son mkvtoolnix sürümü bozuk/boş çıkarsa denenecek bilinen sağlam sürümler
+MKVTOOLNIX_FALLBACK_VERSIONS = ["99.0", "98.0", "97.0", "96.0"]
+MIN_VALID_DEB_SIZE = 50_000  # bundan küçük .deb bozuk/boş kabul edilir
+
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "app", "src", "main", "assets", "mkvtoolnix")
 WORK = tempfile.mkdtemp(prefix="mkvtoolnix_fetch_")
 
-# soname'in "lib" önekini ve ".so..." sonekini attıktan sonraki temel adına göre,
-# Termux paket adının bu heuristikle tutmadığı bilinen istisnalar.
 ALIAS = {
     "z": ["zlib", "libz"],
     "lzma": ["liblzma"],
@@ -65,9 +69,9 @@ def fetch(url: str) -> bytes:
         return r.read()
 
 
-def fetch_first_ok(rel_paths):
+def fetch_first_ok(bases, rel_paths):
     last_err = None
-    for base in REPO_CANDIDATES:
+    for base in bases:
         for p in rel_paths:
             url = f"{base}/{p}"
             try:
@@ -77,19 +81,7 @@ def fetch_first_ok(rel_paths):
     raise RuntimeError(f"Hiçbir depodan indirilemedi: {rel_paths} (son hata: {last_err})")
 
 
-def load_packages_index():
-    data, url = fetch_first_ok([
-        f"dists/stable/main/binary-{ARCH}/Packages.xz",
-        f"dists/stable/main/binary-{ARCH}/Packages.gz",
-        f"dists/stable/main/binary-{ARCH}/Packages",
-    ])
-    if url.endswith(".xz"):
-        text = lzma.decompress(data).decode("utf-8", "replace")
-    elif url.endswith(".gz"):
-        text = gzip.decompress(data).decode("utf-8", "replace")
-    else:
-        text = data.decode("utf-8", "replace")
-
+def parse_packages_text(text):
     pkgs, cur, cur_key = {}, {}, None
     for raw in text.split("\n"):
         if raw.strip() == "":
@@ -106,21 +98,102 @@ def load_packages_index():
             cur_key = k.strip()
     if cur.get("Package"):
         pkgs[cur["Package"]] = cur
+    return pkgs
 
-    repo_base = url.split("/dists/")[0]
+
+def load_one_repo(bases, dist):
+    data, url = fetch_first_ok(bases, [
+        f"dists/{dist}/main/binary-{ARCH}/Packages.xz",
+        f"dists/{dist}/main/binary-{ARCH}/Packages.gz",
+        f"dists/{dist}/main/binary-{ARCH}/Packages",
+    ])
+    if url.endswith(".xz"):
+        text = lzma.decompress(data).decode("utf-8", "replace")
+    elif url.endswith(".gz"):
+        text = gzip.decompress(data).decode("utf-8", "replace")
+    else:
+        text = data.decode("utf-8", "replace")
+    pkgs = parse_packages_text(text)
+    repo_base = url.split(f"/dists/{dist}/")[0]
     return pkgs, repo_base
 
 
-def download_deb(pkgs, repo_base, name):
-    stanza = pkgs.get(name)
-    if not stanza:
-        return None
-    url = f"{repo_base}/{stanza['Filename']}"
+def load_all_packages():
+    """Tüm depoları okur, {paket_adı: (stanza, repo_base)} olarak birleştirir."""
+    combined = {}
+    for bases, dist in REPOS:
+        try:
+            pkgs, repo_base = load_one_repo(bases, dist)
+            log(f"[{dist}] {len(pkgs)} paket bulundu. Repo: {repo_base}")
+            for name, stanza in pkgs.items():
+                if name not in combined:
+                    combined[name] = (stanza, repo_base)
+        except Exception as e:
+            log(f"UYARI: '{dist}' deposu okunamadı: {e}")
+    return combined
+
+
+def fetch_bytes_checked(url, min_size=1):
     data = fetch(url)
+    if len(data) < min_size:
+        raise RuntimeError(f"dosya çok küçük/boş ({len(data)} bytes): {url}")
+    return data
+
+
+def download_deb(combined, name):
+    """Genel amaçlı: index'teki (tek) sürümü indirir."""
+    entry = combined.get(name)
+    if not entry:
+        return None
+    stanza, repo_base = entry
+    url = f"{repo_base}/{stanza['Filename']}"
+    try:
+        data = fetch_bytes_checked(url, 1000)
+    except Exception as e:
+        log(f"UYARI: {name} indirilemedi: {e}")
+        return None
     path = os.path.join(WORK, f"pkg_{name}.deb")
     with open(path, "wb") as f:
         f.write(data)
     return path
+
+
+def download_mkvtoolnix(combined):
+    """mkvtoolnix'e özel: index'teki sürüm bozuksa (Termux'ta güncelleme build'i
+    başarısız olup 0 byte yüklenmiş olabiliyor) bilinen sağlam eski sürümlere düşer."""
+    entry = combined.get("mkvtoolnix")
+    if not entry:
+        log("HATA: 'mkvtoolnix' paketi ne main ne de x11 deposu indeksinde bulunamadı.")
+        return None
+    stanza, repo_base = entry
+
+    pool_dir = "/".join(stanza["Filename"].split("/")[:-1]) if "Filename" in stanza else "pool/main/m/mkvtoolnix"
+
+    candidates = []
+    if "Filename" in stanza:
+        candidates.append(stanza["Filename"])
+    for v in MKVTOOLNIX_FALLBACK_VERSIONS:
+        candidates.append(f"{pool_dir}/mkvtoolnix_{v}_{ARCH}.deb")
+
+    tried = set()
+    for rel in candidates:
+        if rel in tried:
+            continue
+        tried.add(rel)
+        url = f"{repo_base}/{rel}"
+        try:
+            data = fetch_bytes_checked(url, MIN_VALID_DEB_SIZE)
+        except Exception as e:
+            log(f"UYARI: {url} kullanılamadı: {e}")
+            continue
+        path = os.path.join(WORK, "pkg_mkvtoolnix.deb")
+        with open(path, "wb") as f:
+            f.write(data)
+        log(f"mkvtoolnix indirildi: {url} ({len(data)} bytes)")
+        return path
+
+    log("HATA: mkvtoolnix için denenen hiçbir sürüm/URL geçerli bir .deb döndürmedi.")
+    return None
 
 
 def extract_deb_data(deb_path, dest):
@@ -167,18 +240,19 @@ def real_copy(src, dst):
 
 
 def main():
-    pkgs, repo_base = load_packages_index()
-    log(f"{len(pkgs)} paket bulundu. Repo: {repo_base}")
-
-    if "mkvtoolnix" not in pkgs:
-        log("HATA: 'mkvtoolnix' paketi Termux Packages index'inde bulunamadı.")
+    combined = load_all_packages()
+    if not combined:
+        log("HATA: hiçbir Termux deposu okunamadı.")
         sys.exit(1)
 
     if os.path.isdir(OUT_DIR):
         shutil.rmtree(OUT_DIR)
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    deb = download_deb(pkgs, repo_base, "mkvtoolnix")
+    deb = download_mkvtoolnix(combined)
+    if not deb:
+        sys.exit(1)
+
     extracted = extract_deb_data(deb, os.path.join(WORK, "extracted_mkvtoolnix"))
     bin_dir = find_subdir(extracted, "usr/bin")
     if not bin_dir:
@@ -220,11 +294,13 @@ def main():
                 continue
             found = False
             for cand in candidate_pkg_names(soname):
-                if cand in fetched_pkgs or cand not in pkgs:
+                if cand in fetched_pkgs or cand not in combined:
                     continue
                 try:
                     log(f"'{soname}' için deneniyor: paket '{cand}'")
-                    deb2 = download_deb(pkgs, repo_base, cand)
+                    deb2 = download_deb(combined, cand)
+                    if not deb2:
+                        continue
                     ex2 = extract_deb_data(deb2, os.path.join(WORK, f"extracted_{cand}"))
                     fetched_pkgs.add(cand)
                     lib_dir2 = find_subdir(ex2, "usr/lib")
@@ -234,7 +310,6 @@ def main():
                     if not os.path.exists(src_path):
                         continue
                     real_copy(src_path, dst)
-                    # aynı temel adın diğer sürüm varyantlarını da al (libX.so, libX.so.5, libX.so.5.0.7 ...)
                     base_prefix = soname.split(".so")[0]
                     for f in os.listdir(lib_dir2):
                         if f.startswith(base_prefix):
