@@ -122,4 +122,5 @@
     <string name="settings_output_folder_title">Standard-Ausgabeordner</string>
     <string name="settings_output_folder_desc">Standardordner für gemuxte Dateien und exportierte Audio-/Untertiteldateien.</string>
     <string name="settings_output_folder_none">Nicht ausgewählt</string>
+    <string name="err_native_tools_missing">mkvmerge/mkvextract konnten nicht aus der App entpackt werden. App deinstallieren und neu installieren.</string>
 </resources>
