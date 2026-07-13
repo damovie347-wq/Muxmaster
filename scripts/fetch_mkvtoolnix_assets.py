@@ -55,7 +55,17 @@ ALIAS = {
     "gcc_s": ["libgcc"],
     "magic": ["file", "libmagic"],
     "icuuc": ["icu"], "icudata": ["icu"], "icui18n": ["icu"],
+    "flac": ["flac"],
+    "boost_filesystem": ["boost"],
+    "boost_regex": ["boost"],
+    "boost_system": ["boost"],
+    "boost_thread": ["boost"],
+    "boost_date_time": ["boost"],
 }
+
+# Bunlar Android'in kendi sistem kütüphaneleridir (bionic libc), her cihazda zaten
+# hazır bulunur; Termux'tan indirilmez/bundle edilmez, aksi halde çakışıp çökertebilir.
+SKIP_SONAMES = {"libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so"}
 
 
 def log(*a):
@@ -225,12 +235,21 @@ def needed_sonames(binpath):
 
 
 def candidate_pkg_names(soname):
-    base = re.sub(r"^lib", "", soname)
+    base = re.sub(r"^lib", "", soname, flags=re.IGNORECASE)
     base = re.sub(r"\.so.*$", "", base)
-    cands = [f"lib{base}", base] + ALIAS.get(base, [])
+    base_lower = base.lower()
+
+    cands = [f"lib{base}", base, f"lib{base_lower}", base_lower]
+    cands += ALIAS.get(base, []) + ALIAS.get(base_lower, [])
+
+    if base_lower.startswith("qt6"):
+        cands.append("qt6-qtbase")
+    if base_lower.startswith("boost_"):
+        cands.append("boost")
+
     seen, result = set(), []
     for c in cands:
-        if c not in seen:
+        if c and c not in seen:
             seen.add(c); result.append(c)
     return result
 
@@ -289,6 +308,8 @@ def main():
             continue
 
         for soname in needed:
+            if soname in SKIP_SONAMES:
+                continue
             dst = os.path.join(OUT_DIR, soname)
             if os.path.exists(dst):
                 continue
