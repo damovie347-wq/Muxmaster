@@ -54,13 +54,16 @@ ALIAS = {
     "c++_shared": ["libc++"],
     "gcc_s": ["libgcc"],
     "magic": ["file", "libmagic"],
-    "icuuc": ["icu"], "icudata": ["icu"], "icui18n": ["icu"],
+    "icuuc": ["libicu"], "icudata": ["libicu"], "icui18n": ["libicu"],
     "flac": ["flac"],
+    "glib-2.0": ["glib"],
+    "pcre2-16": ["pcre2"], "pcre2-8": ["pcre2"], "pcre2-32": ["pcre2"],
     "boost_filesystem": ["boost"],
     "boost_regex": ["boost"],
     "boost_system": ["boost"],
     "boost_thread": ["boost"],
     "boost_date_time": ["boost"],
+    "boost_atomic": ["boost"],
 }
 
 # Bunlar Android'in kendi sistem kütüphaneleridir (bionic libc), her cihazda zaten
@@ -258,6 +261,26 @@ def real_copy(src, dst):
     shutil.copy2(os.path.realpath(src), dst)
 
 
+def harvest_package_libs(lib_dir, out_dir):
+    """Bir paketin lib dizinindeki TÜM .so* dosyalarını out_dir'e kopyalar ve
+    yeni kopyalanan dosyaların listesini döner (zaten mevcut olanları atlar).
+    Bu, aynı paketten farklı .so'lara ihtiyaç duyulduğunda paketin tekrar
+    tekrar indirilmesini/atlanmasını önler."""
+    added = []
+    for f in os.listdir(lib_dir):
+        full = os.path.join(lib_dir, f)
+        if not (os.path.isfile(full) or os.path.islink(full)):
+            continue
+        if ".so" not in f:
+            continue
+        dst = os.path.join(out_dir, f)
+        if os.path.exists(dst):
+            continue
+        real_copy(full, dst)
+        added.append(dst)
+    return added
+
+
 def main():
     combined = load_all_packages()
     if not combined:
@@ -288,15 +311,13 @@ def main():
     real_copy(mkvextract_src, os.path.join(OUT_DIR, "mkvextract"))
     log("mkvmerge ve mkvextract kopyalandı.")
 
-    own_lib_dir = find_subdir(extracted, "usr/lib")
-    if own_lib_dir:
-        for f in os.listdir(own_lib_dir):
-            full = os.path.join(own_lib_dir, f)
-            if os.path.isfile(full) or os.path.islink(full):
-                real_copy(full, os.path.join(OUT_DIR, f))
-
     fetched_pkgs = {"mkvtoolnix"}
     queue = [os.path.join(OUT_DIR, "mkvmerge"), os.path.join(OUT_DIR, "mkvextract")]
+
+    own_lib_dir = find_subdir(extracted, "usr/lib")
+    if own_lib_dir:
+        queue.extend(harvest_package_libs(own_lib_dir, OUT_DIR))
+
     unresolved = []
 
     while queue:
@@ -315,7 +336,9 @@ def main():
                 continue
             found = False
             for cand in candidate_pkg_names(soname):
-                if cand in fetched_pkgs or cand not in combined:
+                if cand not in combined:
+                    continue
+                if cand in fetched_pkgs:
                     continue
                 try:
                     log(f"'{soname}' için deneniyor: paket '{cand}'")
@@ -327,23 +350,13 @@ def main():
                     lib_dir2 = find_subdir(ex2, "usr/lib")
                     if not lib_dir2:
                         continue
-                    src_path = os.path.join(lib_dir2, soname)
-                    if not os.path.exists(src_path):
-                        continue
-                    real_copy(src_path, dst)
-                    base_prefix = soname.split(".so")[0]
-                    for f in os.listdir(lib_dir2):
-                        if f.startswith(base_prefix):
-                            d2 = os.path.join(OUT_DIR, f)
-                            fp = os.path.join(lib_dir2, f)
-                            if not os.path.exists(d2) and (os.path.isfile(fp) or os.path.islink(fp)):
-                                real_copy(fp, d2)
-                    found = True
-                    queue.append(dst)
-                    break
+                    queue.extend(harvest_package_libs(lib_dir2, OUT_DIR))
+                    if os.path.exists(dst):
+                        found = True
+                        break
                 except Exception as e:
                     log(f"UYARI: '{cand}' paketi işlenirken hata: {e}")
-            if not found:
+            if not found and not os.path.exists(dst):
                 unresolved.append(soname)
 
     if unresolved:
