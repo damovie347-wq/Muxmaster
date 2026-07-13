@@ -122,4 +122,5 @@
     <string name="settings_output_folder_title">Default Output Folder</string>
     <string name="settings_output_folder_desc">Default folder for muxed files and exported audio/subtitles.</string>
     <string name="settings_output_folder_none">Not selected</string>
+    <string name="err_native_tools_missing">Could not extract mkvmerge/mkvextract from the app. Try uninstalling and reinstalling the app.</string>
 </resources>
