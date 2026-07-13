@@ -132,4 +132,5 @@
     <string name="settings_output_folder_title">Varsayılan Çıktı Klasörü</string>
     <string name="settings_output_folder_desc">Muxlanan dosyalar ve dışa aktarılan ses/altyazılar için varsayılan klasör.</string>
     <string name="settings_output_folder_none">Seçilmedi</string>
+    <string name="err_native_tools_missing">mkvmerge/mkvextract uygulamanın içinden çıkarılamadı. Uygulamayı kaldırıp yeniden kurmayı deneyin.</string>
 </resources>
