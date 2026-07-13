@@ -1,0 +1,10 @@
+# CI tarafından her derlemede yeniden üretilir (scripts/fetch_mkvtoolnix_assets.py)
+app/src/main/assets/mkvtoolnix/
+
+# Gradle / Android build çıktıları
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
