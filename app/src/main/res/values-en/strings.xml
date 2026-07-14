@@ -107,6 +107,7 @@
     <string name="export_success">✅ Exported: %1$s</string>
     <string name="export_failed">Export failed.</string>
     <string name="export_no_output_folder">Select an output folder first (Settings or the SELECT button below).</string>
+    <string name="err_mkvmerge_code">mkvmerge error (code: %1$d).</string>
 
     <string name="settings_title">Settings</string>
     <string name="settings_nav_back_desc">Go back</string>
