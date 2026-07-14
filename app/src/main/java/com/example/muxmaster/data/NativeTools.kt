@@ -10,61 +10,36 @@ import java.io.File
 import java.io.InputStreamReader
 import kotlin.coroutines.coroutineContext
 
-// mkvmerge / mkvextract MKVToolNix ikilileri APK icine gomuludur.
-// app/src/main/assets/mkvtoolnix altina, derleme sirasinda
-// scripts/fetch_mkvtoolnix_assets.py tarafindan yerlestirilir.
-// Uygulama internete veya baska bir kuruluma ihtiyac duymaz: ilk kullanimda
-// bu dosyalar assets icinden uygulamanin kendi private dizinine kopyalanir,
-// calistirilabilir yapilir ve ProcessBuilder ile dogrudan calistirilir.
+// mkvmerge / mkvextract MKVToolNix ikilileri APK icine "native library" olarak
+// gomuludur (app/src/main/jniLibs/arm64-v8a/ - CI derleme sirasinda
+// scripts/fetch_mkvtoolnix_assets.py tarafindan yerlestirilir, libmkvmerge.so
+// ve libmkvextract.so adlariyla).
+//
+// ONEMLI: Android 10+ (API 29+), uygulamanin KENDI YAZDIGI (assets'ten kopyalayip
+// chmod +x yaptigi) dosyalari calistirmasini guvenlik geregi ENGELLER (W^X kurali,
+// "Permission denied" / error=13 ile sonuclanir). Bu kisitlama SADECE APK kurulurken
+// sistemin kendisinin cikardigi native library dizinini (nativeLibraryDir) muaf
+// tutar. Bu yuzden dosyalar assets yerine jniLibs ile gomulur; ekstra kopyalama/
+// chmod adimina hic gerek yoktur, Android bunu kurulumda otomatik yapar.
 object NativeTools {
-
-    private const val ASSET_DIR = "mkvtoolnix"
-    private const val MARKER_NAME = ".installed_v1"
 
     data class ExecResult(val exitCode: Int, val output: String)
 
-    private fun installDir(context: Context): File {
-        return File(context.filesDir, "mkvtoolnix")
+    private fun libDir(context: Context): File {
+        return File(context.applicationInfo.nativeLibraryDir)
     }
 
     fun ensureInstalled(context: Context): Boolean {
-        val dir = installDir(context)
-        val marker = File(dir, MARKER_NAME)
-        if (marker.exists() && File(dir, "mkvmerge").canExecute()) {
-            return true
-        }
-
-        return try {
-            dir.mkdirs()
-            val names = context.assets.list(ASSET_DIR)
-            if (names.isNullOrEmpty()) {
-                return false
-            }
-
-            for (name in names) {
-                val out = File(dir, name)
-                val input = context.assets.open(ASSET_DIR + "/" + name)
-                input.use { i ->
-                    out.outputStream().use { o ->
-                        i.copyTo(o, 1048576)
-                    }
-                }
-            }
-            File(dir, "mkvmerge").setExecutable(true, false)
-            File(dir, "mkvextract").setExecutable(true, false)
-            marker.writeText("ok")
-            File(dir, "mkvmerge").canExecute() && File(dir, "mkvextract").canExecute()
-        } catch (e: Exception) {
-            false
-        }
+        val dir = libDir(context)
+        return File(dir, "libmkvmerge.so").canExecute() && File(dir, "libmkvextract.so").canExecute()
     }
 
     fun mkvmergePath(context: Context): String {
-        return File(installDir(context), "mkvmerge").absolutePath
+        return File(libDir(context), "libmkvmerge.so").absolutePath
     }
 
     fun mkvextractPath(context: Context): String {
-        return File(installDir(context), "mkvextract").absolutePath
+        return File(libDir(context), "libmkvextract.so").absolutePath
     }
 
     suspend fun run(
@@ -73,7 +48,7 @@ object NativeTools {
         args: List<String>,
         onProgress: ((Int) -> Unit)? = null
     ): ExecResult = withContext(Dispatchers.IO) {
-        val dir = installDir(context)
+        val dir = libDir(context)
         var process: Process? = null
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
             if (cause is CancellationException) {
@@ -87,7 +62,7 @@ object NativeTools {
             val fullCommand = mutableListOf(binaryPath)
             fullCommand.addAll(args)
             val pb = ProcessBuilder(fullCommand)
-            pb.directory(dir)
+            pb.directory(context.filesDir)
             pb.environment().put("LD_LIBRARY_PATH", dir.absolutePath)
             pb.redirectErrorStream(true)
             val p = pb.start()
