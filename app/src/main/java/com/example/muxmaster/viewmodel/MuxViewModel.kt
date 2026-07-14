@@ -446,7 +446,13 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                         if (detail.isNotBlank()) "\n$detail" else ""
                     return@launch
                 }
-                if (!tempOutput.exists() || tempOutput.length() == 0L) { resultMessage = app.getString(R.string.err_output_zero_bytes); return@launch }
+                if (!tempOutput.exists() || tempOutput.length() == 0L) {
+                    val detail = execResult.output.trim().takeLast(500)
+                    resultMessage = app.getString(R.string.err_output_zero_bytes) +
+                        " (exit=${execResult.exitCode})" +
+                        if (detail.isNotBlank()) "\n$detail" else ""
+                    return@launch
+                }
 
                 setProgress(88, app.getString(R.string.notif_saving_output))
                 val rawName = outputFileName.trim().ifBlank { "output_mux.mkv" }
