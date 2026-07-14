@@ -2,7 +2,8 @@
 """
 mkvmerge / mkvextract (MKVToolNix) arm64 (aarch64) ikili dosyalarını ve GERÇEKTEN
 ihtiyaç duydukları paylaşılan kütüphaneleri (.so) Termux'un resmi apt depolarından
-indirip app/src/main/assets/mkvtoolnix/ altına koyar.
+indirip app/src/main/jniLibs/arm64-v8a/ altına koyar (Android'in APK kurulurken
+otomatik çıkarıp çalıştırılabilir yaptığı native library dizini).
 
 mkvtoolnix paketi Termux'un "main" deposunda DEĞİL, ayrı "x11-repo" deposundadır
 (bu yüzden Termux'ta `pkg install x11-repo` önce gerekiyor) - bu script hem main
@@ -30,18 +31,16 @@ import urllib.request
 
 ARCH = "aarch64"
 
-# (base URL adayları, dağıtım adı) - main ve x11 (mkvtoolnix burada) depoları
 REPOS = [
     (["https://packages.termux.dev/apt/termux-main", "https://packages-cf.termux.dev/apt/termux-main"], "stable"),
     (["https://packages.termux.dev/apt/termux-x11", "https://packages-cf.termux.dev/apt/termux-x11"], "x11"),
 ]
 
-# İndeksin gösterdiği en son mkvtoolnix sürümü bozuk/boş çıkarsa denenecek bilinen sağlam sürümler
 MKVTOOLNIX_FALLBACK_VERSIONS = ["99.0", "98.0", "97.0", "96.0"]
-MIN_VALID_DEB_SIZE = 50_000  # bundan küçük .deb bozuk/boş kabul edilir
+MIN_VALID_DEB_SIZE = 50_000
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "app", "src", "main", "assets", "mkvtoolnix")
+                        "app", "src", "main", "jniLibs", "arm64-v8a")
 WORK = tempfile.mkdtemp(prefix="mkvtoolnix_fetch_")
 
 ALIAS = {
@@ -66,8 +65,6 @@ ALIAS = {
     "boost_atomic": ["boost"],
 }
 
-# Bunlar Android'in kendi sistem kütüphaneleridir (bionic libc), her cihazda zaten
-# hazır bulunur; Termux'tan indirilmez/bundle edilmez, aksi halde çakışıp çökertebilir.
 SKIP_SONAMES = {"libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so"}
 
 
@@ -132,7 +129,6 @@ def load_one_repo(bases, dist):
 
 
 def load_all_packages():
-    """Tüm depoları okur, {paket_adı: (stanza, repo_base)} olarak birleştirir."""
     combined = {}
     for bases, dist in REPOS:
         try:
@@ -154,7 +150,6 @@ def fetch_bytes_checked(url, min_size=1):
 
 
 def download_deb(combined, name):
-    """Genel amaçlı: index'teki (tek) sürümü indirir."""
     entry = combined.get(name)
     if not entry:
         return None
@@ -172,8 +167,6 @@ def download_deb(combined, name):
 
 
 def download_mkvtoolnix(combined):
-    """mkvtoolnix'e özel: index'teki sürüm bozuksa (Termux'ta güncelleme build'i
-    başarısız olup 0 byte yüklenmiş olabiliyor) bilinen sağlam eski sürümlere düşer."""
     entry = combined.get("mkvtoolnix")
     if not entry:
         log("HATA: 'mkvtoolnix' paketi ne main ne de x11 deposu indeksinde bulunamadı.")
@@ -262,11 +255,6 @@ def real_copy(src, dst):
 
 
 def copy_exact_with_siblings(lib_dir, soname, out_dir):
-    """lib_dir içinde TAM OLARAK soname adında bir dosya varsa out_dir'e kopyalar,
-    ayrıca aynı kütüphanenin sürüm sembolik bağlantı kardeşlerini de alır
-    (ör. libebml.so, libebml.so.5, libebml.so.5.2.2). Paketteki ALAKASIZ başka
-    kütüphaneleri ASLA almaz (bu yüzden Qt gibi çok-modüllü paketlerden sadece
-    gerçekten ihtiyaç duyulan .so gelir, gereksiz GUI/X11 bağımlılıkları gelmez)."""
     src = os.path.join(lib_dir, soname)
     if not (os.path.isfile(src) or os.path.islink(src)):
         return False
@@ -310,18 +298,15 @@ def main():
         log(f"HATA: mkvmerge/mkvextract {bin_dir} içinde yok. İçerik: {os.listdir(bin_dir)}")
         sys.exit(1)
 
-    real_copy(mkvmerge_src, os.path.join(OUT_DIR, "mkvmerge"))
-    real_copy(mkvextract_src, os.path.join(OUT_DIR, "mkvextract"))
-    log("mkvmerge ve mkvextract kopyalandı.")
+    real_copy(mkvmerge_src, os.path.join(OUT_DIR, "libmkvmerge.so"))
+    real_copy(mkvextract_src, os.path.join(OUT_DIR, "libmkvextract.so"))
+    log("mkvmerge ve mkvextract kopyalandı (libmkvmerge.so / libmkvextract.so olarak).")
 
-    # pkg_adı -> lib_dir (zaten indirilip açılmış paketler; tekrar indirmemek için önbellek)
     fetched_libdirs = {}
 
     own_lib_dir = find_subdir(extracted, "usr/lib")
     if own_lib_dir:
         fetched_libdirs["mkvtoolnix"] = own_lib_dir
-        # mkvtoolnix'in KENDİ paketindeki dosyalar (varsa) doğrudan alınır - bunlar
-        # zaten aynı source paketten geldiği için hepsi ilgilidir.
         for f in os.listdir(own_lib_dir):
             full = os.path.join(own_lib_dir, f)
             if (os.path.isfile(full) or os.path.islink(full)) and ".so" in f:
@@ -329,7 +314,7 @@ def main():
                 if not os.path.exists(d2):
                     real_copy(full, d2)
 
-    queue = [os.path.join(OUT_DIR, "mkvmerge"), os.path.join(OUT_DIR, "mkvextract")]
+    queue = [os.path.join(OUT_DIR, "libmkvmerge.so"), os.path.join(OUT_DIR, "libmkvextract.so")]
     for f in os.listdir(OUT_DIR):
         fp = os.path.join(OUT_DIR, f)
         if fp not in queue and (os.path.isfile(fp) or os.path.islink(fp)) and ".so" in f:
@@ -354,14 +339,11 @@ def main():
 
             resolved = False
 
-            # 1) Zaten indirilmiş bir paketin lib dizininde bu TAM dosya var mı diye bak
-            #    (tekrar indirmeden - bu, "aynı paketten başka bir .so gerekti" durumunu çözer).
             for lib_dir in fetched_libdirs.values():
                 if lib_dir and copy_exact_with_siblings(lib_dir, soname, OUT_DIR):
                     resolved = True
                     break
 
-            # 2) Değilse, yeni aday paketleri sırayla dene
             if not resolved:
                 for cand in candidate_pkg_names(soname):
                     if cand in fetched_libdirs or cand not in combined:
@@ -373,7 +355,7 @@ def main():
                             continue
                         ex2 = extract_deb_data(deb2, os.path.join(WORK, f"extracted_{cand}"))
                         lib_dir2 = find_subdir(ex2, "usr/lib")
-                        fetched_libdirs[cand] = lib_dir2  # önbelleğe al: bir daha indirilmesin
+                        fetched_libdirs[cand] = lib_dir2
                         if lib_dir2 and copy_exact_with_siblings(lib_dir2, soname, OUT_DIR):
                             resolved = True
                             break
@@ -390,12 +372,8 @@ def main():
         log("Çözüm: scripts/fetch_mkvtoolnix_assets.py içindeki ALIAS sözlüğüne doğru Termux paket adını ekleyin.")
         sys.exit(1)
 
-    with open(os.path.join(OUT_DIR, "MANIFEST.txt"), "w") as f:
-        f.write("Kullanılan Termux paketleri: " + ", ".join(sorted(fetched_libdirs.keys())) + "\n\nDosyalar:\n")
-        for fn in sorted(os.listdir(OUT_DIR)):
-            f.write(f"  {fn}\n")
-
-    log("Tamamlandı. assets/mkvtoolnix/ içeriği:")
+    log("Kullanılan Termux paketleri: " + ", ".join(sorted(fetched_libdirs.keys())))
+    log("Tamamlandı. jniLibs/arm64-v8a/ içeriği:")
     for fn in sorted(os.listdir(OUT_DIR)):
         size = os.path.getsize(os.path.join(OUT_DIR, fn))
         log(f"  {fn}  ({size} bytes)")
