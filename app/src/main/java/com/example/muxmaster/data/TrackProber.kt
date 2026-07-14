@@ -17,7 +17,8 @@ object TrackProber {
         val subtitleStreams: List<ExistingSubtitle>,
         val videoCodec: String,
         val resolution: String,
-        val durationMs: Long
+        val durationMs: Long,
+        val videoStreamIndex: Int = 0 // mkvmerge -d için: kaynaktaki gerçek video track id'si
     )
 
     data class ExistingAudio(
@@ -50,7 +51,7 @@ object TrackProber {
         val session = FFprobeKit.executeWithArguments(args)
         val jsonOutput = session.output ?: ""
 
-        val empty = ProbeResult(emptyList(), emptyList(), "Unknown", "?x?", 0)
+        val empty = ProbeResult(emptyList(), emptyList(), "Unknown", "?x?", 0, 0)
         if (jsonOutput.isBlank()) return@withContext empty
 
         val root = try {
@@ -66,6 +67,7 @@ object TrackProber {
         var videoCodec = "Unknown"
         var resolution = "?x?"
         var durationMs = 0L
+        var videoStreamIndex = 0
 
         for (i in 0 until streams.length()) {
             val stream = streams.getJSONObject(i)
@@ -87,6 +89,7 @@ object TrackProber {
                         resolution = if (w > 0 && h > 0) "${w}x${h}" else "?x?"
                         val dur = stream.optString("duration", "0").toDoubleOrNull() ?: 0.0
                         durationMs = (dur * 1000).toLong()
+                        videoStreamIndex = index
                     }
                 }
                 "audio" -> {
@@ -127,6 +130,6 @@ object TrackProber {
             durationMs = (dur * 1000).toLong()
         }
 
-        ProbeResult(audioList, subList, videoCodec, resolution, durationMs)
+        ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex)
     }
 }
