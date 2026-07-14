@@ -261,24 +261,27 @@ def real_copy(src, dst):
     shutil.copy2(os.path.realpath(src), dst)
 
 
-def harvest_package_libs(lib_dir, out_dir):
-    """Bir paketin lib dizinindeki TÜM .so* dosyalarını out_dir'e kopyalar ve
-    yeni kopyalanan dosyaların listesini döner (zaten mevcut olanları atlar).
-    Bu, aynı paketten farklı .so'lara ihtiyaç duyulduğunda paketin tekrar
-    tekrar indirilmesini/atlanmasını önler."""
-    added = []
+def copy_exact_with_siblings(lib_dir, soname, out_dir):
+    """lib_dir içinde TAM OLARAK soname adında bir dosya varsa out_dir'e kopyalar,
+    ayrıca aynı kütüphanenin sürüm sembolik bağlantı kardeşlerini de alır
+    (ör. libebml.so, libebml.so.5, libebml.so.5.2.2). Paketteki ALAKASIZ başka
+    kütüphaneleri ASLA almaz (bu yüzden Qt gibi çok-modüllü paketlerden sadece
+    gerçekten ihtiyaç duyulan .so gelir, gereksiz GUI/X11 bağımlılıkları gelmez)."""
+    src = os.path.join(lib_dir, soname)
+    if not (os.path.isfile(src) or os.path.islink(src)):
+        return False
+    dst = os.path.join(out_dir, soname)
+    if not os.path.exists(dst):
+        real_copy(src, dst)
+    base_prefix = soname.split(".so")[0] + ".so"
     for f in os.listdir(lib_dir):
-        full = os.path.join(lib_dir, f)
-        if not (os.path.isfile(full) or os.path.islink(full)):
+        if f == soname or not f.startswith(base_prefix):
             continue
-        if ".so" not in f:
-            continue
-        dst = os.path.join(out_dir, f)
-        if os.path.exists(dst):
-            continue
-        real_copy(full, dst)
-        added.append(dst)
-    return added
+        fp = os.path.join(lib_dir, f)
+        d2 = os.path.join(out_dir, f)
+        if not os.path.exists(d2) and (os.path.isfile(fp) or os.path.islink(fp)):
+            real_copy(fp, d2)
+    return True
 
 
 def main():
@@ -311,12 +314,26 @@ def main():
     real_copy(mkvextract_src, os.path.join(OUT_DIR, "mkvextract"))
     log("mkvmerge ve mkvextract kopyalandı.")
 
-    fetched_pkgs = {"mkvtoolnix"}
-    queue = [os.path.join(OUT_DIR, "mkvmerge"), os.path.join(OUT_DIR, "mkvextract")]
+    # pkg_adı -> lib_dir (zaten indirilip açılmış paketler; tekrar indirmemek için önbellek)
+    fetched_libdirs = {}
 
     own_lib_dir = find_subdir(extracted, "usr/lib")
     if own_lib_dir:
-        queue.extend(harvest_package_libs(own_lib_dir, OUT_DIR))
+        fetched_libdirs["mkvtoolnix"] = own_lib_dir
+        # mkvtoolnix'in KENDİ paketindeki dosyalar (varsa) doğrudan alınır - bunlar
+        # zaten aynı source paketten geldiği için hepsi ilgilidir.
+        for f in os.listdir(own_lib_dir):
+            full = os.path.join(own_lib_dir, f)
+            if (os.path.isfile(full) or os.path.islink(full)) and ".so" in f:
+                d2 = os.path.join(OUT_DIR, f)
+                if not os.path.exists(d2):
+                    real_copy(full, d2)
+
+    queue = [os.path.join(OUT_DIR, "mkvmerge"), os.path.join(OUT_DIR, "mkvextract")]
+    for f in os.listdir(OUT_DIR):
+        fp = os.path.join(OUT_DIR, f)
+        if fp not in queue and (os.path.isfile(fp) or os.path.islink(fp)) and ".so" in f:
+            queue.append(fp)
 
     unresolved = []
 
@@ -334,29 +351,38 @@ def main():
             dst = os.path.join(OUT_DIR, soname)
             if os.path.exists(dst):
                 continue
-            found = False
-            for cand in candidate_pkg_names(soname):
-                if cand not in combined:
-                    continue
-                if cand in fetched_pkgs:
-                    continue
-                try:
-                    log(f"'{soname}' için deneniyor: paket '{cand}'")
-                    deb2 = download_deb(combined, cand)
-                    if not deb2:
+
+            resolved = False
+
+            # 1) Zaten indirilmiş bir paketin lib dizininde bu TAM dosya var mı diye bak
+            #    (tekrar indirmeden - bu, "aynı paketten başka bir .so gerekti" durumunu çözer).
+            for lib_dir in fetched_libdirs.values():
+                if lib_dir and copy_exact_with_siblings(lib_dir, soname, OUT_DIR):
+                    resolved = True
+                    break
+
+            # 2) Değilse, yeni aday paketleri sırayla dene
+            if not resolved:
+                for cand in candidate_pkg_names(soname):
+                    if cand in fetched_libdirs or cand not in combined:
                         continue
-                    ex2 = extract_deb_data(deb2, os.path.join(WORK, f"extracted_{cand}"))
-                    fetched_pkgs.add(cand)
-                    lib_dir2 = find_subdir(ex2, "usr/lib")
-                    if not lib_dir2:
-                        continue
-                    queue.extend(harvest_package_libs(lib_dir2, OUT_DIR))
-                    if os.path.exists(dst):
-                        found = True
-                        break
-                except Exception as e:
-                    log(f"UYARI: '{cand}' paketi işlenirken hata: {e}")
-            if not found and not os.path.exists(dst):
+                    try:
+                        log(f"'{soname}' için deneniyor: paket '{cand}'")
+                        deb2 = download_deb(combined, cand)
+                        if not deb2:
+                            continue
+                        ex2 = extract_deb_data(deb2, os.path.join(WORK, f"extracted_{cand}"))
+                        lib_dir2 = find_subdir(ex2, "usr/lib")
+                        fetched_libdirs[cand] = lib_dir2  # önbelleğe al: bir daha indirilmesin
+                        if lib_dir2 and copy_exact_with_siblings(lib_dir2, soname, OUT_DIR):
+                            resolved = True
+                            break
+                    except Exception as e:
+                        log(f"UYARI: '{cand}' paketi işlenirken hata: {e}")
+
+            if resolved and os.path.exists(dst):
+                queue.append(dst)
+            elif not os.path.exists(dst):
                 unresolved.append(soname)
 
     if unresolved:
@@ -365,7 +391,7 @@ def main():
         sys.exit(1)
 
     with open(os.path.join(OUT_DIR, "MANIFEST.txt"), "w") as f:
-        f.write("Kullanılan Termux paketleri: " + ", ".join(sorted(fetched_pkgs)) + "\n\nDosyalar:\n")
+        f.write("Kullanılan Termux paketleri: " + ", ".join(sorted(fetched_libdirs.keys())) + "\n\nDosyalar:\n")
         for fn in sorted(os.listdir(OUT_DIR)):
             f.write(f"  {fn}\n")
 
