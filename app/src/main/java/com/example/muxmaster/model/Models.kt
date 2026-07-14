@@ -78,5 +78,6 @@ data class VideoFile(
     val videoCodec: String = "",
     val resolution: String = "",
     val durationMs: Long = 0L,
-    val fileSizeMb: Float = 0f
+    val fileSizeMb: Float = 0f,
+    val videoStreamIndex: Int = 0 // mkvmerge -d için: kaynaktaki gerçek video track id'si
 )
