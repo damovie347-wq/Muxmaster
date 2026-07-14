@@ -10,64 +10,63 @@ import java.io.File
 import java.io.InputStreamReader
 import kotlin.coroutines.coroutineContext
 
-/**
- * mkvmerge / mkvextract (MKVToolNix) ikilileri APK'nın İÇİNE gömülüdür
- * (app/src/main/assets/mkvtoolnix/ - derleme sırasında scripts/fetch_mkvtoolnix_assets.py
- * tarafından Termux'un apt deposundan indirilip yerleştirilir, bkz. .github/workflows/build.yml).
- *
- * Uygulama Termux'a, internete veya kullanıcının herhangi bir kurulum yapmasına
- * İHTİYAÇ DUYMAZ: ilk kullanımda bu dosyalar assets'ten uygulamanın kendi private
- * dizinine (filesDir) kopyalanır, ikili dosyalar çalıştırılabilir yapılır ve
- * doğrudan ProcessBuilder ile (Windows'taki mkvmerge.exe gibi) çalıştırılır.
- */
+// mkvmerge / mkvextract MKVToolNix ikilileri APK icine gomuludur.
+// app/src/main/assets/mkvtoolnix altina, derleme sirasinda
+// scripts/fetch_mkvtoolnix_assets.py tarafindan yerlestirilir.
+// Uygulama internete veya baska bir kuruluma ihtiyac duymaz: ilk kullanimda
+// bu dosyalar assets icinden uygulamanin kendi private dizinine kopyalanir,
+// calistirilabilir yapilir ve ProcessBuilder ile dogrudan calistirilir.
 object NativeTools {
 
     private const val ASSET_DIR = "mkvtoolnix"
-    private const val MARKER_NAME = ".installed_v1" // asset içeriği değişirse bu sabiti artır
+    private const val MARKER_NAME = ".installed_v1"
 
     data class ExecResult(val exitCode: Int, val output: String)
 
-    private fun installDir(context: Context): File = File(context.filesDir, "mkvtoolnix")
+    private fun installDir(context: Context): File {
+        return File(context.filesDir, "mkvtoolnix")
+    }
 
-    /**
-     * assets/mkvtoolnix/* dosyalarını uygulamanın private dizinine çıkarır ve
-     * mkvmerge/mkvextract'i çalıştırılabilir yapar. Zaten yapılmışsa hemen döner.
-     * Bu tamamen offline bir dosya kopyalama işlemidir, ağ/izin gerektirmez.
-     */
     fun ensureInstalled(context: Context): Boolean {
         val dir = installDir(context)
         val marker = File(dir, MARKER_NAME)
-        if (marker.exists() && File(dir, "mkvmerge").canExecute()) return true
+        if (marker.exists() && File(dir, "mkvmerge").canExecute()) {
+            return true
+        }
 
         return try {
             dir.mkdirs()
             val names = context.assets.list(ASSET_DIR)
-            if (names.isNullOrEmpty()) return false
+            if (names.isNullOrEmpty()) {
+                return false
+            }
 
             for (name in names) {
                 val out = File(dir, name)
-                context.assets.open("$ASSET_DIR/$name").use { input ->
-                    out.outputStream().use { output -> input.copyTo(output, 1 shl 20) }
+                val input = context.assets.open(ASSET_DIR + "/" + name)
+                input.use { i ->
+                    out.outputStream().use { o ->
+                        i.copyTo(o, 1048576)
+                    }
                 }
             }
             File(dir, "mkvmerge").setExecutable(true, false)
             File(dir, "mkvextract").setExecutable(true, false)
             marker.writeText("ok")
             File(dir, "mkvmerge").canExecute() && File(dir, "mkvextract").canExecute()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             false
         }
     }
 
-    fun mkvmergePath(context: Context): String = File(installDir(context), "mkvmerge").absolutePath
-    fun mkvextractPath(context: Context): String = File(installDir(context), "mkvextract").absolutePath
+    fun mkvmergePath(context: Context): String {
+        return File(installDir(context), "mkvmerge").absolutePath
+    }
 
-    /**
-     * mkvmerge/mkvextract'i doğrudan bir alt işlem olarak çalıştırır (Termux YOK, shell YOK).
-     * Bağımlı .so dosyaları aynı dizinde olduğu için LD_LIBRARY_PATH o dizine ayarlanır.
-     * mkvmerge'nin `--gui-mode` çıktısındaki `#GUI#progress NN%` satırları [onProgress] ile bildirilir.
-     * Coroutine iptal edilirse (kullanıcı "İptal" derse) alt işlem de sonlandırılır.
-     */
+    fun mkvextractPath(context: Context): String {
+        return File(installDir(context), "mkvextract").absolutePath
+    }
+
     suspend fun run(
         context: Context,
         binaryPath: String,
@@ -78,38 +77,51 @@ object NativeTools {
         var process: Process? = null
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
             if (cause is CancellationException) {
-                try { process?.destroyForcibly() } catch (_: Exception) {}
+                try {
+                    process?.destroyForcibly()
+                } catch (e: Exception) {
+                }
             }
         }
         try {
-            val pb = ProcessBuilder(listOf(binaryPath) + args)
+            val fullCommand = mutableListOf(binaryPath)
+            fullCommand.addAll(args)
+            val pb = ProcessBuilder(fullCommand)
             pb.directory(dir)
-            pb.environment()["LD_LIBRARY_PATH"] = dir.absolutePath
+            pb.environment().put("LD_LIBRARY_PATH", dir.absolutePath)
             pb.redirectErrorStream(true)
             val p = pb.start()
             process = p
 
             val output = StringBuilder()
-            val progressRegex = Regex("#GUI#progress\\s+(\\d+)%")
+            val progressRegex = Regex("progress\\s+(\\d+)%")
             var lastProgress = -1
 
-            BufferedReader(InputStreamReader(p.inputStream)).use { reader ->
+            val reader = BufferedReader(InputStreamReader(p.inputStream))
+            reader.use { r ->
                 var line: String?
                 while (true) {
-                    line = reader.readLine() ?: break
-                    val l = line ?: break
-                    output.append(l).append('\n')
+                    line = r.readLine()
+                    if (line == null) {
+                        break
+                    }
+                    val l = line as String
+                    output.append(l)
+                    output.append("\n")
                     if (onProgress != null) {
                         val m = progressRegex.find(l)
                         val pct = m?.groupValues?.get(1)?.toIntOrNull()
-                        if (pct != null && pct != lastProgress) { lastProgress = pct; onProgress(pct) }
+                        if (pct != null && pct != lastProgress) {
+                            lastProgress = pct
+                            onProgress(pct)
+                        }
                     }
                 }
             }
             val code = p.waitFor()
             ExecResult(code, output.toString().takeLast(4000))
         } catch (e: Exception) {
-            ExecResult(-1, e.message ?: "İşlem başlatılamadı")
+            ExecResult(-1, e.message ?: "islem baslatilamadi")
         } finally {
             cancelHandle?.dispose()
         }
