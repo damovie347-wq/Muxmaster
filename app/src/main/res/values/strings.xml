@@ -116,6 +116,7 @@
     <string name="export_success">✅ Dışa aktarıldı: %1$s</string>
     <string name="export_failed">Dışa aktarma başarısız oldu.</string>
     <string name="export_no_output_folder">Önce bir çıktı klasörü seçin (Ayarlar ya da aşağıdaki SEÇ butonu).</string>
+    <string name="err_mkvmerge_code">mkvmerge hatası (kod: %1$d).</string>
 
     <!-- SettingsScreen -->
     <string name="settings_title">Ayarlar</string>
