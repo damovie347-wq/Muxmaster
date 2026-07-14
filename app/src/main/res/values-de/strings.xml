@@ -107,6 +107,7 @@
     <string name="export_success">✅ Exportiert: %1$s</string>
     <string name="export_failed">Export fehlgeschlagen.</string>
     <string name="export_no_output_folder">Zuerst einen Ausgabeordner auswählen (Einstellungen oder der AUSWÄHLEN-Button unten).</string>
+    <string name="err_mkvmerge_code">mkvmerge-Fehler (Code: %1$d).</string>
 
     <string name="settings_title">Einstellungen</string>
     <string name="settings_nav_back_desc">Zurück</string>
