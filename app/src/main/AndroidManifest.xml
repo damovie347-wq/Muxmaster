@@ -22,6 +22,7 @@
         android:icon="@android:drawable/sym_def_app_icon"
         android:label="MuxMaster"
         android:requestLegacyExternalStorage="true"
+        android:extractNativeLibs="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.MuxMaster"
         android:localeConfig="@xml/locales_config"
