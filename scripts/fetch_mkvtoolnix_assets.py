@@ -297,6 +297,21 @@ def main():
     real_copy(mkvextract_src, os.path.join(OUT_DIR, "libmkvextract.so"))
     log("mkvmerge ve mkvextract kopyalandı (libmkvmerge.so / libmkvextract.so olarak).")
 
+    # === DÜZELTME: Android linker'ın bundled lib'leri bulması için $ORIGIN rpath ===
+    for exe_name in ["libmkvmerge.so", "libmkvextract.so"]:
+        exe_path = os.path.join(OUT_DIR, exe_name)
+        if os.path.exists(exe_path):
+            try:
+                subprocess.run(
+                    ["patchelf", "--set-rpath", "$ORIGIN", exe_path],
+                    check=True,
+                    capture_output=True
+                )
+                log(f"patchelf uygulandı: {exe_name} -> $ORIGIN")
+            except subprocess.CalledProcessError as e:
+                log(f"UYARI: patchelf başarısız ({exe_name}): {e.stderr.decode(errors='ignore')}")
+    # ========================================================================
+
     fetched_libdirs = {}
 
     own_lib_dir = find_subdir(extracted, "usr/lib")
