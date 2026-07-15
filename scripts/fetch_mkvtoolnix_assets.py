@@ -4,12 +4,10 @@ mkvmerge / mkvextract (MKVToolNix) arm64 (aarch64) ikili dosyalarını ve GERÇE
 ihtiyaç duydukları paylaşılan kütüphaneleri (.so) Termux'un resmi apt depolarından
 indirip app/src/main/jniLibs/arm64-v8a/ altına koyar.
 
-Derin analiz sonucu tespit edilen kök sebep:
-- mkvmerge binary'si (libmkvmerge.so olarak yeniden adlandırılıyor) DT_NEEDED ile libz.so.1 istiyor.
-- Android linker, binary'nin kendi dizinini OTOMATİK aramaz.
-- Termux binary'leri orijinal rpath'ini Termux lib klasörüne işaret eder (bu ortamda yok).
-- Bu yüzden "library 'libz.so.1' not found" hatası alınır (ses/altyazı ekleseniz de aynı hata çıkar).
-Çözüm: Tüm ELF dosyalarına patchelf ile --set-rpath "$ORIGIN" eklemek.
+Kök sebep: libmkvmerge.so (mkvmerge binary'si) DT_NEEDED ile libz.so.1 istiyor.
+Android linker binary'nin kendi dizinini aramaz. Termux rpath'i bu ortamda yok.
+Sonuç: "library 'libz.so.1' not found" (ses/altyazı ekleseniz de aynı hata).
+Çözüm: Tüm .so dosyalarına patchelf --set-rpath "$ORIGIN" eklemek.
 """
 
 import gzip
@@ -288,13 +286,11 @@ def main():
     real_copy(mkvextract_src, os.path.join(OUT_DIR, "libmkvextract.so"))
     log("mkvmerge ve mkvextract kopyalandı.")
 
-    # İlk aşama: ana binary'lere rpath ekle
     for exe_name in ["libmkvmerge.so", "libmkvextract.so"]:
         exe_path = os.path.join(OUT_DIR, exe_name)
         if os.path.exists(exe_path):
             try:
                 subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", exe_path], check=True, capture_output=True)
-                log(f"patchelf: {exe_name}")
             except Exception:
                 pass
 
@@ -365,9 +361,7 @@ def main():
         log("HATA: şu kütüphaneler bulunamadı: " + ", ".join(sorted(set(unresolved))))
         sys.exit(1)
 
-    # === DERİN DÜZELTME: TÜM ELF dosyalarına $ORIGIN rpath ekle ===
-    # Bu sayede libmkvmerge.so + libz.so.1 + diğer tüm bağımlılıklar aynı dizinde sorunsuz bulunur.
-    # Ses/altyazı ekleseniz de (daha fazla track olsa da) mkvmerge sorunsuz çalışır.
+    # DERİN DÜZELTME: TÜM .so dosyalarına $ORIGIN rpath ekle (libz.so.1 dahil)
     for f in os.listdir(OUT_DIR):
         if f.endswith(".so"):
             fpath = os.path.join(OUT_DIR, f)
@@ -375,7 +369,6 @@ def main():
                 subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", fpath], check=True, capture_output=True)
             except Exception:
                 pass
-    # ========================================================================
 
     log("Kullanılan Termux paketleri: " + ", ".join(sorted(fetched_libdirs.keys())))
     log("Tamamlandı. jniLibs/arm64-v8a/ içeriği:")
