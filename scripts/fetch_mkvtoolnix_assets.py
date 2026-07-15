@@ -191,10 +191,35 @@ def find_subdir(root, suffix):
     return None
 
 
-def find_file(root, filename):
+def find_all_files(root, filename):
+    matches = []
     for dirpath, _, files in os.walk(root):
         if filename in files:
-            return os.path.join(dirpath, filename)
+            matches.append(os.path.join(dirpath, filename))
+    return matches
+
+
+def is_arm64_elf(path):
+    """Dosyanin gercekten ELF64 + AArch64 olup olmadigini dogrular.
+    Bazi paketler ayni dosya adini (ornegin libc++_shared.so) birden fazla
+    mimari icin farkli alt klasorlerde barindirabiliyor (NDK sysroot'unda
+    her ABI kendi klasorunde ayni isimle bulunur). os.walk sirasi garanti
+    olmadigindan, isme gore ilk eslesmeyi almak yanlislikla 32-bit (arm/i686)
+    bir kopyayi secip "is 32-bit instead of 64-bit" CRASH'ine yol acabilir."""
+    try:
+        out = subprocess.run(["readelf", "-h", path], capture_output=True, text=True, check=True).stdout
+    except Exception:
+        return False
+    return ("ELF64" in out) and ("AArch64" in out)
+
+
+def find_file(root, filename):
+    candidates = find_all_files(root, filename)
+    for c in candidates:
+        if is_arm64_elf(c):
+            return c
+    if candidates:
+        log(f"UYARI: '{filename}' bulundu ({len(candidates)} aday) ama hicbiri ELF64/AArch64 degil (mimari uyumsuz).")
     return None
 
 
