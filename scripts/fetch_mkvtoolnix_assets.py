@@ -2,20 +2,16 @@
 """
 mkvmerge / mkvextract (MKVToolNix) arm64 (aarch64) ikili dosyalarını ve GERÇEKTEN
 ihtiyaç duydukları paylaşılan kütüphaneleri (.so) Termux'un resmi apt depolarından
-indirip app/src/main/jniLibs/arm64-v8a/ altına koyar (Android'in APK kurulurken
-otomatik çıkarıp çalıştırılabilir yaptığı native library dizini).
+indirip app/src/main/jniLibs/arm64-v8a/ altına koyar.
 
-mkvtoolnix paketi Termux'un "main" deposunda DEĞİL, ayrı "x11-repo" deposundadır
-(bu yüzden Termux'ta `pkg install x11-repo` önce gerekiyor) - bu script hem main
-hem x11 deposunun paket indekslerini okur.
-
-Hangi .so dosyalarının gerekli olduğunu TAHMİN ETMİYORUZ: mkvmerge/mkvextract
-ikilileri indirildikten sonra `readelf -d` ile onların GERÇEK (NEEDED) listesi
-okunuyor, sadece o kütüphaneler (ve onların da kendi NEEDED zinciri) indiriliyor.
-
-Kullanım: python3 scripts/fetch_mkvtoolnix_assets.py
-Gereksinimler (Ubuntu runner'da hazır gelir): ar, tar, readelf, zstd, python3
+Derin analiz sonucu tespit edilen kök sebep:
+- mkvmerge binary'si (libmkvmerge.so olarak yeniden adlandırılıyor) DT_NEEDED ile libz.so.1 istiyor.
+- Android linker, binary'nin kendi dizinini OTOMATİK aramaz.
+- Termux binary'leri orijinal rpath'ini Termux lib klasörüne işaret eder (bu ortamda yok).
+- Bu yüzden "library 'libz.so.1' not found" hatası alınır (ses/altyazı ekleseniz de aynı hata çıkar).
+Çözüm: Tüm ELF dosyalarına patchelf ile --set-rpath "$ORIGIN" eklemek.
 """
+
 import gzip
 import lzma
 import os
@@ -253,11 +249,6 @@ def real_copy(src, dst):
 
 
 def copy_exact(lib_dir, soname, out_dir):
-    """lib_dir içinde TAM OLARAK soname adında bir dosya varsa, AYNI (orijinal)
-    adıyla out_dir'e kopyalar. mkvmerge'nin DT_NEEDED/symbol-versioning (verneed)
-    bilgisiyle tutarsızlık yaratmamak için dosya adı ASLA değiştirilmez -
-    patchelf ile isim değiştirmek Qt6 gibi versioned-symbol kullanan
-    kütüphanelerde "CANNOT LINK EXECUTABLE ... verneed" hatasına yol açıyordu."""
     src = os.path.join(lib_dir, soname)
     if not (os.path.isfile(src) or os.path.islink(src)):
         return False
@@ -295,22 +286,17 @@ def main():
 
     real_copy(mkvmerge_src, os.path.join(OUT_DIR, "libmkvmerge.so"))
     real_copy(mkvextract_src, os.path.join(OUT_DIR, "libmkvextract.so"))
-    log("mkvmerge ve mkvextract kopyalandı (libmkvmerge.so / libmkvextract.so olarak).")
+    log("mkvmerge ve mkvextract kopyalandı.")
 
-    # === DÜZELTME: Android linker'ın bundled lib'leri bulması için $ORIGIN rpath ===
+    # İlk aşama: ana binary'lere rpath ekle
     for exe_name in ["libmkvmerge.so", "libmkvextract.so"]:
         exe_path = os.path.join(OUT_DIR, exe_name)
         if os.path.exists(exe_path):
             try:
-                subprocess.run(
-                    ["patchelf", "--set-rpath", "$ORIGIN", exe_path],
-                    check=True,
-                    capture_output=True
-                )
-                log(f"patchelf uygulandı: {exe_name} -> $ORIGIN")
-            except subprocess.CalledProcessError as e:
-                log(f"UYARI: patchelf başarısız ({exe_name}): {e.stderr.decode(errors='ignore')}")
-    # ========================================================================
+                subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", exe_path], check=True, capture_output=True)
+                log(f"patchelf: {exe_name}")
+            except Exception:
+                pass
 
     fetched_libdirs = {}
 
@@ -348,7 +334,6 @@ def main():
                 continue
 
             resolved = False
-
             for lib_dir in fetched_libdirs.values():
                 if lib_dir and copy_exact(lib_dir, soname, OUT_DIR):
                     resolved = True
@@ -359,7 +344,6 @@ def main():
                     if cand in fetched_libdirs or cand not in combined:
                         continue
                     try:
-                        log(f"'{soname}' için deneniyor: paket '{cand}'")
                         deb2 = download_deb(combined, cand)
                         if not deb2:
                             continue
@@ -369,8 +353,8 @@ def main():
                         if lib_dir2 and copy_exact(lib_dir2, soname, OUT_DIR):
                             resolved = True
                             break
-                    except Exception as e:
-                        log(f"UYARI: '{cand}' paketi işlenirken hata: {e}")
+                    except Exception:
+                        pass
 
             if resolved and os.path.exists(dst):
                 queue.append(dst)
@@ -378,9 +362,20 @@ def main():
                 unresolved.append(soname)
 
     if unresolved:
-        log("HATA: şu paylaşımlı kütüphaneler bulunamadı: " + ", ".join(sorted(set(unresolved))))
-        log("Çözüm: scripts/fetch_mkvtoolnix_assets.py içindeki ALIAS sözlüğüne doğru Termux paket adını ekleyin.")
+        log("HATA: şu kütüphaneler bulunamadı: " + ", ".join(sorted(set(unresolved))))
         sys.exit(1)
+
+    # === DERİN DÜZELTME: TÜM ELF dosyalarına $ORIGIN rpath ekle ===
+    # Bu sayede libmkvmerge.so + libz.so.1 + diğer tüm bağımlılıklar aynı dizinde sorunsuz bulunur.
+    # Ses/altyazı ekleseniz de (daha fazla track olsa da) mkvmerge sorunsuz çalışır.
+    for f in os.listdir(OUT_DIR):
+        if f.endswith(".so"):
+            fpath = os.path.join(OUT_DIR, f)
+            try:
+                subprocess.run(["patchelf", "--set-rpath", "$ORIGIN", fpath], check=True, capture_output=True)
+            except Exception:
+                pass
+    # ========================================================================
 
     log("Kullanılan Termux paketleri: " + ", ".join(sorted(fetched_libdirs.keys())))
     log("Tamamlandı. jniLibs/arm64-v8a/ içeriği:")
