@@ -360,18 +360,43 @@ def main():
     PREFIX = "muxtn_"
     ENTRY_POINTS = {"libmkvmerge.so", "libmkvextract.so"}
 
+    def strip_so_version(fn):
+        # ONEMLI: "libz.so.1", "libmatroska.so.90", "libboost_x.so.1.83.0" gibi
+        # Linux/glibc tarzi VERSIYONLU soname'ler Android'de GECERSIZDIR.
+        # Android'in paket yoneticisi, APK icindeki lib/<abi>/ klasorunden SADECE
+        # tam olarak ".so" ile biten dosyalari nativeLibraryDir'e cikarir; ".so.1"
+        # gibi ekstra son eki olan dosyalar APK'nin icinde fiziksel olarak var
+        # olsa bile cihaza HIC COPYALANMAZ ve linker "not found" hatasi verir.
+        # Bu yuzden her dosya adini ilk ".so" ile bitecek sekilde kesiyoruz.
+        idx = fn.find(".so")
+        if idx == -1:
+            return fn
+        return fn[:idx + 3]
+
     all_files_before = sorted(present)
     needed_before = {fn: get_needed(os.path.join(OUT_DIR, fn)) for fn in all_files_before}
 
     rename_map = {}
+    used_targets = set(ENTRY_POINTS)
     for fn in all_files_before:
         if fn in ENTRY_POINTS:
             continue
-        new_name = f"lib{PREFIX}{fn[3:]}" if fn.startswith("lib") else f"lib{PREFIX}{fn}"
+        normalized = strip_so_version(fn)
+        core = normalized[3:] if normalized.startswith("lib") else normalized
+        new_name = f"lib{PREFIX}{core}"
+        if new_name in used_targets:
+            log(f"HATA: normalize sonrasi isim cakismasi: '{fn}' -> '{new_name}' zaten kullanimda.")
+            sys.exit(1)
+        used_targets.add(new_name)
         rename_map[fn] = new_name
 
     for old_name, new_name in rename_map.items():
         os.rename(os.path.join(OUT_DIR, old_name), os.path.join(OUT_DIR, new_name))
+        try:
+            subprocess.run(["patchelf", "--set-soname", new_name, os.path.join(OUT_DIR, new_name)],
+                            check=True, capture_output=True)
+        except Exception as e:
+            log(f"UYARI: {new_name} icin set-soname basarisiz: {e}")
 
     for fn in all_files_before:
         current_path = os.path.join(OUT_DIR, rename_map.get(fn, fn))
@@ -388,6 +413,13 @@ def main():
 
     for old_name, new_name in sorted(rename_map.items()):
         log(f"  {old_name}  ->  {new_name}")
+
+    # Guvenlik agi: OUT_DIR'de artik ".so" ile bitmeyen HICBIR dosya kalmamali
+    # (giris noktalari zaten "libmkvmerge.so"/"libmkvextract.so" ile bitiyor).
+    for fn in os.listdir(OUT_DIR):
+        if not fn.endswith(".so"):
+            log(f"HATA: '{fn}' hala '.so' ile bitmiyor; Android bu dosyayi cihaza cikarmayacaktir.")
+            sys.exit(1)
 
     # --- Tum dosyalara rpath=$ORIGIN (savunma amacli, LD_LIBRARY_PATH'e ek olarak) ---
     log("== rpath=$ORIGIN tum .so dosyalarina yaziliyor ==")
