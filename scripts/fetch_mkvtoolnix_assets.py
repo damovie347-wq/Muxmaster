@@ -14,7 +14,7 @@ ikilileri indirildikten sonra `readelf -d` ile onların GERÇEK (NEEDED) listesi
 okunuyor, sadece o kütüphaneler (ve onların da kendi NEEDED zinciri) indiriliyor.
 
 Kullanım: python3 scripts/fetch_mkvtoolnix_assets.py
-Gereksinimler: ar, tar, readelf, zstd, patchelf, python3
+Gereksinimler (Ubuntu runner'da hazır gelir): ar, tar, readelf, zstd, python3
 """
 import gzip
 import lzma
@@ -252,28 +252,19 @@ def real_copy(src, dst):
     shutil.copy2(os.path.realpath(src), dst)
 
 
-def normalize_soname(soname):
-    base = re.sub(r"(\.so)\.[0-9.]+$", r"\1", soname)
-    if not base.endswith(".so"):
-        base = base + ".so"
-    return base
-
-
-def patch_needed(binpath, old_name, new_name):
-    if old_name == new_name:
-        return
-    subprocess.run(["patchelf", "--replace-needed", old_name, new_name, binpath], check=True)
-
-
 def copy_exact(lib_dir, soname, out_dir):
+    """lib_dir içinde TAM OLARAK soname adında bir dosya varsa, AYNI (orijinal)
+    adıyla out_dir'e kopyalar. mkvmerge'nin DT_NEEDED/symbol-versioning (verneed)
+    bilgisiyle tutarsızlık yaratmamak için dosya adı ASLA değiştirilmez -
+    patchelf ile isim değiştirmek Qt6 gibi versioned-symbol kullanan
+    kütüphanelerde "CANNOT LINK EXECUTABLE ... verneed" hatasına yol açıyordu."""
     src = os.path.join(lib_dir, soname)
     if not (os.path.isfile(src) or os.path.islink(src)):
-        return None
-    norm = normalize_soname(soname)
-    dst = os.path.join(out_dir, norm)
+        return False
+    dst = os.path.join(out_dir, soname)
     if not os.path.exists(dst):
         real_copy(src, dst)
-    return norm
+    return True
 
 
 def main():
@@ -314,8 +305,7 @@ def main():
         for f in os.listdir(own_lib_dir):
             full = os.path.join(own_lib_dir, f)
             if (os.path.isfile(full) or os.path.islink(full)) and ".so" in f:
-                norm = normalize_soname(f)
-                d2 = os.path.join(OUT_DIR, norm)
+                d2 = os.path.join(OUT_DIR, f)
                 if not os.path.exists(d2):
                     real_copy(full, d2)
 
@@ -338,50 +328,39 @@ def main():
         for soname in needed:
             if soname in SKIP_SONAMES:
                 continue
-            norm_target = normalize_soname(soname)
-            dst = os.path.join(OUT_DIR, norm_target)
+            dst = os.path.join(OUT_DIR, soname)
+            if os.path.exists(dst):
+                continue
 
-            if not os.path.exists(dst):
-                resolved_norm = None
+            resolved = False
 
-                for lib_dir in fetched_libdirs.values():
-                    if not lib_dir:
+            for lib_dir in fetched_libdirs.values():
+                if lib_dir and copy_exact(lib_dir, soname, OUT_DIR):
+                    resolved = True
+                    break
+
+            if not resolved:
+                for cand in candidate_pkg_names(soname):
+                    if cand in fetched_libdirs or cand not in combined:
                         continue
-                    r = copy_exact(lib_dir, soname, OUT_DIR)
-                    if r:
-                        resolved_norm = r
-                        break
-
-                if not resolved_norm:
-                    for cand in candidate_pkg_names(soname):
-                        if cand in fetched_libdirs or cand not in combined:
+                    try:
+                        log(f"'{soname}' için deneniyor: paket '{cand}'")
+                        deb2 = download_deb(combined, cand)
+                        if not deb2:
                             continue
-                        try:
-                            log(f"'{soname}' için deneniyor: paket '{cand}'")
-                            deb2 = download_deb(combined, cand)
-                            if not deb2:
-                                continue
-                            ex2 = extract_deb_data(deb2, os.path.join(WORK, f"extracted_{cand}"))
-                            lib_dir2 = find_subdir(ex2, "usr/lib")
-                            fetched_libdirs[cand] = lib_dir2
-                            if lib_dir2:
-                                r = copy_exact(lib_dir2, soname, OUT_DIR)
-                                if r:
-                                    resolved_norm = r
-                                    break
-                        except Exception as e:
-                            log(f"UYARI: '{cand}' paketi işlenirken hata: {e}")
+                        ex2 = extract_deb_data(deb2, os.path.join(WORK, f"extracted_{cand}"))
+                        lib_dir2 = find_subdir(ex2, "usr/lib")
+                        fetched_libdirs[cand] = lib_dir2
+                        if lib_dir2 and copy_exact(lib_dir2, soname, OUT_DIR):
+                            resolved = True
+                            break
+                    except Exception as e:
+                        log(f"UYARI: '{cand}' paketi işlenirken hata: {e}")
 
-                if resolved_norm and os.path.exists(dst):
-                    queue.append(dst)
-                elif not os.path.exists(dst):
-                    unresolved.append(soname)
-                    continue
-
-            try:
-                patch_needed(current, soname, norm_target)
-            except Exception as e:
-                log(f"UYARI: patchelf başarısız ({current} -> {soname}): {e}")
+            if resolved and os.path.exists(dst):
+                queue.append(dst)
+            elif not os.path.exists(dst):
+                unresolved.append(soname)
 
     if unresolved:
         log("HATA: şu paylaşımlı kütüphaneler bulunamadı: " + ", ".join(sorted(set(unresolved))))
