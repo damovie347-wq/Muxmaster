@@ -31,10 +31,10 @@ jobs:
         with:
           gradle-version: 8.5
 
-      - name: mkvmerge/mkvextract (MKVToolNix) binary'lerini indir ve assets'e göm
+      - name: mkvmerge/mkvextract (MKVToolNix) binary'lerini indir ve jniLibs'e göm
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y binutils zstd xz-utils
+          sudo apt-get install -y binutils zstd xz-utils patchelf
           python3 scripts/fetch_mkvtoolnix_assets.py
 
       - name: Release APK derle (minify açık, ffmpeg-kit + mkvtoolnix native dosyaları dahil)
