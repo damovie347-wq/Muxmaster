@@ -323,13 +323,8 @@ def main():
             unresolved_sonames.discard(soname)
             queue.append(dst)
 
-    # --- Tum dosyalara rpath=$ORIGIN (savunma amacli, LD_LIBRARY_PATH'e ek olarak) ---
-    log("== rpath=$ORIGIN tum .so dosyalarina yaziliyor ==")
-    for fn in os.listdir(OUT_DIR):
-        set_rpath_origin(os.path.join(OUT_DIR, fn))
-
-    # --- Son dogrulama: gercekten hicbir NEEDED eksik kalmamis mi? ---
-    log("== Son dogrulama: tum bagimliliklar karsilaniyor mu? ==")
+    # --- Ilk dogrulama: ozyinemeli cozumleme gercekten tamamlandi mi? ---
+    log("== Ilk dogrulama: tum bagimliliklar karsilaniyor mu? ==")
     present = set(os.listdir(OUT_DIR))
     still_missing = set()
     for fn in sorted(present):
@@ -347,14 +342,83 @@ def main():
         log("APK bu haliyle derlense bile mkvmerge/mkvextract calisma zamaninda CRASH olur.")
         sys.exit(1)
 
-    log("== TAMAM: tum bagimliliklar cozumlendi ==")
+    # --- IZOLASYON: projede ffmpeg-kit (com.moizhassan.ffmpeg:ffmpeg-kit-16kb) da
+    # kendi native .so dosyalarini AYNI jniLibs/arm64-v8a klasorune koyuyor, ve
+    # build.gradle.kts'teki `pickFirsts += "**/*.so"` ayari YUZUNDEN, eger iki
+    # ayri kutuphane (Termux'tan gelen mkvmerge bagimliligi ile ffmpeg-kit'in
+    # kendi bagimliligi) AYNI DOSYA ADINA sahipse, Gradle bunlardan birini
+    # SESSIZCE atar. Bu; ffmpeg-kit'in kendi kutuphanesinin bizim (farkli
+    # derlenmis) surumumuzle degismesine ve video secilir secilmez FFprobeKit
+    # cagrisinda CRASH'e yol acabilir.
+    #
+    # KALICI COZUM: giris noktalari (libmkvmerge.so / libmkvextract.so) HARIC
+    # tum bagimliliklari benzersiz bir onekle yeniden adlandirip, bunlara
+    # referans veren NEEDED kayitlarini patchelf --replace-needed ile
+    # guncelliyoruz. Boylece hicbir ortak isim ffmpeg-kit'in (ya da baska bir
+    # kutuphanenin) dosyalariyla ASLA cakismaz.
+    log("== ffmpeg-kit ile isim cakismasini onlemek icin bagimliliklar izole ediliyor ==")
+    PREFIX = "muxtn_"
+    ENTRY_POINTS = {"libmkvmerge.so", "libmkvextract.so"}
+
+    all_files_before = sorted(present)
+    needed_before = {fn: get_needed(os.path.join(OUT_DIR, fn)) for fn in all_files_before}
+
+    rename_map = {}
+    for fn in all_files_before:
+        if fn in ENTRY_POINTS:
+            continue
+        new_name = f"lib{PREFIX}{fn[3:]}" if fn.startswith("lib") else f"lib{PREFIX}{fn}"
+        rename_map[fn] = new_name
+
+    for old_name, new_name in rename_map.items():
+        os.rename(os.path.join(OUT_DIR, old_name), os.path.join(OUT_DIR, new_name))
+
+    for fn in all_files_before:
+        current_path = os.path.join(OUT_DIR, rename_map.get(fn, fn))
+        for old_needed in needed_before[fn]:
+            if old_needed in rename_map:
+                try:
+                    subprocess.run(
+                        ["patchelf", "--replace-needed", old_needed, rename_map[old_needed], current_path],
+                        check=True, capture_output=True
+                    )
+                except Exception as e:
+                    log(f"HATA: {current_path} icinde {old_needed} -> {rename_map[old_needed]} guncellenemedi: {e}")
+                    sys.exit(1)
+
+    for old_name, new_name in sorted(rename_map.items()):
+        log(f"  {old_name}  ->  {new_name}")
+
+    # --- Tum dosyalara rpath=$ORIGIN (savunma amacli, LD_LIBRARY_PATH'e ek olarak) ---
+    log("== rpath=$ORIGIN tum .so dosyalarina yaziliyor ==")
+    for fn in os.listdir(OUT_DIR):
+        set_rpath_origin(os.path.join(OUT_DIR, fn))
+
+    # --- Son dogrulama: yeniden adlandirma sonrasi hala her sey tutarli mi? ---
+    log("== Son dogrulama: yeniden adlandirma sonrasi butunluk kontrolu ==")
+    present_final = set(os.listdir(OUT_DIR))
+    final_missing = set()
+    for fn in sorted(present_final):
+        for soname in get_needed(os.path.join(OUT_DIR, fn)):
+            if soname in SKIP_SONAMES:
+                continue
+            if soname not in present_final:
+                final_missing.add(soname)
+
+    if final_missing:
+        log("HATA: yeniden adlandirma sonrasi asagidaki bagimliliklar hala eksik:")
+        for s in sorted(final_missing):
+            log(f"    - {s}")
+        sys.exit(1)
+
+    log("== TAMAM: tum bagimliliklar cozumlendi ve ffmpeg-kit'ten izole edildi ==")
     total_size = 0
-    for fn in sorted(os.listdir(OUT_DIR)):
+    for fn in sorted(present_final):
         p = os.path.join(OUT_DIR, fn)
         sz = os.path.getsize(p)
         total_size += sz
         log(f"  {fn} ({sz} bytes)")
-    log(f"Toplam: {len(present)} dosya, {total_size / (1024*1024):.1f} MB")
+    log(f"Toplam: {len(present_final)} dosya, {total_size / (1024*1024):.1f} MB")
 
 
 if __name__ == "__main__":
