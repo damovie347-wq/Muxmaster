@@ -14,6 +14,7 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.TrackProber
+import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -187,6 +188,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
 
         convertJob = viewModelScope.launch {
+            MuxForegroundService.start(app)
             try {
                 isConverting = true; resultMessage = null; isSuccess = false; convertProgress = 0
 
@@ -209,6 +211,10 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val returnCodeVal = runFfmpegAsync(args, item.durationMs) { pct ->
                         updateQueueItem(item.id) { it.copy(progress = pct) }
                         convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
+                        MuxForegroundService.update(
+                            app, convertProgress,
+                            app.getString(R.string.notif_converting_progress, item.displayName, pct)
+                        )
                     }
 
                     val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
@@ -262,6 +268,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 throw c
             } finally {
                 isConverting = false
+                MuxForegroundService.stop(app, resultMessage, isSuccess)
             }
         }
     }
@@ -270,51 +277,36 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    // ************************ SON HAL – STABİL & HIZLI & KUSURSUZ ************************
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
-
         return buildList {
-            // 1. GİRDİ OPTİMİZASYONU
             add("-y")
             add("-analyzeduration"); add("50M")
             add("-probesize"); add("50M")
             add("-fflags"); add("+genpts+discardcorrupt")
             add("-i"); add(item.cachePath)
-            
-            // 2. AKIŞ AYARLARI
             add("-vn"); add("-map"); add("0:a:0")
-
-            // 3. FİLTRELEME (SADELEŞTİRİLDİ - HATA YOK)
-            // async=1 ve first_pts=0 zamanlamayı sıfırlar, afade ise patlamayı engeller.
             add("-af"); add("aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.01")
             add("-ar"); add("48000")
-            
             if (forceMono) { add("-ac"); add("1") }
-
-            // 4. ÇIKTI FORMATI
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    add("-application"); add("audio")       
-                    add("-vbr"); add("constrained")         
-                    add("-frame_duration"); add("60")       
-                    add("-compression_level"); add("10")    
+                    add("-application"); add("audio")
+                    add("-vbr"); add("constrained")
+                    add("-frame_duration"); add("60")
+                    add("-compression_level"); add("10")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
                 }
             }
-            
-            // 5. BİT ORANI VE ÇOKLU İŞLEMCİ DESTEĞİ
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
             add("-b:a"); add("${effectiveBitrate}k")
-            add("-threads"); add("0") 
-            
+            add("-threads"); add("0")
             add(outputPath)
         }.toTypedArray()
     }
-    // ***********************************************************************************
 
     private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
         suspendCancellableCoroutine { cont ->
