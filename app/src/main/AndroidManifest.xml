@@ -2,16 +2,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- API 32 ve altı için (Storage Access Framework yine de kullanılıyor,
+         ama bazı OEM/eski cihazlarda fallback için maxSdkVersion ile sınırlı tutuluyor) -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- API 33+ granular media permissions -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
+    <!-- Arka planda mux ilerleme bildirimi için (bkz. MuxForegroundService) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Donusum/mux sirasinda ekran kapanip cihaz uyku moduna girse bile
+         CPU'nun tam hizda calismaya devam etmesi icin (bkz. MuxForegroundService) -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
@@ -40,6 +47,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Dosya yöneticilerinden "Birlikte Aç / Open with" -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -53,6 +61,7 @@
                 <data android:mimeType="audio/*" />
             </intent-filter>
 
+            <!-- Dosya yöneticilerinden "Paylaş / Share" -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
