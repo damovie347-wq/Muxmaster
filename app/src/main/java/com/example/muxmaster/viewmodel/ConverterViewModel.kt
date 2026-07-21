@@ -189,8 +189,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (toProcess.isEmpty()) { resultMessage = app.getString(R.string.err_no_pending_files); isSuccess = false; return }
         if (outFolder == null) { resultMessage = app.getString(R.string.err_no_output_folder); isSuccess = false; return }
         if (bitrate == null || bitrate < 6 || bitrate > 512) {
-            resultMessage = app.getString(R.string.err_invalid_bitrate); isSuccess = false; return
-        }
+            resultMessage = app.getString(R.string.err_invalid_bitrate); isSuccess = false; return }
         if (isConverting) return
 
         convertJob = viewModelScope.launch {
@@ -217,10 +216,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val returnCodeVal = runFfmpegAsync(args, item.durationMs) { pct ->
                         updateQueueItem(item.id) { it.copy(progress = pct) }
                         convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
-                        MuxForegroundService.update(
-                            app, convertProgress,
-                            app.getString(R.string.notif_converting_progress, item.displayName, pct)
-                        )
+                        MuxForegroundService.update(app, convertProgress, app.getString(R.string.notif_converting_progress, item.displayName, pct))
                     }
 
                     val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
