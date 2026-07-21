@@ -14,6 +14,7 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.TrackProber
+import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,13 +24,11 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.resume
 
-/** Dönüştürme hedefi format. */
 enum class OutputFormat(val extension: String, val mimeType: String, val label: String) {
     OPUS("opus", "audio/ogg", "Opus"),
     MP3("mp3", "audio/mpeg", "MP3")
 }
 
-/** Kuyruktaki tek bir dosyanın işlem durumu. */
 enum class ConvertStatus { PENDING, CONVERTING, DONE, ERROR }
 
 @Immutable
@@ -80,7 +79,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     private var nextId = 0L
 
     init {
-        // Ayarlar'da seçilmiş varsayılan çıktı klasörü varsa otomatik yükle.
         prefs.defaultOutputFolder?.let { outputFolderUri = it }
     }
 
@@ -101,12 +99,12 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             files.forEachIndexed { index, pair ->
                 val uri = pair.first
                 val displayName = pair.second
-                loadingMessage = "${index + 1}/${files.size}: $displayName"
+                loadingMessage = "\( {index + 1}/ \){files.size}: $displayName"
 
                 val ext = extensionFromName(displayName).ifBlank { "bin" }
                 val id = nextId++
                 val cachePath = withContext(Dispatchers.IO) {
-                    copyUriToCache(uri, "src_${id}_${System.currentTimeMillis()}.$ext")
+                    copyUriToCache(uri, "src_\( {id}_ \){System.currentTimeMillis()}.$ext")
                 }
                 if (cachePath != null) {
                     val sizeMb = withContext(Dispatchers.IO) { File(cachePath).length().toFloat() / (1024 * 1024) }
@@ -147,13 +145,17 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
         val old = queue
         queue = emptyList()
-        resultMessage = null; isSuccess = false; convertProgress = 0
+        resultMessage = null
+        isSuccess = false
+        convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             old.forEach { runCatching { File(it.cachePath).delete() } }
         }
     }
 
-    fun updateBitrateText(value: String) { bitrateKbpsText = value.filter { it.isDigit() }.take(4) }
+    fun updateBitrateText(value: String) {
+        bitrateKbpsText = value.filter { it.isDigit() }.take(4)
+    }
 
     fun setOutputFolder(uri: Uri) {
         outputFolderUri = uri
@@ -162,7 +164,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
         } catch (_: SecurityException) { }
-        // Manuel seçilen klasör aynı zamanda yeni varsayılan klasör olur.
         prefs.defaultOutputFolder = uri
     }
 
@@ -172,7 +173,9 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
         val old = queue
         queue = emptyList()
-        resultMessage = null; isSuccess = false; convertProgress = 0
+        resultMessage = null
+        isSuccess = false
+        convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             old.forEach { runCatching { File(it.cachePath).delete() } }
         }
@@ -191,6 +194,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
 
         convertJob = viewModelScope.launch {
+            MuxForegroundService.start(app)
             try {
                 isConverting = true; resultMessage = null; isSuccess = false; convertProgress = 0
 
@@ -204,7 +208,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     updateQueueItem(item.id) { it.copy(status = ConvertStatus.CONVERTING, progress = 0) }
 
                     val workDir = File(app.cacheDir, "convert_work").also { it.mkdirs() }
-                    val tempOutput = File(workDir, "out_${item.id}_${System.currentTimeMillis()}.${format.extension}")
+                    val tempOutput = File(workDir, "out_\( {item.id}_ \){System.currentTimeMillis()}.${format.extension}")
                     tempOutput.delete()
 
                     val args = buildFfmpegArgs(item, format, bitrate, tempOutput.absolutePath)
@@ -213,6 +217,10 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val returnCodeVal = runFfmpegAsync(args, item.durationMs) { pct ->
                         updateQueueItem(item.id) { it.copy(progress = pct) }
                         convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
+                        MuxForegroundService.update(
+                            app, convertProgress,
+                            app.getString(R.string.notif_converting_progress, item.displayName, pct)
+                        )
                     }
 
                     val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
@@ -222,7 +230,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                         runCatching { tempOutput.delete() }
                     } else {
                         val rawName = item.displayName.substringBeforeLast('.', item.displayName)
-                        val finalName = "$rawName.${format.extension}"
+                        val finalName = "\( rawName. \){format.extension}"
                         val finalSizeBytes = tempOutput.length()
 
                         val copyOk = withContext(Dispatchers.IO) {
@@ -266,6 +274,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 throw c
             } finally {
                 isConverting = false
+                MuxForegroundService.stop(app, resultMessage, isSuccess)
             }
         }
     }
@@ -276,59 +285,34 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         val forceMono = bitrate < 48
-        // Çok düşük bitrate'lerde (<=32kbps) "voip" (SILK tabanlı) modu,
-        // müzik/genel ses için tercih edilen "audio" (CELT tabanlı) moduna göre
-        // ÇOK daha kararlıdır. "audio" modu 32kbps altında bit bütçesi
-        // yetersiz kaldığı için çıtırtı/bozulmaya çok daha yatkındır; "voip"
-        // düşük bitrate'lere özel tasarlandığından aynı hedef bitrate'te
-        // belirgin şekilde daha temiz ve daha kararlı bir çıktı verir.
-        val isVeryLowBitrate = bitrate <= 32
-        // Eski zincir (adelay + agresif alimiter) limiter'ı "soğuk" haldeyken
-        // sinyalin en başına maruz bırakıyordu; gain-reduction zarfı oturana
-        // kadar geçen ~1-2sn içinde duyulabilir çıtırtı/pompalama oluşuyordu.
-        // Düşük bitrate'lerde bu ilk saniyelerdeki ani geçiş (transient) çok
-        // daha belirgin duyulduğu için fade süresi bitrate'e göre ölçekleniyor.
-        val fadeDuration = when {
-            bitrate <= 20 -> 0.25
-            bitrate <= 32 -> 0.12
-            else -> 0.05
-        }
-        val audioFilters = "highpass=f=20,afade=t=in:st=0:d=$fadeDuration:curve=tri"
         return buildList {
-            add("-y"); add("-i"); add(item.cachePath)
-            add("-vn"); add("-map"); add("0:a:0")
+            add("-y")
+            add("-hide_banner")
+            add("-loglevel"); add("error")
+            add("-analyzeduration"); add("5M")
+            add("-probesize"); add("5M")
+            add("-i"); add(item.cachePath)
+            add("-vn")
+            add("-map"); add("0:a:0")
+            add("-af"); add("aresample=async=1:first_pts=0")
             add("-ar"); add("48000")
             if (forceMono) { add("-ac"); add("1") }
-            add("-af"); add(audioFilters)
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
-                    add("-application"); add(if (isVeryLowBitrate) "voip" else "audio")
-                    // Varsayılan (constrained OLMAYAN) VBR, karmaşık pasajlarda hedef
-                    // bitrate'in çok üzerine çıkabiliyordu; düşük bitrate'lerde bu
-                    // oransal olarak "beklenenden çok daha büyük dosya" şeklinde
-                    // görünüyordu. "constrained" çıktıyı hedefe yakın tutar.
+                    add("-application"); add("audio")
                     add("-vbr"); add("constrained")
-                    // Çok düşük bitrate'lerde 60ms'lik büyük frame'ler, paket başı
-                    // sabit overhead'in (TOC + boyut alanları) bit bütçesindeki
-                    // payını küçültür. 6-20kbps aralığında bu, dosya boyutunu
-                    // BÜYÜTMEDEN belirgin şekilde daha stabil/temiz bir çıktı sağlar
-                    // (varsayılan 20ms frame'lerde overhead payı çok daha yüksektir).
-                    if (isVeryLowBitrate) { add("-frame_duration"); add("60") }
-                    // Varsayılan compression_level=10 en yavaş/en yüksek kalite moddur.
-                    // 8'e düşürmek, algısal kalitede ciddi bir kayıp olmadan encode
-                    // süresini belirgin şekilde kısaltır.
-                    add("-compression_level"); add("8")
+                    add("-frame_duration"); add(if (bitrate <= 96) "60" else "20")
+                    add("-compression_level"); add("7")
+                    add("-mapping_family"); add("0")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
                 }
             }
-            // libmp3lame 8kbps altını desteklemiyor; kullanıcı 6-7 girse bile
-            // MP3 tarafında sessizce 8kbps'e sabitleniyor (Opus tarafı 6kbps'i
-            // sorunsuz destekliyor, orada dokunulmuyor).
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
             add("-b:a"); add("${effectiveBitrate}k")
+            add("-threads"); add("0")
             add(outputPath)
         }.toTypedArray()
     }
@@ -370,7 +354,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             val docId = android.provider.DocumentsContract.getDocumentId(docUri)
             val parts = docId.split(":", limit = 2)
             if (parts.size == 2 && parts[0].equals("primary", ignoreCase = true)) {
-                val realPath = "${android.os.Environment.getExternalStorageDirectory().absolutePath}/${parts[1]}"
+                val realPath = "\( {android.os.Environment.getExternalStorageDirectory().absolutePath}/ \){parts[1]}"
                 if (File(realPath).exists()) {
                     android.media.MediaScannerConnection.scanFile(app, arrayOf(realPath), arrayOf(mimeType), null)
                 }
