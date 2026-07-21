@@ -112,9 +112,15 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val firstAudio = probe.audioStreams.firstOrNull()
                     if (firstAudio != null) {
                         queue = queue + ConvertQueueItem(
-                            id = id, uri = uri, displayName = displayName, cachePath = cachePath,
-                            sourceCodec = firstAudio.codec.uppercase(), sourceChannels = firstAudio.channels,
-                            sourceBitrateLabel = firstAudio.bitrate, durationMs = probe.durationMs, fileSizeMb = sizeMb
+                            id = id,
+                            uri = uri,
+                            displayName = displayName,
+                            cachePath = cachePath,
+                            sourceCodec = firstAudio.codec.uppercase(),
+                            sourceChannels = firstAudio.channels,
+                            sourceBitrateLabel = firstAudio.bitrate,
+                            durationMs = probe.durationMs,
+                            fileSizeMb = sizeMb
                         )
                         added++
                     } else {
@@ -145,31 +151,41 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
         val old = queue
         queue = emptyList()
-        resultMessage = null; isSuccess = false; convertProgress = 0
+        resultMessage = null
+        isSuccess = false
+        convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             old.forEach { runCatching { File(it.cachePath).delete() } }
         }
     }
 
-    fun updateBitrateText(value: String) { bitrateKbpsText = value.filter { it.isDigit() }.take(4) }
+    fun updateBitrateText(value: String) {
+        bitrateKbpsText = value.filter { it.isDigit() }.take(4)
+    }
 
     fun setOutputFolder(uri: Uri) {
         outputFolderUri = uri
         try {
             app.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
         } catch (_: SecurityException) { }
         prefs.defaultOutputFolder = uri
     }
 
-    fun clearResult() { resultMessage = null; isSuccess = false }
+    fun clearResult() {
+        resultMessage = null
+        isSuccess = false
+    }
 
     fun dismissAndReset() {
         if (isConverting) return
         val old = queue
         queue = emptyList()
-        resultMessage = null; isSuccess = false; convertProgress = 0
+        resultMessage = null
+        isSuccess = false
+        convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             old.forEach { runCatching { File(it.cachePath).delete() } }
         }
@@ -180,17 +196,30 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         val bitrate = bitrateKbpsText.toIntOrNull()
         val toProcess = queue.filter { it.status == ConvertStatus.PENDING || it.status == ConvertStatus.ERROR }
 
-        if (toProcess.isEmpty()) { resultMessage = app.getString(R.string.err_no_pending_files); isSuccess = false; return }
-        if (outFolder == null) { resultMessage = app.getString(R.string.err_no_output_folder); isSuccess = false; return }
+        if (toProcess.isEmpty()) {
+            resultMessage = app.getString(R.string.err_no_pending_files)
+            isSuccess = false
+            return
+        }
+        if (outFolder == null) {
+            resultMessage = app.getString(R.string.err_no_output_folder)
+            isSuccess = false
+            return
+        }
         if (bitrate == null || bitrate < 6 || bitrate > 512) {
-            resultMessage = app.getString(R.string.err_invalid_bitrate); isSuccess = false; return
+            resultMessage = app.getString(R.string.err_invalid_bitrate)
+            isSuccess = false
+            return
         }
         if (isConverting) return
 
         convertJob = viewModelScope.launch {
             MuxForegroundService.start(app)
             try {
-                isConverting = true; resultMessage = null; isSuccess = false; convertProgress = 0
+                isConverting = true
+                resultMessage = null
+                isSuccess = false
+                convertProgress = 0
 
                 var doneCount = 0
                 var errorCount = 0
@@ -212,7 +241,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                         updateQueueItem(item.id) { it.copy(progress = pct) }
                         convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
                         MuxForegroundService.update(
-                            app, convertProgress,
+                            app,
+                            convertProgress,
                             app.getString(R.string.notif_converting_progress, item.displayName, pct)
                         )
                     }
@@ -220,7 +250,12 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
                     if (!ok) {
                         errorCount++
-                        updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = app.getString(R.string.err_ffmpeg_code, returnCodeVal.toString())) }
+                        updateQueueItem(item.id) {
+                            it.copy(
+                                status = ConvertStatus.ERROR,
+                                errorMessage = app.getString(R.string.err_ffmpeg_code, returnCodeVal.toString())
+                            )
+                        }
                         runCatching { tempOutput.delete() }
                     } else {
                         val rawName = item.displayName.substringBeforeLast('.', item.displayName)
@@ -229,25 +264,39 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
                         val copyOk = withContext(Dispatchers.IO) {
                             try {
-                                val outDoc = DocumentFile.fromTreeUri(app, outFolder)?.createFile(format.mimeType, finalName)
+                                val outDoc = DocumentFile.fromTreeUri(app, outFolder)
+                                    ?.createFile(format.mimeType, finalName)
                                 val outUri = outDoc?.uri ?: return@withContext false
                                 app.contentResolver.openOutputStream(outUri)?.use { out ->
-                                    tempOutput.inputStream().use { input -> input.copyTo(out, 8 * 1024 * 1024) }
+                                    tempOutput.inputStream().use { input ->
+                                        input.copyTo(out, 8 * 1024 * 1024)
+                                    }
                                 } ?: return@withContext false
                                 triggerMediaScan(outUri, format.mimeType)
                                 true
-                            } catch (e: Exception) { false }
+                            } catch (e: Exception) {
+                                false
+                            }
                         }
                         runCatching { tempOutput.delete() }
 
                         if (copyOk) {
                             doneCount++
                             updateQueueItem(item.id) {
-                                it.copy(status = ConvertStatus.DONE, progress = 100, outputSizeMb = finalSizeBytes / (1024f * 1024f))
+                                it.copy(
+                                    status = ConvertStatus.DONE,
+                                    progress = 100,
+                                    outputSizeMb = finalSizeBytes / (1024f * 1024f)
+                                )
                             }
                         } else {
                             errorCount++
-                            updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = app.getString(R.string.err_save_failed)) }
+                            updateQueueItem(item.id) {
+                                it.copy(
+                                    status = ConvertStatus.ERROR,
+                                    errorMessage = app.getString(R.string.err_save_failed)
+                                )
+                            }
                         }
                     }
 
@@ -264,7 +313,9 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 }
                 isSuccess = errorCount == 0
             } catch (c: CancellationException) {
-                resultMessage = app.getString(R.string.result_cancelled); isSuccess = false; currentFileName = ""
+                resultMessage = app.getString(R.string.result_cancelled)
+                isSuccess = false
+                currentFileName = ""
                 throw c
             } finally {
                 isConverting = false
@@ -277,64 +328,98 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
-    private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
+    private fun buildFfmpegArgs(
+        item: ConvertQueueItem,
+        format: OutputFormat,
+        bitrate: Int,
+        outputPath: String
+    ): Array<String> {
         val forceMono = bitrate < 48
         return buildList {
             add("-y")
             add("-hide_banner")
-            add("-loglevel"); add("error")
-            add("-analyzeduration"); add("5M")
-            add("-probesize"); add("5M")
-            add("-i"); add(item.cachePath)
+            add("-loglevel")
+            add("error")
+            add("-analyzeduration")
+            add("5M")
+            add("-probesize")
+            add("5M")
+            add("-i")
+            add(item.cachePath)
             add("-vn")
-            add("-map"); add("0:a:0")
-            add("-af"); add("aresample=async=1:first_pts=0")
-            add("-ar"); add("48000")
-            if (forceMono) { add("-ac"); add("1") }
+            add("-map")
+            add("0:a:0")
+            add("-af")
+            add("aresample=async=1:first_pts=0")
+            add("-ar")
+            add("48000")
+            if (forceMono) {
+                add("-ac")
+                add("1")
+            }
             when (format) {
                 OutputFormat.OPUS -> {
-                    add("-c:a"); add("libopus")
-                    add("-application"); add("audio")
-                    add("-vbr"); add("constrained")
-                    add("-frame_duration"); add(if (bitrate <= 96) "60" else "20")
-                    add("-compression_level"); add("7")
-                    add("-mapping_family"); add("0")
+                    add("-c:a")
+                    add("libopus")
+                    add("-application")
+                    add("audio")
+                    add("-vbr")
+                    add("constrained")
+                    add("-frame_duration")
+                    add(if (bitrate <= 96) "60" else "20")
+                    add("-compression_level")
+                    add("7")
+                    add("-mapping_family")
+                    add("0")
                 }
                 OutputFormat.MP3 -> {
-                    add("-c:a"); add("libmp3lame")
+                    add("-c:a")
+                    add("libmp3lame")
                 }
             }
             val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
-            add("-b:a"); add("${effectiveBitrate}k")
-            add("-threads"); add("0")
+            add("-b:a")
+            add("${effectiveBitrate}k")
+            add("-threads")
+            add("0")
             add(outputPath)
         }.toTypedArray()
     }
 
-    private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
-        suspendCancellableCoroutine { cont ->
-            val session = FFmpegKit.executeWithArgumentsAsync(
-                args,
-                { completedSession -> val rc = completedSession.returnCode?.value; if (cont.isActive) cont.resume(rc) },
-                null
-            ) { stats ->
-                if (durationMs > 0) {
-                    val pct = ((stats.time.toFloat() / durationMs) * 100f).toInt().coerceIn(0, 100)
-                    viewModelScope.launch { onProgress(pct) }
-                }
+    private suspend fun runFfmpegAsync(
+        args: Array<String>,
+        durationMs: Long,
+        onProgress: (Int) -> Unit
+    ): Int? = suspendCancellableCoroutine { cont ->
+        val session = FFmpegKit.executeWithArgumentsAsync(
+            args,
+            { completedSession ->
+                val rc = completedSession.returnCode?.value
+                if (cont.isActive) cont.resume(rc)
+            },
+            null
+        ) { stats ->
+            if (durationMs > 0) {
+                val pct = ((stats.time.toFloat() / durationMs) * 100f).toInt().coerceIn(0, 100)
+                viewModelScope.launch { onProgress(pct) }
             }
-            cont.invokeOnCancellation { runCatching { session.cancel() } }
         }
+        cont.invokeOnCancellation { runCatching { session.cancel() } }
+    }
 
     private fun copyUriToCache(uri: Uri, fileName: String): String? {
         return try {
             val file = File(app.cacheDir, "convert_work/$fileName")
             file.parentFile?.mkdirs()
             app.contentResolver.openInputStream(uri)?.use { input ->
-                file.outputStream().use { output -> input.copyTo(output, bufferSize = 8 * 1024 * 1024) }
+                file.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = 8 * 1024 * 1024)
+                }
             } ?: return null
             if (file.exists() && file.length() > 0) file.absolutePath else null
-        } catch (e: Exception) { null }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun extensionFromName(displayName: String): String {
@@ -350,7 +435,12 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             if (parts.size == 2 && parts[0].equals("primary", ignoreCase = true)) {
                 val realPath = "\( {android.os.Environment.getExternalStorageDirectory().absolutePath}/ \){parts[1]}"
                 if (File(realPath).exists()) {
-                    android.media.MediaScannerConnection.scanFile(app, arrayOf(realPath), arrayOf(mimeType), null)
+                    android.media.MediaScannerConnection.scanFile(
+                        app,
+                        arrayOf(realPath),
+                        arrayOf(mimeType),
+                        null
+                    )
                 }
             }
         } catch (_: Exception) { }
