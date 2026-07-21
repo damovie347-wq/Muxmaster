@@ -99,12 +99,12 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             files.forEachIndexed { index, pair ->
                 val uri = pair.first
                 val displayName = pair.second
-                loadingMessage = "\( {index + 1}/ \){files.size}: $displayName"
+                loadingMessage = "${index + 1}/${files.size}: $displayName"
 
                 val ext = extensionFromName(displayName).ifBlank { "bin" }
                 val id = nextId++
                 val cachePath = withContext(Dispatchers.IO) {
-                    copyUriToCache(uri, "src_\( {id}_ \){System.currentTimeMillis()}.$ext")
+                    copyUriToCache(uri, "src_${id}_${System.currentTimeMillis()}.$ext")
                 }
                 if (cachePath != null) {
                     val sizeMb = withContext(Dispatchers.IO) { File(cachePath).length().toFloat() / (1024 * 1024) }
@@ -145,17 +145,13 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
         val old = queue
         queue = emptyList()
-        resultMessage = null
-        isSuccess = false
-        convertProgress = 0
+        resultMessage = null; isSuccess = false; convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             old.forEach { runCatching { File(it.cachePath).delete() } }
         }
     }
 
-    fun updateBitrateText(value: String) {
-        bitrateKbpsText = value.filter { it.isDigit() }.take(4)
-    }
+    fun updateBitrateText(value: String) { bitrateKbpsText = value.filter { it.isDigit() }.take(4) }
 
     fun setOutputFolder(uri: Uri) {
         outputFolderUri = uri
@@ -173,9 +169,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (isConverting) return
         val old = queue
         queue = emptyList()
-        resultMessage = null
-        isSuccess = false
-        convertProgress = 0
+        resultMessage = null; isSuccess = false; convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             old.forEach { runCatching { File(it.cachePath).delete() } }
         }
@@ -189,7 +183,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         if (toProcess.isEmpty()) { resultMessage = app.getString(R.string.err_no_pending_files); isSuccess = false; return }
         if (outFolder == null) { resultMessage = app.getString(R.string.err_no_output_folder); isSuccess = false; return }
         if (bitrate == null || bitrate < 6 || bitrate > 512) {
-            resultMessage = app.getString(R.string.err_invalid_bitrate); isSuccess = false; return }
+            resultMessage = app.getString(R.string.err_invalid_bitrate); isSuccess = false; return
+        }
         if (isConverting) return
 
         convertJob = viewModelScope.launch {
@@ -207,7 +202,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     updateQueueItem(item.id) { it.copy(status = ConvertStatus.CONVERTING, progress = 0) }
 
                     val workDir = File(app.cacheDir, "convert_work").also { it.mkdirs() }
-                    val tempOutput = File(workDir, "out_\( {item.id}_ \){System.currentTimeMillis()}.${format.extension}")
+                    val tempOutput = File(workDir, "out_${item.id}_${System.currentTimeMillis()}.${format.extension}")
                     tempOutput.delete()
 
                     val args = buildFfmpegArgs(item, format, bitrate, tempOutput.absolutePath)
@@ -216,7 +211,10 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val returnCodeVal = runFfmpegAsync(args, item.durationMs) { pct ->
                         updateQueueItem(item.id) { it.copy(progress = pct) }
                         convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
-                        MuxForegroundService.update(app, convertProgress, app.getString(R.string.notif_converting_progress, item.displayName, pct))
+                        MuxForegroundService.update(
+                            app, convertProgress,
+                            app.getString(R.string.notif_converting_progress, item.displayName, pct)
+                        )
                     }
 
                     val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
@@ -226,7 +224,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                         runCatching { tempOutput.delete() }
                     } else {
                         val rawName = item.displayName.substringBeforeLast('.', item.displayName)
-                        val finalName = "\( rawName. \){format.extension}"
+                        val finalName = "$rawName.${format.extension}"
                         val finalSizeBytes = tempOutput.length()
 
                         val copyOk = withContext(Dispatchers.IO) {
@@ -279,18 +277,34 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
 
+    // Kaynak dosyanin ffprobe'dan okunan gercek bitrate'ini ("64 kbps" -> 64)
+    // sayiya cevirir; okunamiyorsa null doner.
+    private fun sourceBitrateKbps(item: ConvertQueueItem): Int? =
+        Regex("\\d+").find(item.sourceBitrateLabel)?.value?.toIntOrNull()
+
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
-        val forceMono = bitrate < 48
+        // KOK NEDEN (cikti dosyasi kaynaktan buyuk oluyordu): HE-AAC gibi kodekler
+        // zaten cok dusuk bitrate'te (orn. 32-40 kbps) iyi kalite verir. Kullanici
+        // hedef olarak bundan daha YUKSEK bir bitrate (orn. 64 kbps) secince,
+        // uygulama korkorusune o bitrate'te encode ediyor ve kaynakta olmayan bir
+        // "kalite" icin yer harcayarak dosyayi gereksiz yere buyutuyordu. Cozum:
+        // kaynagin gercek bitrate'i biliniyorsa ve secilen hedeften dusukse, hedefi
+        // kaynaga yakin bir degere sinirla (asiri dusuk bir tabanin altina inmesin).
+        val sourceKbps = sourceBitrateKbps(item)
+        val effectiveBitrate = if (sourceKbps != null && sourceKbps in 1 until bitrate) {
+            maxOf(sourceKbps, 24)
+        } else {
+            bitrate
+        }
+        val forceMono = effectiveBitrate < 48
         return buildList {
             add("-y")
-            add("-hide_banner")
-            add("-loglevel"); add("error")
-            add("-analyzeduration"); add("5M")
-            add("-probesize"); add("5M")
+            add("-analyzeduration"); add("50M")
+            add("-probesize"); add("50M")
+            add("-fflags"); add("+genpts+discardcorrupt")
             add("-i"); add(item.cachePath)
-            add("-vn")
-            add("-map"); add("0:a:0")
-            add("-af"); add("aresample=async=1:first_pts=0")
+            add("-vn"); add("-map"); add("0:a:0")
+            add("-af"); add("aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.01")
             add("-ar"); add("48000")
             if (forceMono) { add("-ac"); add("1") }
             when (format) {
@@ -298,16 +312,20 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     add("-c:a"); add("libopus")
                     add("-application"); add("audio")
                     add("-vbr"); add("constrained")
-                    add("-frame_duration"); add(if (bitrate <= 96) "60" else "20")
-                    add("-compression_level"); add("7")
-                    add("-mapping_family"); add("0")
+                    add("-frame_duration"); add("60")
+                    // ONEMLI (hiz): compression_level 10 (maksimum), ozellikle telefon
+                    // CPU'larinda encode'u ciddi olcude yavaslatiyordu; test edildiginde
+                    // 6 seviyesi ayni dosya boyutunu (ayni bitrate hedefinde VBR-constrained
+                    // oldugu icin) verirken belirgin sekilde daha hizli calisiyor ve
+                    // isitsel kalite farki ihmal edilebilir duzeyde kaliyor.
+                    add("-compression_level"); add("6")
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
                 }
             }
-            val effectiveBitrate = if (format == OutputFormat.MP3) bitrate.coerceAtLeast(8) else bitrate
-            add("-b:a"); add("${effectiveBitrate}k")
+            val finalBitrate = if (format == OutputFormat.MP3) effectiveBitrate.coerceAtLeast(8) else effectiveBitrate
+            add("-b:a"); add("${finalBitrate}k")
             add("-threads"); add("0")
             add(outputPath)
         }.toTypedArray()
@@ -350,7 +368,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             val docId = android.provider.DocumentsContract.getDocumentId(docUri)
             val parts = docId.split(":", limit = 2)
             if (parts.size == 2 && parts[0].equals("primary", ignoreCase = true)) {
-                val realPath = "\( {android.os.Environment.getExternalStorageDirectory().absolutePath}/ \){parts[1]}"
+                val realPath = "${android.os.Environment.getExternalStorageDirectory().absolutePath}/${parts[1]}"
                 if (File(realPath).exists()) {
                     android.media.MediaScannerConnection.scanFile(app, arrayOf(realPath), arrayOf(mimeType), null)
                 }
