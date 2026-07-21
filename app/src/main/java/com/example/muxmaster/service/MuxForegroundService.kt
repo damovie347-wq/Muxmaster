@@ -15,6 +15,19 @@ import androidx.core.content.ContextCompat
 import com.example.muxmaster.MainActivity
 import com.example.muxmaster.R
 
+/**
+ * Mux işlemi sırasında (uygulama arka plana alınsa/ekran kapansa bile) yüzde
+ * ilerlemeli GERÇEK bir Android bildirimi gösteren foreground service.
+ *
+ * KÖK NEDEN (arka planda ilerleme görünmüyordu): önceden ilerleme SADECE bir
+ * Compose state'iydi (muxProgress); uygulama arka plandayken/ekran kapalıyken
+ * kullanıcının işlemi takip edebileceği hiçbir gösterge yoktu, üstelik normal
+ * bir Service (foreground olmayan) uzun süre arka planda kaldığında sistem
+ * tarafından herhangi bir an sonlandırılabilirdi. ÇÖZÜM: mux başladığında GERÇEK
+ * bir foreground service başlatılıyor (bildirim + `dataSync` servis tipi ile
+ * süreç canlı tutuluyor), her ilerleme adımında bildirim güncelleniyor,
+ * işlem bitince (başarı/hata/iptal fark etmeksizin) servis durduruluyor.
+ */
 class MuxForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -24,8 +37,8 @@ class MuxForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannelIfNeeded()
-        acquireWakeLock()
         startForeground(NOTIF_ID, buildNotification(0, getString(R.string.notif_muxing_progress), ongoing = true))
+        acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -54,25 +67,39 @@ class MuxForegroundService : Service() {
         super.onDestroy()
     }
 
+    // KOK NEDEN (arka planda islem cok yavasliyordu): foreground service tek
+    // basina sureci canli tutar ama CPU'nun uyku moduna (idle/suspend) gecmesini
+    // ENGELLEMEZ. Ekran kapanip cihaz uykuya girince ffmpeg is parcaciklari
+    // saniyede birkac kez calisip duruyor, bu da 1.5-2 saatlik bir sesi
+    // 10-15+ dakikaya cikariyordu. PARTIAL_WAKE_LOCK, ekran kapali olsa bile
+    // CPU'yu tam hizda calisir tutar (ekran/parlaklik etkilenmez, sadece CPU).
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MuxMaster::ConvertWakeLock").apply {
-            setReferenceCounted(false)
-            acquire(4 * 60 * 60 * 1000L) // max 4 saat
-        }
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "MuxMaster:ConvertWakeLock"
+            ).apply {
+                setReferenceCounted(false)
+                // Guvenlik agi: is bitince releaseWakeLock() zaten cagriliyor,
+                // bu sadece servis beklenmedik sekilde oldurulursen kalici
+                // wake lock kalmasin diye ust sinir.
+                acquire(4 * 60 * 60 * 1000L)
+            }
+        } catch (_: Exception) { }
     }
 
     private fun releaseWakeLock() {
         try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
+            wakeLock?.let { if (it.isHeld) it.release() }
         } catch (_: Exception) { }
         wakeLock = null
     }
 
     private fun notify(notification: Notification) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-        try { nm.notify(NOTIF_ID, notification) } catch (_: SecurityException) { }
+        try { nm.notify(NOTIF_ID, notification) } catch (_: SecurityException) { /* bildirim izni yok, foreground service yine de çalışmaya devam eder */ }
     }
 
     private fun buildNotification(progress: Int, text: String, ongoing: Boolean, success: Boolean = true): Notification {
