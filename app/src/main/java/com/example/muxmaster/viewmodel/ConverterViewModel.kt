@@ -283,13 +283,11 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             add("-y")
             add("-hide_banner")
             add("-loglevel"); add("error")
-            // Daha hızlı probe (ses dosyaları için 50M gereksiz ağır)
             add("-analyzeduration"); add("5M")
             add("-probesize"); add("5M")
             add("-i"); add(item.cachePath)
             add("-vn")
             add("-map"); add("0:a:0")
-            // Hafif filtre – ağır aresample kaldırıldı (hız + boyut için)
             add("-af"); add("aresample=async=1:first_pts=0")
             add("-ar"); add("48000")
             if (forceMono) { add("-ac"); add("1") }
@@ -297,13 +295,9 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")
                     add("-application"); add("audio")
-                    // constrained VBR → hedef bitrate’e yakın kalır, dosya şişmez
                     add("-vbr"); add("constrained")
-                    // Düşük/orta bitrate’te 60 ms frame verimlilik sağlar
                     add("-frame_duration"); add(if (bitrate <= 96) "60" else "20")
-                    // 10 → 5: \~2.5–3× daha hızlı, kalite kaybı ihmal edilebilir
                     add("-compression_level"); add("7")
-                    // Stereo için doğru mapping
                     add("-mapping_family"); add("0")
                 }
                 OutputFormat.MP3 -> {
