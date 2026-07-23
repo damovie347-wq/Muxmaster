@@ -15,6 +15,15 @@ import androidx.core.content.ContextCompat
 import com.example.muxmaster.MainActivity
 import com.example.muxmaster.R
 
+// Servis (bildirim) ile ViewModel (Job.cancel()) ayni process icinde farkli
+// bilesenler oldugu icin, bildirimdeki "Iptal" butonuna basildiginda ilgili
+// ViewModel'in cancelMux()/cancelConvert() fonksiyonunu tetiklemek icin basit
+// bir kopru. ViewModel islem baslarken kendi iptal fonksiyonunu buraya yazar,
+// islem bitince (basari/hata/iptal farketmeksizin) null'a ceker.
+object MuxCancelBus {
+    @Volatile var onCancelRequested: (() -> Unit)? = null
+}
+
 /**
  * Mux işlemi sırasında (uygulama arka plana alınsa/ekran kapansa bile) yüzde
  * ilerlemeli GERÇEK bir Android bildirimi gösteren foreground service.
@@ -47,6 +56,9 @@ class MuxForegroundService : Service() {
                 val progress = intent.getIntExtra(EXTRA_PROGRESS, 0)
                 val text = intent.getStringExtra(EXTRA_TEXT) ?: getString(R.string.notif_muxing_progress)
                 notify(buildNotification(progress, text, ongoing = true))
+            }
+            ACTION_CANCEL -> {
+                MuxCancelBus.onCancelRequested?.invoke()
             }
             ACTION_STOP -> {
                 val finalText = intent.getStringExtra(EXTRA_TEXT)
@@ -123,6 +135,13 @@ class MuxForegroundService : Service() {
         if (ongoing) {
             builder.setContentText(getString(R.string.notif_progress_text, progress))
             builder.setProgress(100, progress.coerceIn(0, 100), false)
+
+            val cancelIntent = Intent(this, MuxForegroundService::class.java).apply { action = ACTION_CANCEL }
+            val cancelPendingIntent = PendingIntent.getService(
+                this, 1, cancelIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.cancel_desc), cancelPendingIntent)
         } else {
             builder.setContentText(text)
         }
@@ -146,6 +165,7 @@ class MuxForegroundService : Service() {
         private const val CHANNEL_ID = "mux_progress_channel"
         private const val NOTIF_ID = 4242
         private const val ACTION_UPDATE = "com.example.muxmaster.action.UPDATE_PROGRESS"
+        private const val ACTION_CANCEL = "com.example.muxmaster.action.CANCEL"
         private const val ACTION_STOP = "com.example.muxmaster.action.STOP"
         private const val EXTRA_PROGRESS = "extra_progress"
         private const val EXTRA_TEXT = "extra_text"
