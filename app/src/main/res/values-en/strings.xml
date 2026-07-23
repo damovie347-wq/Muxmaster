@@ -124,5 +124,10 @@
     <string name="settings_output_folder_title">Default Output Folder</string>
     <string name="settings_output_folder_desc">Default folder for muxed files and exported audio/subtitles.</string>
     <string name="settings_output_folder_none">Not selected</string>
+    <string name="settings_battery_title">Background Performance</string>
+    <string name="settings_battery_desc">On some phones, battery saving can slow down conversion while the app is in the background. Adding an exception keeps it running at full speed in the background.</string>
+    <string name="settings_battery_status_ok">Battery optimization disabled</string>
+    <string name="settings_battery_status_restricted">Battery optimization active (may slow down)</string>
+    <string name="settings_battery_action">Set up</string>
     <string name="err_native_tools_missing">Could not extract mkvmerge/mkvextract from the app. Try uninstalling and reinstalling the app.</string>
 </resources>
