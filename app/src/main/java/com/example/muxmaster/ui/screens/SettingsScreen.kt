@@ -1,7 +1,10 @@
 package com.example.muxmaster.ui.screens
 
 import android.app.Activity
+import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -10,18 +13,27 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.os.LocaleListCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.muxmaster.R
 import com.example.muxmaster.ui.theme.*
 
@@ -36,6 +48,26 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val currentLang = LocalConfiguration.current.locales[0].language
+
+    // KOK NEDEN (arka planda islem hala yavas kalabiliyordu): foreground service +
+    // wake lock olsa bile bazi OEM'lerin agresif pil yonetimi CPU'yu kisitlayabiliyor.
+    // Kullaniciya bu istisnayi acikca isteme secenegi sunuyoruz. Ekrana her donuste
+    // (ornegin sistem ayarlarindan geri gelince) durumu tazeliyoruz.
+    fun isIgnoringBatteryOptimizations(): Boolean {
+        val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+    var batteryOptimizationIgnored by remember { mutableStateOf(isIgnoringBatteryOptimizations()) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                batteryOptimizationIgnored = isIgnoringBatteryOptimizations()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val languages = listOf(
         Triple("tr", stringResource(R.string.settings_language_tr), null),
@@ -183,6 +215,52 @@ fun SettingsScreen(
                                 if (outputFolderUri == null) stringResource(R.string.action_select) else stringResource(R.string.action_change),
                                 color = PurpleLight, fontSize = 12.sp
                             )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // ── Arka Plan Performansı ────────────────────────────────────
+            Text(
+                stringResource(R.string.settings_battery_title),
+                color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Surface),
+                border = BorderStroke(1.dp, Outline),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text(
+                        stringResource(R.string.settings_battery_desc),
+                        color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(SurfaceHigh, RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Filled.BatteryChargingFull, null, tint = if (batteryOptimizationIgnored) Green else Amber, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (batteryOptimizationIgnored) stringResource(R.string.settings_battery_status_ok) else stringResource(R.string.settings_battery_status_restricted),
+                            color = TextPrimary, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f)
+                        )
+                        if (!batteryOptimizationIgnored) {
+                            TextButton(onClick = {
+                                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                runCatching { context.startActivity(intent) }
+                            }) {
+                                Text(stringResource(R.string.settings_battery_action), color = PurpleLight, fontSize = 12.sp)
+                            }
                         }
                     }
                 }
