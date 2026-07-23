@@ -1,6 +1,7 @@
 package com.example.muxmaster.data
 
 import android.content.Context
+import android.os.Process as AndroidProcess
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -65,7 +66,25 @@ object NativeTools {
             pb.directory(context.filesDir)
             pb.environment().put("LD_LIBRARY_PATH", dir.absolutePath)
             pb.redirectErrorStream(true)
-            val p = pb.start()
+
+            // KOK NEDEN (arka planda hala yavas kalabiliyordu): mkvmerge/mkvextract
+            // ayri bir OS prosesi olarak fork+exec ile baslatiliyor ve nice (oncelik)
+            // degerini baslatan thread'den miras alir. Uygulama arka plana alindiginda
+            // varsayilan nice degeriyle baslayan bu processler, ayni cgroup icindeki
+            // diger islerle CPU paylasiminda geride kalabiliyordu. Baslatmadan hemen
+            // once bu thread'i izin verilen en yuksek oncelige (THREAD_PRIORITY_URGENT_AUDIO,
+            // root gerektirmeyen en dusuk/en yuksek oncelikli nice degeri) cekiyoruz;
+            // yeni process bu onceligi devralarak ayni cgroup icinde daha fazla CPU
+            // zamani alir. Islem baslar baslamaz thread onceligini eski haline donduruyoruz
+            // ki IO thread pool'daki bu thread baska islerde etkilenmesin.
+            val callerTid = AndroidProcess.myTid()
+            val previousPriority = runCatching { AndroidProcess.getThreadPriority(callerTid) }.getOrDefault(AndroidProcess.THREAD_PRIORITY_DEFAULT)
+            runCatching { AndroidProcess.setThreadPriority(callerTid, AndroidProcess.THREAD_PRIORITY_URGENT_AUDIO) }
+            val p = try {
+                pb.start()
+            } finally {
+                runCatching { AndroidProcess.setThreadPriority(callerTid, previousPriority) }
+            }
             process = p
 
             val output = StringBuilder()
