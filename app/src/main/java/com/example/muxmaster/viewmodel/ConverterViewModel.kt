@@ -14,6 +14,7 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.TrackProber
+import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -189,6 +190,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
         convertJob = viewModelScope.launch {
             MuxForegroundService.start(app)
+            MuxCancelBus.onCancelRequested = { cancelConvert() }
             try {
                 isConverting = true; resultMessage = null; isSuccess = false; convertProgress = 0
 
@@ -268,6 +270,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 throw c
             } finally {
                 isConverting = false
+                MuxCancelBus.onCancelRequested = null
                 MuxForegroundService.stop(app, resultMessage, isSuccess)
             }
         }
