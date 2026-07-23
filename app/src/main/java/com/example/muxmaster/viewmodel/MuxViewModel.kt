@@ -21,6 +21,7 @@ import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
 import com.example.muxmaster.model.TrackSource
 import com.example.muxmaster.model.VideoFile
+import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -376,6 +377,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
         muxJob = viewModelScope.launch {
             MuxForegroundService.start(app)
+            MuxCancelBus.onCancelRequested = { cancelMux() }
             try {
                 isMuxing = true; resultMessage = null; isSuccess = false
                 setProgress(0)
@@ -501,6 +503,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                 throw c
             } finally {
                 isMuxing = false
+                MuxCancelBus.onCancelRequested = null
                 MuxForegroundService.stop(app, resultMessage, isSuccess)
             }
         }
