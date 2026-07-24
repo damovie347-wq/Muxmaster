@@ -247,14 +247,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     )
                     if (track.source == TrackSource.EXISTING) {
                         val video = videoFile ?: return@runCatching null
-                        if (!NativeTools.ensureInstalled(app)) return@runCatching null
                         val (ext, mime) = audioExportContainerFor(track.existingCodec)
                         val tmp = File(workDir(), "export_audio_${track.id}_${System.currentTimeMillis()}.$ext")
-                        val res = NativeTools.run(
-                            app, NativeTools.mkvextractPath(app),
-                            listOf(video.cachePath, "tracks", "${track.existingStreamIndex}:${tmp.absolutePath}")
-                        )
-                        val good = (res.exitCode == 0 || res.exitCode == 1) && tmp.exists() && tmp.length() > 0L
+                        val good = extractExistingTrack(video.cachePath, track.existingStreamIndex, tmp)
                         val result = if (good) copyFileToTree(tmp, folder, "$baseName.$ext", mime) else null
                         runCatching { tmp.delete() }
                         result
@@ -289,12 +284,12 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     )
                     if (track.source == TrackSource.EXISTING) {
                         val video = videoFile ?: return@runCatching null
-                        if (!NativeTools.ensureInstalled(app)) return@runCatching null
                         val codec = track.existingCodec.lowercase()
                         val ext = when (codec) {
                             "subrip", "srt" -> "srt"
                             "ass" -> "ass"
                             "ssa" -> "ssa"
+                            "mov_text" -> "srt"
                             else -> "mks"
                         }
                         val mime = when (ext) {
@@ -303,11 +298,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                             else -> "application/x-matroska"
                         }
                         val tmp = File(workDir(), "export_sub_${track.id}_${System.currentTimeMillis()}.$ext")
-                        val res = NativeTools.run(
-                            app, NativeTools.mkvextractPath(app),
-                            listOf(video.cachePath, "tracks", "${track.existingStreamIndex}:${tmp.absolutePath}")
-                        )
-                        val good = (res.exitCode == 0 || res.exitCode == 1) && tmp.exists() && tmp.length() > 0L
+                        val good = extractExistingTrack(video.cachePath, track.existingStreamIndex, tmp)
                         val result = if (good) copyFileToTree(tmp, folder, "$baseName.$ext", mime) else null
                         runCatching { tmp.delete() }
                         result
@@ -322,6 +313,30 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             exportMessage = if (displayName != null) app.getString(R.string.export_success, displayName)
                              else app.getString(R.string.export_failed)
             isExporting = false
+        }
+    }
+
+    /**
+     * mkvextract SADECE Matroska/WebM (.mkv/.mka/.mks/.webm) konteynerlerini kaynak olarak
+     * okuyabilir. "Filmler" genelde zaten .mkv olduğu için export sorunsuz çalışıyordu, ama
+     * normal videolarda (mp4, mov, m4v, HEVC vb.) mkvextract kaynağı açamadığından track
+     * dışa aktarma her zaman başarısız oluyordu. Konteyner Matroska değilse ffmpeg (stream
+     * copy, yeniden kodlama YOK -> lossless) ile çıkarma yaparak bunu tüm formatlarda düzeltiyoruz.
+     */
+    private fun isMatroskaContainer(path: String): Boolean =
+        File(path).extension.lowercase() in setOf("mkv", "mka", "mks", "webm")
+
+    private suspend fun extractExistingTrack(sourcePath: String, streamIndex: Int, outFile: File): Boolean {
+        return if (isMatroskaContainer(sourcePath)) {
+            if (!NativeTools.ensureInstalled(app)) return false
+            val res = NativeTools.run(app, NativeTools.mkvextractPath(app), listOf(sourcePath, "tracks", "$streamIndex:${outFile.absolutePath}"))
+            (res.exitCode == 0 || res.exitCode == 1) && outFile.exists() && outFile.length() > 0L
+        } else {
+            try {
+                val args = arrayOf("-y", "-i", sourcePath, "-map", "0:$streamIndex", "-c", "copy", outFile.absolutePath)
+                val session = FFmpegKit.executeWithArguments(args)
+                ReturnCode.isSuccess(session.returnCode) && outFile.exists() && outFile.length() > 0L
+            } catch (_: Exception) { false }
         }
     }
 
