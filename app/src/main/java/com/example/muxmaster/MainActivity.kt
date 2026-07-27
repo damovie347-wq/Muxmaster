@@ -20,15 +20,18 @@ import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.ui.screens.ConverterScreen
 import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.screens.SettingsScreen
+import com.example.muxmaster.ui.screens.TrimScreen
 import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.ui.theme.ThemeMode
 import com.example.muxmaster.viewmodel.ConverterViewModel
 import com.example.muxmaster.viewmodel.MuxViewModel
+import com.example.muxmaster.viewmodel.TrimViewModel
 
 class MainActivity : AppCompatActivity() {
 
     private val muxViewModel: MuxViewModel by viewModels()
     private val converterViewModel: ConverterViewModel by viewModels()
+    private val trimViewModel: TrimViewModel by viewModels()
 
     private var screenState: MutableState<Int>? = null
 
@@ -52,10 +55,17 @@ class MainActivity : AppCompatActivity() {
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
     }
+    private val pickTrimVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) trimViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
+    }
+    private val pickTrimOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) trimViewModel.setOutputFolder(uri)
+    }
     private val pickDefaultOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             muxViewModel.setOutputFolder(uri)
             converterViewModel.setOutputFolder(uri)
+            trimViewModel.setOutputFolder(uri)
         }
     }
     private val notificationPermissionLauncher =
@@ -94,13 +104,20 @@ class MainActivity : AppCompatActivity() {
                         onPickSubtitle = { pickSubtitleLauncher.launch(arrayOf("text/*", "application/x-subrip", "*/*")) },
                         onPickOutputFolder = { pickMuxOutputFolderLauncher.launch(null) },
                         onNavigateToConverter = { screen = 1 },
-                        onNavigateToSettings = { screen = 2 }
+                        onNavigateToTrim = { screen = 2 },
+                        onNavigateToSettings = { screen = 3 }
                     )
                     1 -> ConverterScreen(
                         viewModel = converterViewModel,
                         onPickAudio = { pickConverterAudioLauncher.launch(arrayOf("audio/*", "video/*", "*/*")) },
                         onPickOutputFolder = { pickConverterOutputFolderLauncher.launch(null) },
                         onNavigateToMux = { screen = 0 }
+                    )
+                    2 -> TrimScreen(
+                        viewModel = trimViewModel,
+                        onPickVideo = { pickTrimVideoLauncher.launch(arrayOf("video/*", "*/*")) },
+                        onPickOutputFolder = { pickTrimOutputFolderLauncher.launch(null) },
+                        onNavigateBack = { screen = 0 }
                     )
                     else -> SettingsScreen(
                         outputFolderUri = muxViewModel.outputFolderUri,
