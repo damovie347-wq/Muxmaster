@@ -4,6 +4,7 @@ import com.arthenica.ffmpegkit.FFprobeKit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.Locale
 
 /**
  * Videonun içindeki GERÇEK track'leri ffprobe ile okur.
@@ -131,5 +132,76 @@ object TrackProber {
         }
 
         ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex)
+    }
+
+    /**
+     * "-c copy" (kalite kaybı olmadan) kesim sırasında çıktının geçerli/oynatılabilir
+     * bir video akışı olabilmesi için başlangıç noktası MUTLAKA bir video keyframe'ine
+     * denk gelmelidir. Bu fonksiyon, [fromSec] saniyesinden İTİBAREN (dahil) SONRAKİ
+     * ilk video keyframe'inin zamanını bulur.
+     *
+     * Bilerek paket düzeyindeki "K" (keyframe) bayrağını kullanır (`-show_entries
+     * packet=...`): bu bayrak demuxer/konteyner tarafından işaretlenir ve tüm
+     * codec'lerde tutarlıdır. Alternatif olan `-skip_frame nokey` ise DECODER
+     * düzeyinde çalışır ve bazı codec/versiyon kombinasyonlarında güvenilmez
+     * sonuçlar verebildiği bilinir; bu yüzden tercih edilmedi.
+     *
+     * Performans için arama [fromSec]'e yakın küçük bir zaman penceresiyle
+     * sınırlandırılır: ffprobe `-read_intervals` ile önce o noktaya "seek" eder,
+     * sonra ileri doğru okur (dosyanın tamamını taramaz). Pencere [endSec]'i
+     * (kullanıcının istediği bitiş noktasını) asla aşmaz; aksi halde bulunan
+     * "sonraki keyframe" kullanıcının istediği bitiş noktasından sonraya düşüp
+     * kesimi anlamsız hale getirebilirdi.
+     *
+     * @return keyframe zamanı (saniye), ya da [fromSec]-[endSec] aralığında
+     *   (arama penceresi içinde) hiç keyframe bulunamazsa `null`. `null` dönerse
+     *   çağıran taraf eski davranışa (düz `-ss fromSec`) geri dönmelidir.
+     */
+    suspend fun findForwardKeyframeSec(
+        videoPath: String,
+        videoStreamIndex: Int,
+        fromSec: Double,
+        endSec: Double,
+        maxWindowSec: Double = 90.0
+    ): Double? = withContext(Dispatchers.IO) {
+        if (endSec <= fromSec) return@withContext null
+
+        // Kayan nokta yuvarlamalarına karşı biraz geriden başla; tam fromSec
+        // üzerindeki bir keyframe'i kaçırmayalım.
+        val searchStart = (fromSec - 0.5).coerceAtLeast(0.0)
+        val windowEnd = minOf(fromSec + maxWindowSec, endSec)
+        val windowLen = windowEnd - searchStart
+        if (windowLen <= 0.0) return@withContext null
+
+        val args = arrayOf(
+            "-v", "error",
+            "-select_streams", videoStreamIndex.toString(),
+            "-read_intervals", String.format(Locale.US, "%.3f%%+%.3f", searchStart, windowLen),
+            "-show_entries", "packet=pts_time,flags",
+            "-print_format", "json",
+            videoPath
+        )
+
+        val session = FFprobeKit.executeWithArguments(args)
+        val jsonOutput = session.output ?: return@withContext null
+
+        val root = try {
+            JSONObject(jsonOutput)
+        } catch (e: Exception) {
+            return@withContext null
+        }
+        val packets = root.optJSONArray("packets") ?: return@withContext null
+
+        var best: Double? = null
+        for (i in 0 until packets.length()) {
+            val pkt = packets.getJSONObject(i)
+            val flags = pkt.optString("flags", "")
+            if (!flags.contains('K')) continue
+            val pts = pkt.optString("pts_time", "N/A").toDoubleOrNull() ?: continue
+            if (pts < fromSec - 0.001) continue // arama payı için eklenen kısmı ele
+            if (pts > endSec) continue // istenen bitişi asla geçme
+            if (best == null || pts < best!!) best = pts
+        }
+        best
     }
 }

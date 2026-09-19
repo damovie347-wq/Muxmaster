@@ -81,3 +81,21 @@ data class VideoFile(
     val fileSizeMb: Float = 0f,
     val videoStreamIndex: Int = 0 // mkvmerge -d için: kaynaktaki gerçek video track id'si
 )
+
+/**
+ * Video Birleştirme (Merge) özelliğindeki kuyruğa eklenmiş tek bir video.
+ * Liste içindeki sırası, çıktıdaki birleşme sırasını belirler.
+ */
+@Immutable
+data class MergeItem(
+    val id: Int,
+    val uri: Uri,
+    val displayName: String,
+    val cachePath: String = "",
+    val videoCodec: String = "",
+    val resolution: String = "",
+    val durationMs: Long = 0L,
+    val fileSizeMb: Float = 0f,
+    val hasAudio: Boolean = false,
+    val audioCodec: String = ""
+)

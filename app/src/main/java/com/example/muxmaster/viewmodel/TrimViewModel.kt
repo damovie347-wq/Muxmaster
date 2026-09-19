@@ -31,7 +31,10 @@ import kotlin.coroutines.resume
  * Kırpma tamamen "stream copy" (-c copy) ile yapılır: video/ses/altyazı yeniden
  * encode edilmez, bu yüzden kalite kaybı OLMAZ ve işlem çok hızlıdır. Tek
  * teknik sınırlama (ffmpeg'in doğası gereği): yeniden encode yapılmadığı için
- * başlangıç noktası videonun en yakın keyframe'ine hizalanabilir.
+ * başlangıç noktası videonun bir keyframe'ine hizalanmak zorundadır. Bu hizalama,
+ * istenen noktadan SONRAKİ ilk keyframe'e (ffprobe ile bulunarak) yapılır, böylece
+ * kesim hiçbir zaman kullanıcının istediğinden daha erken başlamaz (bkz. startTrim
+ * ve TrackProber.findForwardKeyframeSec).
  */
 class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
@@ -189,10 +192,26 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 tempOutput.delete()
 
                 val startSec = trimStartMs / 1000.0
-                val durationSec = (trimEndMs - trimStartMs) / 1000.0
+                val endSec = trimEndMs / 1000.0
+
+                // "-c copy" (kalite kaybı olmadan) kesimde başlangıç noktası MUTLAKA bir
+                // video keyframe'ine denk gelmek zorundadır; aksi halde çıktı decode
+                // edilemez. Müdahale etmezsek ffmpeg kendi "-ss" (girdi seeği) davranışıyla
+                // istenen noktadan ÖNCEKİ en yakın keyframe'e atlar. Keyframe aralığı (GOP)
+                // geniş olan bazı videolarda bu, kullanıcının istediği saniyeden 20-30
+                // saniye hatta daha fazla ERKEN başlayan yanlış kesimlere yol açıyordu.
+                // Bunun yerine, istenen noktadan İTİBAREN SONRAKİ ilk keyframe'i ffprobe ile
+                // bulup kesimi tam olarak oradan başlatıyoruz; böylece kesim hiçbir zaman
+                // istenenden daha erken başlamaz (en kötüsü, genelde çok kısa süren bir
+                // sonraki keyframe'e kadar birazcık geç başlar - bu çok daha az sorunludur).
+                val snappedStartSec = withContext(Dispatchers.IO) {
+                    TrackProber.findForwardKeyframeSec(video.cachePath, video.videoStreamIndex, startSec, endSec)
+                } ?: startSec
+
+                val durationSec = (endSec - snappedStartSec).coerceAtLeast(0.001)
                 val args = arrayOf(
                     "-y",
-                    "-ss", String.format(Locale.US, "%.3f", startSec),
+                    "-ss", String.format(Locale.US, "%.3f", snappedStartSec),
                     "-i", video.cachePath,
                     "-t", String.format(Locale.US, "%.3f", durationSec),
                     "-map", "0",
@@ -201,7 +220,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                     tempOutput.absolutePath
                 )
 
-                val rc = runFfmpegAsync(args, trimEndMs - trimStartMs) { pct ->
+                val rc = runFfmpegAsync(args, (durationSec * 1000).toLong()) { pct ->
                     trimProgress = pct
                     MuxForegroundService.update(app, pct, "Kırpılıyor… %$pct")
                 }

@@ -18,12 +18,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.ui.screens.ConverterScreen
+import com.example.muxmaster.ui.screens.MergeScreen
 import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.screens.SettingsScreen
 import com.example.muxmaster.ui.screens.TrimScreen
 import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.ui.theme.ThemeMode
 import com.example.muxmaster.viewmodel.ConverterViewModel
+import com.example.muxmaster.viewmodel.MergeViewModel
 import com.example.muxmaster.viewmodel.MuxViewModel
 import com.example.muxmaster.viewmodel.TrimViewModel
 
@@ -32,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private val muxViewModel: MuxViewModel by viewModels()
     private val converterViewModel: ConverterViewModel by viewModels()
     private val trimViewModel: TrimViewModel by viewModels()
+    private val mergeViewModel: MergeViewModel by viewModels()
 
     private var screenState: MutableState<Int>? = null
 
@@ -61,11 +64,20 @@ class MainActivity : AppCompatActivity() {
     private val pickTrimOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) trimViewModel.setOutputFolder(uri)
     }
+    private val pickMergeVideosLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            mergeViewModel.onVideosSelected(uris.map { u -> u to (queryDisplayName(u) ?: "video.mkv") })
+        }
+    }
+    private val pickMergeOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) mergeViewModel.setOutputFolder(uri)
+    }
     private val pickDefaultOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             muxViewModel.setOutputFolder(uri)
             converterViewModel.setOutputFolder(uri)
             trimViewModel.setOutputFolder(uri)
+            mergeViewModel.setOutputFolder(uri)
         }
     }
     private val notificationPermissionLauncher =
@@ -105,6 +117,7 @@ class MainActivity : AppCompatActivity() {
                         onPickOutputFolder = { pickMuxOutputFolderLauncher.launch(null) },
                         onNavigateToConverter = { screen = 1 },
                         onNavigateToTrim = { screen = 2 },
+                        onNavigateToMerge = { screen = 4 },
                         onNavigateToSettings = { screen = 3 }
                     )
                     1 -> ConverterScreen(
@@ -117,6 +130,12 @@ class MainActivity : AppCompatActivity() {
                         viewModel = trimViewModel,
                         onPickVideo = { pickTrimVideoLauncher.launch(arrayOf("video/*", "*/*")) },
                         onPickOutputFolder = { pickTrimOutputFolderLauncher.launch(null) },
+                        onNavigateBack = { screen = 0 }
+                    )
+                    4 -> MergeScreen(
+                        viewModel = mergeViewModel,
+                        onPickVideos = { pickMergeVideosLauncher.launch(arrayOf("video/*", "*/*")) },
+                        onPickOutputFolder = { pickMergeOutputFolderLauncher.launch(null) },
                         onNavigateBack = { screen = 0 }
                     )
                     else -> SettingsScreen(

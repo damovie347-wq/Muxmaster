@@ -15,9 +15,15 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -256,7 +262,7 @@ private fun TimeInputGroup(
         Spacer(Modifier.height(4.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TimeField(
-                value = minutes.toString(),
+                value = minutes,
                 label = "Dakika",
                 enabled = enabled,
                 maxDigits = 4,
@@ -265,7 +271,7 @@ private fun TimeInputGroup(
                 onChange(newMin * 60000 + seconds * 1000 + millis)
             }
             TimeField(
-                value = seconds.toString(),
+                value = seconds,
                 label = "Saniye",
                 enabled = enabled,
                 maxDigits = 2,
@@ -274,7 +280,7 @@ private fun TimeInputGroup(
                 onChange(minutes * 60000 + newSec.coerceAtMost(59) * 1000 + millis)
             }
             TimeField(
-                value = millis.toString(),
+                value = millis,
                 label = "Salise (ms)",
                 enabled = enabled,
                 maxDigits = 3,
@@ -286,19 +292,50 @@ private fun TimeInputGroup(
     }
 }
 
+/**
+ * Sayısal zaman alanı (dakika / saniye / salise).
+ *
+ * KÖK NEDEN (eski hata - "20 yazan kutuyu silip 12 yazamıyorum"): bu alanın
+ * gösterdiği metin eskiden HER recomposition'da dışarıdaki `value`den (üstteki
+ * trimStartMs/trimEndMs'ten bölünerek) yeniden hesaplanıyordu. Kullanıcı bir
+ * tuşa bastığında bu, üst state'e anında yansıyor, üst state ise (ör. minimum
+ * aralık sınırlaması) değeri farklı bir sayıya yuvarlayabiliyordu; Compose'un
+ * "value: String" alan TextField'ı da dışarıdan gelen değerle kendi tuttuğu
+ * son metin uyuşmayınca imleci/metni dışarıdaki değere göre sıfırlıyordu. Sonuç
+ * olarak atılan tuş "yutuluyor" ve kutu eski sayıya (ör. "20") geri dönüyormuş
+ * gibi görünüyordu.
+ *
+ * ÇÖZÜM: Alan artık KENDİ yerel metnini (`text`) tutar ve ekranda her zaman
+ * kullanıcının o an gerçekten yazdığını gösterir. Dışarıdaki `value` sadece bu
+ * alan odakta DEĞİLKEN metne yansıtılır (video ilk yüklenirken, slider
+ * sürüklenirken ya da kardeş bir alan değiştiğinde); alan odaktan çıkınca
+ * (blur) nihai/sınırlanmış değere göre normalize edilir. Böylece dışarıdaki
+ * yeniden hesaplamalar, kullanıcı o kutuya yazarken asla onun tuşlarının
+ * üzerine yazmaz.
+ */
 @Composable
 private fun TimeField(
-    value: String,
+    value: Long,
     label: String,
     enabled: Boolean,
     maxDigits: Int,
     modifier: Modifier = Modifier,
     onValueCommit: (Long) -> Unit
 ) {
+    var text by remember { mutableStateOf(value.toString()) }
+    var hasFocus by remember { mutableStateOf(false) }
+
+    LaunchedEffect(value) {
+        if (!hasFocus) {
+            text = value.toString()
+        }
+    }
+
     OutlinedTextField(
-        value = value,
+        value = text,
         onValueChange = { raw ->
             val digits = raw.filter { it.isDigit() }.take(maxDigits)
+            text = digits
             onValueCommit(digits.toLongOrNull() ?: 0L)
         },
         label = { Text(label, fontSize = 10.sp) },
@@ -306,7 +343,14 @@ private fun TimeField(
         enabled = enabled,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         textStyle = TextStyle(fontSize = 13.sp),
-        modifier = modifier,
+        modifier = modifier.onFocusChanged { state ->
+            if (hasFocus && !state.isFocused) {
+                // Odaktan çıkınca kutuyu gerçek/sınırlanmış değere göre normalize et
+                // (ör. boş bırakılmışsa "0", ya da girilen sayı sınırlandıysa o değer).
+                text = value.toString()
+            }
+            hasFocus = state.isFocused
+        },
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Purple, unfocusedBorderColor = Outline,
             focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary

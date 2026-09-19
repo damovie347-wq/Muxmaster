@@ -10,6 +10,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
@@ -43,6 +44,7 @@ fun MuxScreen(
     onPickOutputFolder: () -> Unit,
     onNavigateToConverter: () -> Unit,
     onNavigateToTrim: () -> Unit,
+    onNavigateToMerge: () -> Unit,
     onNavigateToSettings: () -> Unit
 ) {
     val pagerState = rememberPagerState(pageCount = { 2 })
@@ -70,6 +72,9 @@ fun MuxScreen(
                     }
                     IconButton(onClick = onNavigateToTrim) {
                         Icon(Icons.Filled.ContentCut, "Video Kırp", tint = TextSec)
+                    }
+                    IconButton(onClick = onNavigateToMerge) {
+                        Icon(Icons.Filled.CallMerge, "Video Birleştir", tint = TextSec)
                     }
                     IconButton(onClick = onNavigateToConverter) {
                         Icon(Icons.Filled.Tune, stringResource(R.string.nav_converter_desc), tint = TextSec)

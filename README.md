@@ -24,13 +24,17 @@ ileride kaldırılırsa:
 ## Mimari
 
 ```
-model/        -> AudioTrackItem, SubtitleTrackItem, VideoFile (immutable data class'lar)
-data/         -> TrackProber: ffprobe ile GERÇEK stream okuma (JSON parse)
-viewmodel/    -> MuxViewModel: tüm state + gerçek ffmpeg komut üretimi + execution
+model/        -> AudioTrackItem, SubtitleTrackItem, VideoFile, MergeItem (immutable data class'lar)
+data/         -> TrackProber: ffprobe ile GERÇEK stream okuma (JSON parse) + kesim için
+                 ileri-yönlü keyframe arama (findForwardKeyframeSec)
+viewmodel/    -> MuxViewModel / TrimViewModel / ConverterViewModel / MergeViewModel:
+                 tüm state + gerçek ffmpeg komut üretimi + execution
 ui/theme/     -> İstenen renk paleti + Material3 dark color scheme
 ui/components/-> VideoCard, AudioTrackCard, SubtitleTrackCard, BottomMuxBar
-ui/screens/   -> MuxScreen (Scaffold + Tab + LazyColumn)
-MainActivity  -> SAF picker'lar (video/ses/altyazı/klasör) + gerçek display-name çözümleme
+ui/screens/   -> MuxScreen (Scaffold + Tab + LazyColumn), TrimScreen, ConverterScreen,
+                 MergeScreen (Scaffold + sıralı video listesi), SettingsScreen
+MainActivity  -> SAF picker'lar (video/ses/altyazı/klasör, çoklu video) + gerçek
+                 display-name çözümleme + 5 ekran arası navigasyon
 ```
 
 ## Akış
@@ -48,6 +52,38 @@ MainActivity  -> SAF picker'lar (video/ses/altyazı/klasör) + gerçek display-n
 6. Çıktı önce cache'e (`temp_output.mkv`) yazılır, boyutu doğrulanır (0 byte kontrolü), sonra
    SAF `DocumentFile.createFile()` + `openOutputStream()` ile seçilen klasöre kopyalanır.
 7. Gerçek dosya boyutu (`%.1f MB`) başarı mesajında gösterilir.
+
+## Video Kırpma (Trim) — bu revizyonda düzeltilen hatalar
+
+1. **Dakika/saniye kutusunu silip yeni değer yazamama.** Eskiden `TimeField` kutusunun
+   gösterdiği metin her recomposition'da doğrudan üstteki state'ten (`totalMs`'ten
+   bölünerek) yeniden hesaplanıyordu; state ara sırada (ör. minimum aralık sınırlaması)
+   farklı bir sayıya yuvarlanınca kutu, kullanıcı henüz yazmayı bitirmeden eski değere
+   (ör. "20") geri dönüyordu. Çözüm: `TimeField` artık kendi yerel metin durumunu tutuyor
+   ve dışarıdaki değeri SADECE odakta değilken (blur anında ya da video/slider gibi dış
+   bir değişiklikte) metne yansıtıyor (bkz. `ui/screens/TrimScreen.kt`).
+2. **Kesimin istenen noktadan 20-30+ saniye ERKEN başlaması.** `-c copy` (kalite kaybı
+   olmadan) kesimde çıktı mutlaka bir keyframe'den başlamak zorundadır. Eskiden `-ss`
+   girdi seçeneği olarak (`-i`den önce) veriliyordu; bu, ffmpeg'in hedeften ÖNCEKİ en
+   yakın keyframe'e atlamasına yol açıyordu — keyframe aralığı (GOP) geniş olan
+   videolarda bu, isteğin çok öncesinden başlayan kesimler üretiyordu. Çözüm:
+   `TrackProber.findForwardKeyframeSec` fonksiyonu ffprobe ile (paket düzeyindeki "K"
+   bayrağını okuyarak, `-skip_frame nokey` gibi codec'e bağlı yaklaşımlar yerine) hedef
+   noktadan SONRAKİ ilk gerçek keyframe'i buluyor; kesim tam olarak o noktadan başlıyor.
+   Böylece kesim hiçbir zaman istenenden daha erken başlamaz (bkz. `viewmodel/TrimViewModel.kt`).
+
+## Video Birleştirme (Merge) — yeni özellik
+
+Yeni bir ekran (`ui/screens/MergeScreen.kt` + `viewmodel/MergeViewModel.kt`) eklendi:
+
+1. Çoklu video seçilir (SAF `OpenMultipleDocuments`), her biri ffprobe ile analiz edilir.
+2. Liste yukarı/aşağı oklarla yeniden sıralanabilir; birleştirme bu sırayla yapılır.
+3. Videolar arasında video codec, çözünürlük ya da ses codec'i uyuşmazsa (kayıpsız
+   birleştirme mümkün olmayacağı için) işlem başlamadan açık bir uyarı gösterilir —
+   sessizce yeniden kodlamaya asla başvurulmaz.
+4. Uyumluysa ffmpeg'in **concat demuxer**'ı ile tamamen `-c copy` (kalite kaybı yok,
+   yeniden kodlama yok) olarak birleştirilir; bu yüzden çok hızlıdır.
+5. Ana ekranın üst çubuğundaki yeni "birleştir" ikonundan açılır.
 
 ## Bilgisayarsız (sadece telefon) derleme — GitHub Actions
 
