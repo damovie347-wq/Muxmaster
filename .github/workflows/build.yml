@@ -5,9 +5,14 @@ on:
     branches: [ "main" ]
   workflow_dispatch: {}
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Kodu çek
         uses: actions/checkout@v4
@@ -18,13 +23,41 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK kur
-        uses: android-actions/setup-android@v3
-
-      - name: Gerekli SDK platform/build-tools paketlerini indir
+      # ÖNEMLİ: "android-actions/setup-android" KULLANILMIYOR. Yeni cmdline-tools
+      # (16.0+) sürümünde 'tools' paketi olmadığı için o action
+      # "Failed to find package 'tools'" hatasıyla çöküyordu. ubuntu-latest
+      # runner'ında Android SDK zaten kurulu geliyor; onu kullanıyoruz.
+      - name: Android SDK ortamını ayarla (runner'daki hazır SDK)
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK_ROOT" ]; then
+            echo "Android SDK bulunamadı: $SDK_ROOT"; exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK_ROOT" > local.properties
+
+      # Hata vermeyen (toleranslı) paket kurulumu: platform/build-tools zaten
+      # runner'da varsa dokunmaz; kurulum başarısız olsa bile build'i durdurmaz
+      # (Gradle eksik bileşeni kendisi indirir).
+      - name: SDK platform/build-tools kontrolü
+        run: |
+          SDK_ROOT="$ANDROID_HOME"
+          if [ -d "$SDK_ROOT/platforms/android-34" ] && [ -d "$SDK_ROOT/build-tools/34.0.0" ]; then
+            echo "platforms;android-34 ve build-tools;34.0.0 zaten kurulu."
+          else
+            SDKM="$(ls -d "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1 || true)"
+            if [ -n "$SDKM" ]; then
+              set +e
+              yes | "$SDKM" --licenses > /dev/null 2>&1
+              "$SDKM" "platforms;android-34" "build-tools;34.0.0" || echo "Uyarı: sdkmanager kurulumu başarısız; Gradle eksikleri kendisi indirecek."
+              set -e
+            else
+              echo "sdkmanager bulunamadı; Gradle eksikleri kendisi indirecek."
+            fi
+          fi
+          mkdir -p "$SDK_ROOT/licenses"
+          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$SDK_ROOT/licenses/android-sdk-license" || true
 
       - name: Gradle kur (wrapper jar projede olmadığı için)
         uses: gradle/actions/setup-gradle@v4
@@ -38,7 +71,7 @@ jobs:
           python3 scripts/fetch_mkvtoolnix_assets.py
 
       - name: Release APK derle (minify açık, ffmpeg-kit + mkvtoolnix native dosyaları dahil)
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: APK'yı indirilebilir artifact olarak yükle
         uses: actions/upload-artifact@v4

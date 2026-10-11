@@ -13,12 +13,14 @@ import androidx.lifecycle.viewModelScope
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.HeAacEncoder
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -27,7 +29,12 @@ import kotlin.coroutines.resume
 
 enum class OutputFormat(val extension: String, val mimeType: String, val label: String) {
     OPUS("opus", "audio/ogg", "Opus"),
-    MP3("mp3", "audio/mpeg", "MP3")
+    MP3("mp3", "audio/mpeg", "MP3"),
+    HE_AAC("m4a", "audio/mp4", "HE-AAC"),
+    HE_AAC_V2("m4a", "audio/mp4", "HE-AAC v2");
+
+    /** HE-AAC ailesi: ffmpeg yerine Android MediaCodec ile encode edilir. */
+    val isHeAac: Boolean get() = this == HE_AAC || this == HE_AAC_V2
 }
 
 enum class ConvertStatus { PENDING, CONVERTING, DONE, ERROR }
@@ -207,10 +214,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     val tempOutput = File(workDir, "out_${item.id}_${System.currentTimeMillis()}.${format.extension}")
                     tempOutput.delete()
 
-                    val args = buildFfmpegArgs(item, format, bitrate, tempOutput.absolutePath)
                     val doneSoFar = doneCount + errorCount
-
-                    val returnCodeVal = runFfmpegAsync(args, item.durationMs) { pct ->
+                    val progressCb: (Int) -> Unit = { pct ->
                         updateQueueItem(item.id) { it.copy(progress = pct) }
                         convertProgress = ((((doneSoFar).toFloat() + pct / 100f) / total) * 100).toInt().coerceIn(0, 99)
                         MuxForegroundService.update(
@@ -219,10 +224,20 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                         )
                     }
 
-                    val ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
+                    var returnCodeVal: Int? = 0
+                    val ok: Boolean
+                    if (format.isHeAac) {
+                        ok = convertHeAac(item, format, bitrate, tempOutput, progressCb)
+                    } else {
+                        val args = buildFfmpegArgs(item, format, bitrate, tempOutput.absolutePath)
+                        returnCodeVal = runFfmpegAsync(args, item.durationMs, progressCb)
+                        ok = returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
+                    }
                     if (!ok) {
                         errorCount++
-                        updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = app.getString(R.string.err_ffmpeg_code, returnCodeVal.toString())) }
+                        val errText = if (format.isHeAac) app.getString(R.string.err_heaac_failed)
+                                      else app.getString(R.string.err_ffmpeg_code, returnCodeVal.toString())
+                        updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = errText) }
                         runCatching { tempOutput.delete() }
                     } else {
                         val rawName = item.displayName.substringBeforeLast('.', item.displayName)
@@ -285,6 +300,61 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     private fun sourceBitrateKbps(item: ConvertQueueItem): Int? =
         Regex("\\d+").find(item.sourceBitrateLabel)?.value?.toIntOrNull()
 
+    private fun effectiveBitrateFor(item: ConvertQueueItem, bitrate: Int): Int {
+        val sourceKbps = sourceBitrateKbps(item)
+        return if (sourceKbps != null && sourceKbps in 1 until bitrate) maxOf(sourceKbps, 24) else bitrate
+    }
+
+    /**
+     * HE-AAC / HE-AAC v2: 1) ffmpeg ile kaynak sesi ham PCM'e çevir, 2) Android MediaCodec
+     * (AACObjectHE / AACObjectHE_PS) ile encode edip .m4a olarak yaz.
+     */
+    private suspend fun convertHeAac(
+        item: ConvertQueueItem,
+        format: OutputFormat,
+        bitrate: Int,
+        tempOutput: File,
+        onProgress: (Int) -> Unit
+    ): Boolean {
+        val v2 = format == OutputFormat.HE_AAC_V2
+        val channels = if (v2) 2 else if (item.sourceChannels == 1) 1 else 2
+        val sampleRate = 44100
+        val lo = if (v2) 16 else if (channels == 1) 12 else 24
+        val hi = if (v2) 64 else if (channels == 1) 64 else 128
+        val kbps = effectiveBitrateFor(item, bitrate).coerceIn(lo, hi)
+
+        val pcm = File(tempOutput.parentFile, "pcm_${item.id}_${System.currentTimeMillis()}.raw")
+        try {
+            val args = arrayOf(
+                "-y",
+                "-analyzeduration", "50M", "-probesize", "50M",
+                "-fflags", "+genpts+discardcorrupt",
+                "-i", item.cachePath,
+                "-vn", "-map", "0:a:0",
+                "-af", "aresample=async=1:first_pts=0",
+                "-ar", sampleRate.toString(), "-ac", channels.toString(),
+                "-c:a", "pcm_s16le", "-f", "s16le",
+                pcm.absolutePath
+            )
+            // Çözme aşaması toplam ilerlemenin ilk %40'ı
+            val rc = runFfmpegAsync(args, item.durationMs) { pct -> onProgress((pct * 40) / 100) }
+            if (rc != 0 || !pcm.exists() || pcm.length() <= 0L) return false
+
+            val profile = if (v2) HeAacEncoder.PROFILE_HE_V2 else HeAacEncoder.PROFILE_HE
+            return withContext(Dispatchers.Default) {
+                HeAacEncoder.encode(
+                    pcmFile = pcm, outFile = tempOutput,
+                    sampleRate = sampleRate, channels = channels,
+                    bitrateKbps = kbps, profile = profile,
+                    onProgress = { pct -> viewModelScope.launch { onProgress(40 + (pct * 60) / 100) } },
+                    isCancelled = { !isActive }
+                ) && tempOutput.exists() && tempOutput.length() > 0L
+            }
+        } finally {
+            runCatching { pcm.delete() }
+        }
+    }
+
     private fun buildFfmpegArgs(item: ConvertQueueItem, format: OutputFormat, bitrate: Int, outputPath: String): Array<String> {
         // KOK NEDEN (cikti dosyasi kaynaktan buyuk oluyordu): HE-AAC gibi kodekler
         // zaten cok dusuk bitrate'te (orn. 32-40 kbps) iyi kalite verir. Kullanici
@@ -325,6 +395,10 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 }
                 OutputFormat.MP3 -> {
                     add("-c:a"); add("libmp3lame")
+                }
+                // HE-AAC buraya gelmez (convertHeAac kullanılır); yine de when tam olsun.
+                OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2 -> {
+                    add("-c:a"); add("aac")
                 }
             }
             val finalBitrate = if (format == OutputFormat.MP3) effectiveBitrate.coerceAtLeast(8) else effectiveBitrate

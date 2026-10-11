@@ -36,6 +36,9 @@ import kotlin.coroutines.resume
  * kesim hiçbir zaman kullanıcının istediğinden daha erken başlamaz (bkz. startTrim
  * ve TrackProber.findForwardKeyframeSec).
  */
+/** Klasörden seçilen kuyruktaki tek bir video/ses dosyası. */
+data class TrimQueueEntry(val uri: Uri, val name: String)
+
 class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private val prefs = AppPreferences(app)
@@ -66,6 +69,14 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         private set
     var isSuccess by mutableStateOf(false)
         private set
+
+    // Klasör kuyruğu ("Klasör Seç" -> sonraki videoya geç)
+    var folderQueue by mutableStateOf<List<TrimQueueEntry>>(emptyList())
+        private set
+    var queueIndex by mutableStateOf(-1)
+        private set
+    val hasNextInQueue: Boolean get() = queueIndex >= 0 && queueIndex < folderQueue.size - 1
+    val hasPrevInQueue: Boolean get() = queueIndex > 0 && folderQueue.isNotEmpty()
 
     private var trimJob: Job? = null
 
@@ -101,13 +112,63 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onVideoSelected(uri: Uri, displayName: String) {
+    /** Klasör seçtirir: içindeki tüm video/ses dosyalarını kuyruğa alır, ilkini açar. */
+    fun onFolderSelected(treeUri: Uri) {
+        try {
+            app.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: Exception) { }
         viewModelScope.launch {
             isLoading = true
-            loadingMessage = "Video analiz ediliyor..."
-            resultMessage = null; isSuccess = false
+            loadingMessage = "Klasör taranıyor..."
+            val items = withContext(Dispatchers.IO) {
+                runCatching {
+                    DocumentFile.fromTreeUri(app, treeUri)?.listFiles()
+                        ?.filter { it.isFile && isMediaDoc(it) }
+                        ?.sortedBy { (it.name ?: "").lowercase() }
+                        ?.map { TrimQueueEntry(it.uri, it.name ?: "video.mkv") }
+                }.getOrNull() ?: emptyList()
+            }
+            isLoading = false
+            if (items.isEmpty()) {
+                resultMessage = "Klasörde video veya ses dosyası bulunamadı."
+                isSuccess = false
+                return@launch
+            }
+            folderQueue = items
+            queueIndex = 0
+            onVideoSelected(items[0].uri, items[0].name, fromQueue = true)
+        }
+    }
 
+    /** Kuyruktaki sonraki dosyaya, hiçbir şey yapmadan sıfırdan geçer. */
+    fun nextInQueue() {
+        if (isTrimming || isLoading || !hasNextInQueue) return
+        queueIndex += 1
+        val e = folderQueue[queueIndex]
+        onVideoSelected(e.uri, e.name, fromQueue = true)
+    }
+
+    fun prevInQueue() {
+        if (isTrimming || isLoading || !hasPrevInQueue) return
+        queueIndex -= 1
+        val e = folderQueue[queueIndex]
+        onVideoSelected(e.uri, e.name, fromQueue = true)
+    }
+
+    private fun isMediaDoc(d: DocumentFile): Boolean {
+        val t = d.type.orEmpty()
+        if (t.startsWith("video/") || t.startsWith("audio/")) return true
+        return extensionFromName(d.name.orEmpty()) in MEDIA_EXTS
+    }
+
+    fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
+        if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1 }
+        viewModelScope.launch {
+            isLoading = true
+            loadingMessage = "Dosya analiz ediliyor..."
+            resultMessage = null; isSuccess = false
             val old = videoFile?.cachePath
+            videoFile = null // eski dosyanın oynatıcısı kapansın (cache silinecek)
             withContext(Dispatchers.IO) {
                 if (old != null) runCatching { File(old).delete() }
                 runCatching {
@@ -129,11 +190,21 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             val sizeMb = withContext(Dispatchers.IO) { File(cacheFile).length().toFloat() / (1024 * 1024) }
             val probe = withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
 
+            val audioOnly = !probe.hasVideo
+            if (audioOnly && probe.audioStreams.isEmpty()) {
+                withContext(Dispatchers.IO) { runCatching { File(cacheFile).delete() } }
+                resultMessage = "Geçerli bir video/ses dosyası değil."
+                isSuccess = false
+                isLoading = false
+                return@launch
+            }
             videoFile = VideoFile(
                 uri = uri, displayName = displayName, cachePath = cacheFile,
-                videoCodec = probe.videoCodec, resolution = probe.resolution,
+                videoCodec = if (audioOnly) (probe.audioStreams.firstOrNull()?.codec?.uppercase() ?: "AUDIO") else probe.videoCodec,
+                resolution = if (audioOnly) "Ses" else probe.resolution,
                 durationMs = probe.durationMs, fileSizeMb = sizeMb,
-                videoStreamIndex = probe.videoStreamIndex
+                videoStreamIndex = probe.videoStreamIndex,
+                isAudioOnly = audioOnly
             )
             trimStartMs = 0L
             trimEndMs = probe.durationMs
@@ -204,9 +275,12 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 // bulup kesimi tam olarak oradan başlatıyoruz; böylece kesim hiçbir zaman
                 // istenenden daha erken başlamaz (en kötüsü, genelde çok kısa süren bir
                 // sonraki keyframe'e kadar birazcık geç başlar - bu çok daha az sorunludur).
-                val snappedStartSec = withContext(Dispatchers.IO) {
-                    TrackProber.findForwardKeyframeSec(video.cachePath, video.videoStreamIndex, startSec, endSec)
-                } ?: startSec
+                // Sadece-ses dosyalarında keyframe kavramı yok (her ses karesi kesilebilir).
+                val snappedStartSec = if (video.isAudioOnly) startSec else {
+                    withContext(Dispatchers.IO) {
+                        TrackProber.findForwardKeyframeSec(video.cachePath, video.videoStreamIndex, startSec, endSec)
+                    } ?: startSec
+                }
 
                 val durationSec = (endSec - snappedStartSec).coerceAtLeast(0.001)
                 val args = arrayOf(
@@ -214,7 +288,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                     "-ss", String.format(Locale.US, "%.3f", snappedStartSec),
                     "-i", video.cachePath,
                     "-t", String.format(Locale.US, "%.3f", durationSec),
-                    "-map", "0",
+                    "-map", if (video.isAudioOnly) "0:a" else "0",
                     "-c", "copy",
                     "-avoid_negative_ts", "make_zero",
                     tempOutput.absolutePath
@@ -300,6 +374,13 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         "mov" -> "video/quicktime"
         "avi" -> "video/x-msvideo"
         "webm" -> "video/webm"
+        "mp3" -> "audio/mpeg"
+        "m4a" -> "audio/mp4"
+        "aac" -> "audio/aac"
+        "opus", "ogg", "oga" -> "audio/ogg"
+        "flac" -> "audio/flac"
+        "wav" -> "audio/x-wav"
+        "mka" -> "audio/x-matroska"
         else -> "video/*"
     }
 
@@ -318,5 +399,9 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val MIN_GAP_MS = 100L
+        private val MEDIA_EXTS = setOf(
+            "mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "mpg", "mpeg",
+            "mp3", "m4a", "aac", "opus", "ogg", "oga", "flac", "wav", "wma", "mka", "ac3", "eac3", "dts"
+        )
     }
 }

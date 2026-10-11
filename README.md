@@ -109,3 +109,19 @@ Bu proje internetsiz/Android SDK'sız bir sandbox'ta yazıldı; gerçek bir `gra
 ve cihazda çalıştırma burada doğrulanamadı. Kod, FFmpegKit'in gerçek (resmi) API imzalarına göre
 dikkatle yazıldı, ancak Android Studio'da ilk sync/build sırasında küçük bir uyumsuzluk çıkarsa
 (örn. fork'un metod imzası farklıysa) hata mesajını paylaşman yeterli.
+
+## Son güncelleme
+
+- **Video / Ses Kırp**: seçilen aralığı birebir oynatan dahili oynatıcı (oynat/duraklat, ±10 sn, tam ekran),
+  "Klasör Seç" ile klasördeki tüm videoları kuyruğa alma ve ok düğmesiyle sıradakine geçme,
+  sadece-ses dosyalarını (mp3, m4a, opus, flac…) da aynı şekilde kırpma.
+- **Ses Dönüştürme**: HE-AAC ve HE-AAC v2 (.m4a) eklendi (Android MediaCodec AAC encoder'ı ile).
+- **Hata düzeltmesi**: ekran dikey/yatay döndürülünce ana ekrana atma sorunu giderildi.
+- **Uygulama simgesi**: yeni adaptive launcher ikonu eklendi.
+
+## CI notu (GitHub Actions)
+
+`android-actions/setup-android` KULLANMA: yeni cmdline-tools'ta `tools` paketi olmadığından
+"Failed to find package 'tools'" hatasıyla derleme başlamadan çöküyor. `.github/workflows/build.yml`
+runner'daki hazır Android SDK'yı kullanır. `.github` gizli klasör olduğundan tarayıcıdan zip
+yüklerken atlanabilir; bu durumda GitHub'da `.github/workflows/build.yml` dosyasını elle düzenleyip içeriği yapıştır.

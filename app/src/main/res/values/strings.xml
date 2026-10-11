@@ -96,6 +96,7 @@
     <string name="err_no_output_folder">Çıktı klasörü seçilmedi.</string>
     <string name="err_invalid_bitrate">Geçerli bir bitrate girin (6-512 kbps arası).</string>
     <string name="err_ffmpeg_code">FFmpeg hatası (kod: %1$s).</string>
+    <string name="err_heaac_failed">HE-AAC kodlama başarısız oldu (cihazın AAC encoder\'ı bu ayarı desteklemiyor olabilir).</string>
     <string name="err_save_failed">Hedef klasöre kaydedilemedi.</string>
     <string name="result_convert_success_all">✅ Tamamlandı! %1$d/%2$d dosya %3$s formatına dönüştürüldü.</string>
     <string name="result_convert_partial">⚠ %1$d/%2$d tamamlandı, %3$d dosyada hata oluştu.</string>

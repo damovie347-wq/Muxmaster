@@ -31,6 +31,7 @@ import com.example.muxmaster.viewmodel.OutputFormat
 import com.example.muxmaster.ui.theme.*
 
 private val BITRATE_PRESETS = listOf(32, 64, 96, 128, 192, 256, 320)
+private val HE_BITRATE_PRESETS = listOf(16, 24, 32, 48, 64, 96, 128)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,20 +124,23 @@ fun ConverterScreen(
 
             // ── 2) HEDEF FORMAT ───────────────────────────────────────────────
             SectionTitle(stringResource(R.string.target_format_title))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutputFormat.entries.forEach { fmt ->
-                    val selected = viewModel.outputFormat == fmt
-                    FilterChip(
-                        selected = selected,
-                        onClick = { viewModel.selectFormat(fmt) },
-                        enabled = !viewModel.isConverting,
-                        label = { Text(fmt.label, fontSize = 12.sp) },
-                        modifier = Modifier.weight(1f),
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Purple, selectedLabelColor = Color.White,
-                            containerColor = SurfaceHigh, labelColor = TextSec
+            OutputFormat.entries.chunked(2).forEach { rowFormats ->
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowFormats.forEach { fmt ->
+                        val selected = viewModel.outputFormat == fmt
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.selectFormat(fmt) },
+                            enabled = !viewModel.isConverting,
+                            label = { Text(fmt.label, fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                                containerColor = SurfaceHigh, labelColor = TextSec
+                            )
                         )
-                    )
+                    }
+                    if (rowFormats.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
 
@@ -146,7 +150,7 @@ fun ConverterScreen(
             SectionTitle(stringResource(R.string.target_bitrate_title, viewModel.outputFormat.label))
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                BITRATE_PRESETS.forEach { preset ->
+                (if (viewModel.outputFormat.isHeAac) HE_BITRATE_PRESETS else BITRATE_PRESETS).forEach { preset ->
                     val selected = viewModel.bitrateKbpsText == preset.toString()
                     FilterChip(
                         selected = selected,

@@ -88,6 +88,7 @@
     <string name="err_no_output_folder">Kein Ausgabeordner ausgewählt.</string>
     <string name="err_invalid_bitrate">Gültige Bitrate eingeben (6-512 kbps).</string>
     <string name="err_ffmpeg_code">FFmpeg-Fehler (Code: %1$s).</string>
+    <string name="err_heaac_failed">HE-AAC-Kodierung fehlgeschlagen (der AAC-Encoder dieses Geräts unterstützt diese Einstellungen evtl. nicht).</string>
     <string name="err_save_failed">Speichern im Zielordner fehlgeschlagen.</string>
     <string name="result_convert_success_all">✅ Fertig! %1$d/%2$d Datei(en) zu %3$s konvertiert.</string>
     <string name="result_convert_partial">⚠ %1$d/%2$d fertig, %3$d Datei(en) fehlgeschlagen.</string>

@@ -64,5 +64,6 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
+    implementation("androidx.media3:media3-exoplayer:1.2.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

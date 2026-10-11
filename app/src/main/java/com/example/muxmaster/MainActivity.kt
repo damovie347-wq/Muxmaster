@@ -11,7 +11,7 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -61,6 +61,9 @@ class MainActivity : AppCompatActivity() {
     private val pickTrimVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) trimViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
     }
+    private val pickTrimFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) trimViewModel.onFolderSelected(uri)
+    }
     private val pickTrimOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) trimViewModel.setOutputFolder(uri)
     }
@@ -102,7 +105,9 @@ class MainActivity : AppCompatActivity() {
         setContent {
             var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
             MuxMasterTheme(themeMode = themeMode) {
-                val screenHolder = remember { mutableIntStateOf(0) }
+                // rememberSaveable: ekran döndürülünce / Activity yeniden oluşturulunca
+                // kullanıcı bulunduğu ekranda kalır (eskiden ana ekrana atıyordu).
+                val screenHolder = rememberSaveable { mutableStateOf(0) }
                 screenState = screenHolder
                 var screen by screenHolder
 
@@ -128,7 +133,8 @@ class MainActivity : AppCompatActivity() {
                     )
                     2 -> TrimScreen(
                         viewModel = trimViewModel,
-                        onPickVideo = { pickTrimVideoLauncher.launch(arrayOf("video/*", "*/*")) },
+                        onPickVideo = { pickTrimVideoLauncher.launch(arrayOf("video/*", "audio/*", "*/*")) },
+                        onPickFolder = { pickTrimFolderLauncher.launch(null) },
                         onPickOutputFolder = { pickTrimOutputFolderLauncher.launch(null) },
                         onNavigateBack = { screen = 0 }
                     )
