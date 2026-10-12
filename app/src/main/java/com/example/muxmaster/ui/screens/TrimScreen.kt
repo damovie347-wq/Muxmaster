@@ -1,6 +1,19 @@
 package com.example.muxmaster.ui.screens
 
 import android.app.Activity
+import android.content.res.Configuration
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.SubtitlesOff
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.unit.Dp
+import androidx.media3.common.C
+import androidx.media3.common.Format
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.text.CueGroup
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
@@ -159,11 +172,7 @@ fun TrimScreen(
                             tint = if (viewModel.hasPrevInQueue && !busy) TextPrimary else TextMuted
                         )
                     }
-                    Text(
-                        "${viewModel.queueIndex + 1}/${viewModel.folderQueue.size}",
-                        color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.Medium
-                    )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(4.dp))
                     Button(
                         onClick = viewModel::nextInQueue,
                         enabled = viewModel.hasNextInQueue && !busy,
@@ -172,6 +181,33 @@ fun TrimScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = Purple, disabledContainerColor = SurfaceHigh)
                     ) {
                         Icon(Icons.Filled.ArrowForward, "Sonraki video", modifier = Modifier.size(22.dp))
+                    }
+                }
+            }
+            // Seçili klasör + sayaç + KAPAT (çarpı)
+            if (viewModel.folderQueue.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(SurfaceHigh, RoundedCornerShape(10.dp))
+                        .padding(start = 12.dp, end = 4.dp)
+                ) {
+                    Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        viewModel.folderName.ifBlank { "Klasör" },
+                        color = TextPrimary, fontSize = 13.sp, maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "${viewModel.queueIndex + 1}/${viewModel.folderQueue.size}",
+                        color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.Medium
+                    )
+                    IconButton(onClick = viewModel::clearFolderQueue) {
+                        Icon(Icons.Filled.Close, "Klasörü kapat", tint = TextSec, modifier = Modifier.size(20.dp))
                     }
                 }
             }
@@ -220,6 +256,31 @@ fun TrimScreen(
                         "Not: Kalite kaybı olmaması için yeniden kodlama yapılmaz; bu yüzden başlangıç noktası videonun en yakın kare (keyframe) sınırına hizalanabilir.",
                     color = TextMuted, fontSize = 10.sp
                 )
+
+                if (!video.isAudioOnly) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Surface, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Başlangıcı tam hassas kes", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Başlangıç ile ilk keyframe arası (birkaç sn) yeniden kodlanır, kalanı kayıpsız kopyalanır. İlk saniyeler atlanmaz, donma olmaz.",
+                                color = TextMuted, fontSize = 10.sp
+                            )
+                        }
+                        Switch(
+                            checked = viewModel.preciseCut,
+                            onCheckedChange = viewModel::setPreciseCut,
+                            enabled = !viewModel.isTrimming,
+                            colors = SwitchDefaults.colors(checkedTrackColor = Purple)
+                        )
+                    }
+                }
 
                 Spacer(Modifier.height(16.dp))
 
@@ -473,13 +534,147 @@ private fun TimeField(
 //  OYNATICI
 // ─────────────────────────────────────────────────────────────────────────────
 
+private fun trackLabel(f: Format, isAudio: Boolean, index: Int): String {
+    val lang = f.language?.takeIf { it.isNotBlank() && it != "und" }?.let { code ->
+        val name = runCatching { Locale(code).getDisplayLanguage(Locale.getDefault()) }.getOrDefault("")
+        if (name.isBlank() || name.equals(code, ignoreCase = true)) code.uppercase() else name
+    }
+    val base = f.label?.takeIf { it.isNotBlank() } ?: lang ?: "Parça ${index + 1}"
+    if (!isAudio) return base
+    val ch = when (f.channelCount) {
+        Format.NO_VALUE, 0 -> null
+        1 -> "Mono"
+        2 -> "Stereo"
+        6 -> "5.1"
+        8 -> "7.1"
+        else -> "${f.channelCount} kanal"
+    }
+    return listOfNotNull(base, ch).joinToString(", ")
+}
+
+/** Ses ve altyazı seçim menüleri (müzik notu / altyazı simgeleri). */
+@Composable
+private fun TrackMenuButtons(
+    player: ExoPlayer,
+    tracks: Tracks,
+    tint: Color,
+    onMenuState: (Boolean) -> Unit = {}
+) {
+    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+    val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+    var audioMenu by remember { mutableStateOf(false) }
+    var textMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(audioMenu, textMenu) { onMenuState(audioMenu || textMenu) }
+
+    val params = player.trackSelectionParameters
+    val textOff = params.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+    val audioAuto = params.overrides.values.none { it.type == C.TRACK_TYPE_AUDIO }
+    val textAuto = !textOff && params.overrides.values.none { it.type == C.TRACK_TYPE_TEXT }
+
+    val select: (Tracks.Group, Int) -> Unit = { group, idx ->
+        val b = player.trackSelectionParameters.buildUpon()
+        if (group.type == C.TRACK_TYPE_TEXT) b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+        b.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, idx))
+        player.trackSelectionParameters = b.build()
+    }
+    val auto: (Int) -> Unit = { type ->
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(type).setTrackTypeDisabled(type, false).build()
+    }
+
+    @Composable
+    fun TickIcon(on: Boolean) {
+        if (on) Icon(Icons.Filled.Check, null, modifier = Modifier.size(20.dp))
+        else Spacer(Modifier.size(20.dp))
+    }
+
+    if (audioGroups.sumOf { it.length } >= 2) {
+        Box {
+            IconButton(onClick = { audioMenu = true }, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Filled.MusicNote, "Ses", tint = tint, modifier = Modifier.size(24.dp))
+            }
+            DropdownMenu(expanded = audioMenu, onDismissRequest = { audioMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Otomatik") },
+                    leadingIcon = { TickIcon(audioAuto) },
+                    onClick = { auto(C.TRACK_TYPE_AUDIO); audioMenu = false }
+                )
+                var n = 0
+                audioGroups.forEach { g ->
+                    for (i in 0 until g.length) {
+                        val label = trackLabel(g.getTrackFormat(i), true, n++)
+                        val sel = !audioAuto && g.isTrackSelected(i)
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            leadingIcon = { TickIcon(sel) },
+                            onClick = { select(g, i); audioMenu = false }
+                        )
+                    }
+                }
+            }
+        }
+    }
+    if (textGroups.isNotEmpty()) {
+        Box {
+            IconButton(onClick = { textMenu = true }, modifier = Modifier.size(38.dp)) {
+                Icon(
+                    if (textOff) Icons.Filled.SubtitlesOff else Icons.Filled.Subtitles,
+                    "Altyazı", tint = tint, modifier = Modifier.size(24.dp)
+                )
+            }
+            DropdownMenu(expanded = textMenu, onDismissRequest = { textMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Kapalı") },
+                    leadingIcon = { TickIcon(textOff) },
+                    onClick = {
+                        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+                        textMenu = false
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Otomatik") },
+                    leadingIcon = { TickIcon(textAuto) },
+                    onClick = { auto(C.TRACK_TYPE_TEXT); textMenu = false }
+                )
+                var n = 0
+                textGroups.forEach { g ->
+                    for (i in 0 until g.length) {
+                        val label = trackLabel(g.getTrackFormat(i), false, n++)
+                        val sel = !textOff && !textAuto && g.isTrackSelected(i)
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            leadingIcon = { TickIcon(sel) },
+                            onClick = { select(g, i); textMenu = false }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubtitleOverlay(text: String, modifier: Modifier = Modifier) {
+    if (text.isBlank()) return
+    Text(
+        text,
+        color = Color.White,
+        fontSize = 14.sp,
+        modifier = modifier
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+    )
+}
+
 /**
  * Kırpma önizleme oynatıcısı.
  *
- * - Oynatma HER ZAMAN seçili aralıkta ([startMs]..[endMs]) yapılır: oynat'a basınca
- *   başlangıç noktasından başlar, bitiş noktasında durur.
+ * - Oynatma seçili aralıkta ([startMs]..[endMs]) yapılır: bitiş noktasında durur.
  * - Başlangıç değişince o kareye, bitiş değişince bitişten ~1.5 sn öncesine atlar.
- * - Sağdaki tam ekran düğmesi videoyu kırpma başlangıcından itibaren tam ekran oynatır.
+ * - Tam ekran: aynı oynatıcıyı kullanır, konum KORUNUR (başa sarmaz). Ekrana dokununca
+ *   kontroller gizlenir/görünür. Ses ve altyazı parçası seçilebilir.
  */
 @Composable
 private fun TrimPlayer(
@@ -494,6 +689,8 @@ private fun TrimPlayer(
     var positionMs by remember { mutableLongStateOf(0L) }
     var aspect by remember { mutableFloatStateOf(16f / 9f) }
     var fullscreen by remember { mutableStateOf(false) }
+    var tracks by remember { mutableStateOf(Tracks.EMPTY) }
+    var cueText by remember { mutableStateOf("") }
 
     val startState = rememberUpdatedState(startMs)
     val endState = rememberUpdatedState(endMs)
@@ -505,6 +702,10 @@ private fun TrimPlayer(
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
                 }
+            }
+            override fun onTracksChanged(t: Tracks) { tracks = t }
+            override fun onCues(cueGroup: CueGroup) {
+                cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
             }
         }
         player.addListener(listener)
@@ -523,15 +724,15 @@ private fun TrimPlayer(
         }
     }
 
-    // Dosya değişince yükle
-    LaunchedEffect(video.cachePath) {
-        player.setMediaItem(MediaItem.fromUri(Uri.fromFile(File(video.cachePath))))
+    // Dosya değişince yükle (kopyasız: doğrudan içerik URI'sinden)
+    LaunchedEffect(video.uri) {
+        player.setMediaItem(MediaItem.fromUri(video.uri))
         player.prepare()
         player.seekTo(startState.value)
         player.playWhenReady = false
     }
 
-    // Başlangıç noktası değişince o noktaya atla (kısa gecikmeyle: sürüklerken her piksele seek yapma)
+    // Başlangıç noktası değişince o noktaya atla (sürüklerken her piksele seek yapma)
     LaunchedEffect(startMs) {
         delay(120)
         player.seekTo(startMs)
@@ -546,6 +747,11 @@ private fun TrimPlayer(
     // Kırpma başlayınca oynatmayı durdur
     LaunchedEffect(isTrimming) {
         if (isTrimming) player.pause()
+    }
+    // Yüzey (TextureView) değişince duran videoda kare yeniden çizilsin
+    LaunchedEffect(fullscreen) {
+        delay(200)
+        if (!player.playWhenReady) player.seekTo(player.currentPosition)
     }
 
     // Konum takibi + bitiş noktasında durdurma
@@ -606,10 +812,13 @@ private fun TrimPlayer(
                     Icon(Icons.Filled.MusicNote, null, tint = PurpleLight, modifier = Modifier.size(48.dp))
                 }
             } else if (!fullscreen) {
-                AndroidView(
-                    factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
-                    modifier = Modifier.aspectRatio(aspect)
-                )
+                Box(modifier = Modifier.aspectRatio(aspect)) {
+                    AndroidView(
+                        factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    SubtitleOverlay(cueText, Modifier.align(Alignment.BottomCenter))
+                }
             } else {
                 Box(Modifier.fillMaxWidth().height(120.dp))
             }
@@ -625,14 +834,24 @@ private fun TrimPlayer(
             onSeekTo = seekTo,
             modifier = Modifier.padding(horizontal = 12.dp),
             trailing = {
-                if (!video.isAudioOnly) {
-                    IconButton(onClick = {
-                        player.seekTo(startState.value)
-                        positionMs = startState.value
-                        player.play()
-                        fullscreen = true
-                    }) {
-                        Icon(Icons.Filled.Fullscreen, "Tam ekran", tint = Blue, modifier = Modifier.size(28.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TrackMenuButtons(player, tracks, TextPrimary)
+                    if (!video.isAudioOnly) {
+                        IconButton(onClick = {
+                            val pos = player.currentPosition
+                            if (pos < startState.value || pos >= endState.value - 100L) {
+                                // aralık dışındaysa kırpma başlangıcından başlat
+                                player.seekTo(startState.value)
+                                positionMs = startState.value
+                                player.play()
+                            } else if (pos <= startState.value + 100L && !isPlaying) {
+                                player.play() // ilk kez: kırpılan andan itibaren oynat
+                            }
+                            // aksi halde kaldığı yerden DEVAM eder (başa sarmaz)
+                            fullscreen = true
+                        }, modifier = Modifier.size(38.dp)) {
+                            Icon(Icons.Filled.Fullscreen, "Tam ekran", tint = Blue, modifier = Modifier.size(26.dp))
+                        }
                     }
                 }
             }
@@ -642,6 +861,8 @@ private fun TrimPlayer(
     if (fullscreen) {
         FullscreenPlayerDialog(
             player = player,
+            tracks = tracks,
+            cueText = cueText,
             aspect = aspect,
             isPlaying = isPlaying,
             positionMs = positionMs,
@@ -686,15 +907,15 @@ private fun PlayerControls(
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 modifier = Modifier.align(Alignment.Center)
             ) {
-                IconButton(onClick = { onSeekBy(-10_000L) }) {
-                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = TextPrimary, modifier = Modifier.size(30.dp))
+                IconButton(onClick = { onSeekBy(-10_000L) }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = TextPrimary, modifier = Modifier.size(28.dp))
                 }
                 Box(
                     modifier = Modifier
-                        .size(52.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
                         .background(Purple)
                         .clickable(onClick = onTogglePlay),
@@ -703,11 +924,11 @@ private fun PlayerControls(
                     Icon(
                         if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         if (isPlaying) "Duraklat" else "Oynat",
-                        tint = Color.White, modifier = Modifier.size(32.dp)
+                        tint = Color.White, modifier = Modifier.size(30.dp)
                     )
                 }
-                IconButton(onClick = { onSeekBy(10_000L) }) {
-                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = TextPrimary, modifier = Modifier.size(30.dp))
+                IconButton(onClick = { onSeekBy(10_000L) }, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = TextPrimary, modifier = Modifier.size(28.dp))
                 }
             }
             Box(modifier = Modifier.align(Alignment.CenterEnd)) { trailing() }
@@ -718,6 +939,8 @@ private fun PlayerControls(
 @Composable
 private fun FullscreenPlayerDialog(
     player: ExoPlayer,
+    tracks: Tracks,
+    cueText: String,
     aspect: Float,
     isPlaying: Boolean,
     positionMs: Long,
@@ -729,13 +952,23 @@ private fun FullscreenPlayerDialog(
     onExit: () -> Unit
 ) {
     val context = LocalContext.current
+    var controlsVisible by remember { mutableStateOf(true) }
+    var interaction by remember { mutableIntStateOf(0) }
+    var menuOpen by remember { mutableStateOf(false) }
 
-    // Yatay video ise ekranı yatay yap; çıkınca eski haline döndür
+    // Ekran yönü SERBEST (cihaz dikey/yatay döndükçe video da döner); çıkınca eski yön geri gelir.
     DisposableEffect(Unit) {
         val activity = context.findActivity()
         val previous = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        if (aspect >= 1f) activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         onDispose { activity?.requestedOrientation = previous }
+    }
+
+    // Oynarken kontroller birkaç saniye sonra kendiliğinden gizlenir
+    LaunchedEffect(controlsVisible, isPlaying, interaction, menuOpen) {
+        if (controlsVisible && isPlaying && !menuOpen) {
+            delay(3500)
+            controlsVisible = false
+        }
     }
 
     Dialog(
@@ -759,27 +992,66 @@ private fun FullscreenPlayerDialog(
                 factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
                 modifier = Modifier.align(Alignment.Center).aspectRatio(aspect)
             )
-            Column(
+
+            // Dokunma katmanı: ekrana tıklayınca kontroller gizlenir / görünür
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
-            ) {
-                PlayerControls(
-                    isPlaying = isPlaying,
-                    positionMs = positionMs,
-                    startMs = startMs,
-                    endMs = endMs,
-                    onTogglePlay = onTogglePlay,
-                    onSeekBy = onSeekBy,
-                    onSeekTo = onSeekTo,
-                    trailing = {
-                        IconButton(onClick = onExit) {
-                            Icon(Icons.Filled.FullscreenExit, "Tam ekrandan çık", tint = Color.White, modifier = Modifier.size(28.dp))
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { controlsVisible = !controlsVisible }
+            )
+
+            SubtitleOverlay(
+                cueText,
+                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 110.dp else 24.dp)
+            )
+
+            if (controlsVisible) {
+                IconButton(
+                    onClick = onExit,
+                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+                ) {
+                    Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White)
+                }
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    PlayerControls(
+                        isPlaying = isPlaying,
+                        positionMs = positionMs,
+                        startMs = startMs,
+                        endMs = endMs,
+                        onTogglePlay = { interaction++; onTogglePlay() },
+                        onSeekBy = { interaction++; onSeekBy(it) },
+                        onSeekTo = { interaction++; onSeekTo(it) },
+                        trailing = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TrackMenuButtons(player, tracks, Color.White) { menuOpen = it }
+                                IconButton(onClick = {
+                                    interaction++
+                                    val act = context.findActivity()
+                                    if (act != null) {
+                                        val landscape = act.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                                        act.requestedOrientation = if (landscape)
+                                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                                        else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                    }
+                                }, modifier = Modifier.size(38.dp)) {
+                                    Icon(Icons.Filled.ScreenRotation, "Döndür", tint = Color.White, modifier = Modifier.size(24.dp))
+                                }
+                                IconButton(onClick = onExit, modifier = Modifier.size(38.dp)) {
+                                    Icon(Icons.Filled.FullscreenExit, "Tam ekrandan çık", tint = Color.White, modifier = Modifier.size(26.dp))
+                                }
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
         }
     }

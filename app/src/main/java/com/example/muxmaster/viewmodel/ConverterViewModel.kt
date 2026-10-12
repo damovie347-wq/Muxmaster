@@ -14,6 +14,7 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.HeAacEncoder
+import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
@@ -115,7 +116,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     copyUriToCache(uri, "src_${id}_${System.currentTimeMillis()}.$ext")
                 }
                 if (cachePath != null) {
-                    val sizeMb = withContext(Dispatchers.IO) { File(cachePath).length().toFloat() / (1024 * 1024) }
+                    val sizeMb = withContext(Dispatchers.IO) { InputAccess.length(cachePath).toFloat() / (1024 * 1024) }
                     val probe = withContext(Dispatchers.IO) { TrackProber.probe(cachePath) }
                     val firstAudio = probe.audioStreams.firstOrNull()
                     if (firstAudio != null) {
@@ -126,7 +127,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                         )
                         added++
                     } else {
-                        withContext(Dispatchers.IO) { runCatching { File(cachePath).delete() } }
+                        withContext(Dispatchers.IO) { runCatching { InputAccess.release(cachePath) } }
                     }
                 }
             }
@@ -145,7 +146,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         val item = queue.firstOrNull { it.id == id }
         queue = queue.filterNot { it.id == id }
         if (item != null) {
-            viewModelScope.launch(Dispatchers.IO) { runCatching { File(item.cachePath).delete() } }
+            viewModelScope.launch(Dispatchers.IO) { runCatching { InputAccess.release(item.cachePath) } }
         }
     }
 
@@ -155,7 +156,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = emptyList()
         resultMessage = null; isSuccess = false; convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            old.forEach { runCatching { File(it.cachePath).delete() } }
+            old.forEach { runCatching { InputAccess.release(it.cachePath) } }
         }
     }
 
@@ -179,7 +180,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         queue = emptyList()
         resultMessage = null; isSuccess = false; convertProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            old.forEach { runCatching { File(it.cachePath).delete() } }
+            old.forEach { runCatching { InputAccess.release(it.cachePath) } }
         }
     }
 
@@ -269,7 +270,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     }
 
                     convertProgress = (((doneCount + errorCount).toFloat() / total) * 100).toInt().coerceIn(0, 100)
-                    runCatching { File(item.cachePath).delete() }
+                    runCatching { InputAccess.release(item.cachePath) }
                 }
 
                 convertProgress = 100
@@ -423,16 +424,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             cont.invokeOnCancellation { runCatching { session.cancel() } }
         }
 
-    private fun copyUriToCache(uri: Uri, fileName: String): String? {
-        return try {
-            val file = File(app.cacheDir, "convert_work/$fileName")
-            file.parentFile?.mkdirs()
-            app.contentResolver.openInputStream(uri)?.use { input ->
-                file.outputStream().use { output -> input.copyTo(output, bufferSize = 8 * 1024 * 1024) }
-            } ?: return null
-            if (file.exists() && file.length() > 0) file.absolutePath else null
-        } catch (e: Exception) { null }
-    }
+    private fun copyUriToCache(uri: Uri, fileName: String): String? =
+        InputAccess.acquire(app, uri, workDir(), fileName, needChildRead = false)
 
     private fun extensionFromName(displayName: String): String {
         val dot = displayName.lastIndexOf('.')

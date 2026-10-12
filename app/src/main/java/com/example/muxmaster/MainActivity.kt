@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
@@ -97,6 +98,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Önceki oturumdan kalan geçici dosyaları temizle (çalışan bir işlem yoksa).
+        if (savedInstanceState == null &&
+            !muxViewModel.isMuxing && !trimViewModel.isTrimming &&
+            !converterViewModel.isConverting && !mergeViewModel.isMerging
+        ) {
+            Thread { com.example.muxmaster.data.InputAccess.clearWorkCache(applicationContext) }.start()
+        }
         // Arka planda mux ilerleme bildirimi gösterilebilmesi için (Android 13+/API 33+
         // bildirim izni ister); reddedilirse mux yine çalışır, sadece bildirim görünmez.
         if (Build.VERSION.SDK_INT >= 33) {
@@ -110,6 +119,9 @@ class MainActivity : AppCompatActivity() {
                 val screenHolder = rememberSaveable { mutableStateOf(0) }
                 screenState = screenHolder
                 var screen by screenHolder
+
+                // Geri tuşu: alt ekrandaysan ana ekrana döner (uygulamadan çıkmaz).
+                BackHandler(enabled = screen != 0) { screen = 0 }
 
                 LaunchedEffect(Unit) { handleIncomingIntent(intent) }
 

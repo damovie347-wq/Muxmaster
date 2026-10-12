@@ -16,6 +16,7 @@ import com.arthenica.ffmpegkit.ReturnCode
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.NativeTools
+import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
@@ -119,7 +120,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         expandedAudioIds.clear(); expandedSubtitleIds.clear()
         resultMessage = null; isSuccess = false; muxProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            if (old != null) runCatching { File(old).delete() }
+            if (old != null) runCatching { InputAccess.release(old) }
             runCatching { workDir().deleteRecursively() }
         }
     }
@@ -134,7 +135,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
             val old = videoFile?.cachePath
             withContext(Dispatchers.IO) {
-                if (old != null) runCatching { File(old).delete() }
+                if (old != null) runCatching { InputAccess.release(old) }
                 runCatching { workDir().listFiles()
                     ?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() } }
             }
@@ -154,7 +155,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
-            val sizeMb = withContext(Dispatchers.IO) { File(cacheFile).length().toFloat() / (1024 * 1024) }
+            val sizeMb = withContext(Dispatchers.IO) { InputAccess.length(cacheFile).toFloat() / (1024 * 1024) }
 
             loadingMessage = "ffprobe..."
             val probeResult = probeDeferred.await()
@@ -501,7 +502,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     } catch (_: Exception) { false }
                 }
 
-                withContext(Dispatchers.IO) { runTempFiles.forEach { runCatching { it.delete() } } }
+                withContext(Dispatchers.IO) { runTempFiles.forEach { runCatching { InputAccess.release(it.path) } } }
                 setProgress(100)
 
                 if (copyOk) {
@@ -712,14 +713,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         } catch (_: Exception) { null }
     }
 
-    private fun copyUriToCache(uri: Uri, fileName: String): String? {
-        return try {
-            val f = File(workDir(), fileName)
-            val input = app.contentResolver.openInputStream(uri) ?: return null
-            input.use { i -> f.outputStream().use { o -> i.copyTo(o, 8*1024*1024) } }
-            if (f.exists() && f.length() > 0) f.absolutePath else null
-        } catch (_: Exception) { null }
-    }
+    private fun copyUriToCache(uri: Uri, fileName: String): String? =
+        InputAccess.acquire(app, uri, workDir(), fileName, needChildRead = true)
 
     private suspend fun probeFromUri(uri: Uri): TrackProber.ProbeResult? = withContext(Dispatchers.IO) {
         var pfd: android.os.ParcelFileDescriptor? = null

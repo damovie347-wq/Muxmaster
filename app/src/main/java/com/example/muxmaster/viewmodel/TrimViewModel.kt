@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.service.MuxCancelBus
@@ -75,6 +76,20 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         private set
     var queueIndex by mutableStateOf(-1)
         private set
+    var folderName by mutableStateOf("")
+        private set
+    /** Başlangıcı tam istenen kareden başlat (başlangıç–ilk keyframe arası yeniden kodlanır). */
+    var preciseCut by mutableStateOf(true)
+        private set
+    fun setPreciseCut(v: Boolean) { preciseCut = v }
+    private var x264Checked = false
+    private var x264Available = false
+
+    /** Klasör kuyruğunu kapatır (çarpı düğmesi). Açık olan video etkilenmez. */
+    fun clearFolderQueue() {
+        folderQueue = emptyList(); queueIndex = -1; folderName = ""
+    }
+
     val hasNextInQueue: Boolean get() = queueIndex >= 0 && queueIndex < folderQueue.size - 1
     val hasPrevInQueue: Boolean get() = queueIndex > 0 && folderQueue.isNotEmpty()
 
@@ -107,7 +122,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         trimStartMs = 0L; trimEndMs = 0L
         resultMessage = null; isSuccess = false; trimProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            if (old != null) runCatching { File(old).delete() }
+            if (old != null) runCatching { InputAccess.release(old) }
             runCatching { workDir().deleteRecursively() }
         }
     }
@@ -136,6 +151,8 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             }
             folderQueue = items
             queueIndex = 0
+            folderName = runCatching { DocumentFile.fromTreeUri(app, treeUri)?.name }.getOrNull()
+                ?: (treeUri.lastPathSegment ?: "")
             onVideoSelected(items[0].uri, items[0].name, fromQueue = true)
         }
     }
@@ -162,7 +179,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
-        if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1 }
+        if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1; folderName = "" }
         viewModelScope.launch {
             isLoading = true
             loadingMessage = "Dosya analiz ediliyor..."
@@ -170,7 +187,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             val old = videoFile?.cachePath
             videoFile = null // eski dosyanın oynatıcısı kapansın (cache silinecek)
             withContext(Dispatchers.IO) {
-                if (old != null) runCatching { File(old).delete() }
+                if (old != null) runCatching { InputAccess.release(old) }
                 runCatching {
                     workDir().listFiles()
                         ?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() }
@@ -187,12 +204,12 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
-            val sizeMb = withContext(Dispatchers.IO) { File(cacheFile).length().toFloat() / (1024 * 1024) }
+            val sizeMb = withContext(Dispatchers.IO) { InputAccess.length(cacheFile).toFloat() / (1024 * 1024) }
             val probe = withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
 
             val audioOnly = !probe.hasVideo
             if (audioOnly && probe.audioStreams.isEmpty()) {
-                withContext(Dispatchers.IO) { runCatching { File(cacheFile).delete() } }
+                withContext(Dispatchers.IO) { runCatching { InputAccess.release(cacheFile) } }
                 resultMessage = "Geçerli bir video/ses dosyası değil."
                 isSuccess = false
                 isLoading = false
@@ -204,7 +221,8 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 resolution = if (audioOnly) "Ses" else probe.resolution,
                 durationMs = probe.durationMs, fileSizeMb = sizeMb,
                 videoStreamIndex = probe.videoStreamIndex,
-                isAudioOnly = audioOnly
+                isAudioOnly = audioOnly,
+                pixFmt = probe.pixFmt
             )
             trimStartMs = 0L
             trimEndMs = probe.durationMs
@@ -276,27 +294,55 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 // istenenden daha erken başlamaz (en kötüsü, genelde çok kısa süren bir
                 // sonraki keyframe'e kadar birazcık geç başlar - bu çok daha az sorunludur).
                 // Sadece-ses dosyalarında keyframe kavramı yok (her ses karesi kesilebilir).
-                val snappedStartSec = if (video.isAudioOnly) startSec else {
+                val keyframeSec: Double? = if (video.isAudioOnly) null else {
                     withContext(Dispatchers.IO) {
                         TrackProber.findForwardKeyframeSec(video.cachePath, video.videoStreamIndex, startSec, endSec)
-                    } ?: startSec
+                    }
+                }
+                val snappedStartSec = keyframeSec ?: startSec
+
+                // HASSAS KESİM (smart cut): başlangıç keyframe'e denk gelmiyorsa, başlangıç ile
+                // sonraki keyframe arasındaki kısa parça (en fazla bir GOP) yeniden kodlanır,
+                // kalan kısım kayıpsız kopyalanıp birleştirilir. Böylece kesim tam istenen
+                // karede başlar; ilk saniyeler atlanmaz, donma/kasma olmaz.
+                var usedSmart = false
+                var smartFailed = false
+                var rc: Int? = null
+                val wantSmart = preciseCut && !video.isAudioOnly &&
+                    video.pixFmt == "yuv420p" && video.videoCodec.equals("H264", ignoreCase = true) &&
+                    ((keyframeSec != null && keyframeSec - startSec > 0.040) ||
+                        (keyframeSec == null && endSec - startSec <= 90.0))
+                if (wantSmart) {
+                    val canEncode = withContext(Dispatchers.IO) { hasLibx264() }
+                    if (canEncode) {
+                        MuxForegroundService.update(app, 0, "Hassas kesim yapılıyor…")
+                        val smartOk = smartCut(video, startSec, keyframeSec ?: endSec, endSec, tempOutput) { pct ->
+                            trimProgress = pct
+                            MuxForegroundService.update(app, pct, "Hassas kesim… %$pct")
+                        }
+                        if (smartOk) { usedSmart = true; rc = 0 }
+                        else { smartFailed = true; runCatching { tempOutput.delete() }; trimProgress = 0 }
+                    } else {
+                        smartFailed = true
+                    }
                 }
 
-                val durationSec = (endSec - snappedStartSec).coerceAtLeast(0.001)
-                val args = arrayOf(
-                    "-y",
-                    "-ss", String.format(Locale.US, "%.3f", snappedStartSec),
-                    "-i", video.cachePath,
-                    "-t", String.format(Locale.US, "%.3f", durationSec),
-                    "-map", if (video.isAudioOnly) "0:a" else "0",
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    tempOutput.absolutePath
-                )
-
-                val rc = runFfmpegAsync(args, (durationSec * 1000).toLong()) { pct ->
-                    trimProgress = pct
-                    MuxForegroundService.update(app, pct, "Kırpılıyor… %$pct")
+                if (!usedSmart) {
+                    val durationSec = (endSec - snappedStartSec).coerceAtLeast(0.001)
+                    val args = arrayOf(
+                        "-y",
+                        "-ss", String.format(Locale.US, "%.3f", snappedStartSec),
+                        "-i", video.cachePath,
+                        "-t", String.format(Locale.US, "%.3f", durationSec),
+                        "-map", if (video.isAudioOnly) "0:a" else "0",
+                        "-c", "copy",
+                        "-avoid_negative_ts", "make_zero",
+                        tempOutput.absolutePath
+                    )
+                    rc = runFfmpegAsync(args, (durationSec * 1000).toLong()) { pct ->
+                        trimProgress = pct
+                        MuxForegroundService.update(app, pct, "Kırpılıyor… %$pct")
+                    }
                 }
 
                 val ok = rc == 0 && tempOutput.exists() && tempOutput.length() > 0L
@@ -322,7 +368,12 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
                     trimProgress = 100
                     resultMessage = if (copyOk) {
-                        String.format(Locale.getDefault(), "Kırpma tamamlandı (%.1f MB).", finalSizeBytes / (1024f * 1024f))
+                        String.format(Locale.getDefault(), "Kırpma tamamlandı (%.1f MB).", finalSizeBytes / (1024f * 1024f)) +
+                            when {
+                                usedSmart -> " Başlangıç tam hassas."
+                                smartFailed -> " (Hassas kesim yapılamadı; başlangıç en yakın keyframe'e hizalandı.)"
+                                else -> ""
+                            }
                     } else {
                         "Dosya kaydedilemedi."
                     }
@@ -336,6 +387,94 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 MuxCancelBus.onCancelRequested = null
                 MuxForegroundService.stop(app, resultMessage, isSuccess)
             }
+        }
+    }
+
+    /** Paketteki ffmpeg'de libx264 encoder'ı var mı? (bir kez kontrol edilir) */
+    private fun hasLibx264(): Boolean {
+        if (!x264Checked) {
+            x264Available = try {
+                val out = FFmpegKit.execute("-hide_banner -encoders").output ?: ""
+                out.contains(" libx264 ")
+            } catch (_: Throwable) { false }
+            x264Checked = true
+        }
+        return x264Available
+    }
+
+    private fun fmt3(v: Double): String = String.format(Locale.US, "%.3f", v)
+
+    /**
+     * Hassas kesim: [startSec, keySec) arası videoyu libx264 ile yeniden kodlar, [keySec, endSec]
+     * arasını kayıpsız kopyalar, ikisini MPEG-TS üzerinden (SPS/PPS satır içi) birleştirir, sonra
+     * ses/altyazı/ek dosya/bölümleri kaynaktan kopyalayarak son dosyayı yazar.
+     * Herhangi bir adım başarısız olursa false döner (çağıran klasik keyframe kesimine düşer).
+     */
+    private suspend fun smartCut(
+        video: VideoFile,
+        startSec: Double,
+        keySec: Double,
+        endSec: Double,
+        tempOutput: File,
+        onProgress: (Int) -> Unit
+    ): Boolean {
+        val dir = workDir()
+        val stamp = System.currentTimeMillis()
+        val head = File(dir, "head_$stamp.ts")
+        val tail = File(dir, "tail_$stamp.ts")
+        try {
+            val keyFloor = Math.floor(keySec * 1000.0) / 1000.0
+            val keyCeil = Math.ceil(keySec * 1000.0) / 1000.0
+            val hasTail = keySec < endSec - 0.05
+            val headEnd = if (hasTail) keyFloor else endSec
+            val headDur = headEnd - startSec
+            if (headDur < 0.02) return false
+            val vMap = "0:${video.videoStreamIndex}"
+
+            // 1) Baş parça: yeniden kodla (kısa, en fazla bir GOP)
+            val headArgs = arrayOf(
+                "-y", "-ss", fmt3(startSec), "-i", video.cachePath, "-t", fmt3(headDur),
+                "-map", vMap, "-an", "-sn", "-dn",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p",
+                "-fps_mode", "passthrough",
+                "-f", "mpegts", head.absolutePath
+            )
+            val rc1 = runFfmpegAsync(headArgs, (headDur * 1000).toLong()) { p -> onProgress(p * 40 / 100) }
+            if (rc1 != 0 || !head.exists() || head.length() <= 0L) return false
+
+            // 2) Kuyruk: keyframe'den itibaren kayıpsız kopya (zaman damgası baş parçanın devamına oturtulur)
+            if (hasTail) {
+                val tailDur = endSec - keyCeil
+                val tailArgs = arrayOf(
+                    "-y", "-ss", fmt3(keyCeil), "-i", video.cachePath, "-t", fmt3(tailDur),
+                    "-map", vMap, "-an", "-sn", "-dn",
+                    "-c:v", "copy", "-bsf:v", "h264_mp4toannexb",
+                    "-output_ts_offset", fmt3(keyCeil - startSec),
+                    "-f", "mpegts", tail.absolutePath
+                )
+                val rc2 = runFfmpegAsync(tailArgs, (tailDur * 1000).toLong()) { p -> onProgress(40 + p * 20 / 100) }
+                if (rc2 != 0 || !tail.exists() || tail.length() <= 0L) return false
+            }
+
+            // 3) Birleştir + ses/altyazı/ekler/bölümler kaynaktan
+            val videoInput = if (hasTail) "concat:${head.absolutePath}|${tail.absolutePath}" else head.absolutePath
+            val total = endSec - startSec
+            val finalArgs = arrayOf(
+                "-y",
+                "-i", videoInput,
+                "-ss", fmt3(startSec), "-i", video.cachePath,
+                "-t", fmt3(total),
+                "-map", "0:v:0", "-map", "1", "-map", "-1:v",
+                "-map_metadata", "1", "-map_chapters", "1",
+                "-c", "copy", "-disposition:v:0", "default",
+                "-avoid_negative_ts", "make_zero",
+                tempOutput.absolutePath
+            )
+            val rc3 = runFfmpegAsync(finalArgs, (total * 1000).toLong()) { p -> onProgress(60 + p * 40 / 100) }
+            return rc3 == 0 && tempOutput.exists() && tempOutput.length() > 0L
+        } finally {
+            runCatching { head.delete() }
+            runCatching { tail.delete() }
         }
     }
 
@@ -354,14 +493,8 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             cont.invokeOnCancellation { runCatching { session.cancel() } }
         }
 
-    private fun copyUriToCache(uri: Uri, fileName: String): String? {
-        return try {
-            val f = File(workDir(), fileName)
-            val input = app.contentResolver.openInputStream(uri) ?: return null
-            input.use { i -> f.outputStream().use { o -> i.copyTo(o, 8 * 1024 * 1024) } }
-            if (f.exists() && f.length() > 0) f.absolutePath else null
-        } catch (_: Exception) { null }
-    }
+    private fun copyUriToCache(uri: Uri, fileName: String): String? =
+        InputAccess.acquire(app, uri, workDir(), fileName, needChildRead = false)
 
     private fun extensionFromName(n: String): String {
         val d = n.lastIndexOf('.')

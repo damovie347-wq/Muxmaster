@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.model.MergeItem
 import com.example.muxmaster.service.MuxCancelBus
@@ -88,7 +89,7 @@ class MergeViewModel(private val app: Application) : AndroidViewModel(app) {
         items.clear()
         resultMessage = null; isSuccess = false; mergeProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
-            paths.forEach { p -> if (p.isNotBlank()) runCatching { File(p).delete() } }
+            paths.forEach { p -> if (p.isNotBlank()) runCatching { InputAccess.release(p) } }
         }
     }
 
@@ -97,7 +98,7 @@ class MergeViewModel(private val app: Application) : AndroidViewModel(app) {
         val target = items.find { it.id == id } ?: return
         items.removeAll { it.id == id }
         viewModelScope.launch(Dispatchers.IO) {
-            if (target.cachePath.isNotBlank()) runCatching { File(target.cachePath).delete() }
+            if (target.cachePath.isNotBlank()) runCatching { InputAccess.release(target.cachePath) }
         }
     }
 
@@ -131,7 +132,7 @@ class MergeViewModel(private val app: Application) : AndroidViewModel(app) {
                     copyUriToCache(uri, "merge_input_${id}_${System.currentTimeMillis()}.$ext")
                 }
                 if (cacheFile != null) {
-                    val sizeMb = withContext(Dispatchers.IO) { File(cacheFile).length().toFloat() / (1024 * 1024) }
+                    val sizeMb = withContext(Dispatchers.IO) { InputAccess.length(cacheFile).toFloat() / (1024 * 1024) }
                     val probe = withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
                     val firstAudio = probe.audioStreams.firstOrNull()
 
@@ -314,14 +315,8 @@ class MergeViewModel(private val app: Application) : AndroidViewModel(app) {
             cont.invokeOnCancellation { runCatching { session.cancel() } }
         }
 
-    private fun copyUriToCache(uri: Uri, fileName: String): String? {
-        return try {
-            val f = File(workDir(), fileName)
-            val input = app.contentResolver.openInputStream(uri) ?: return null
-            input.use { i -> f.outputStream().use { o -> i.copyTo(o, 8 * 1024 * 1024) } }
-            if (f.exists() && f.length() > 0) f.absolutePath else null
-        } catch (_: Exception) { null }
-    }
+    private fun copyUriToCache(uri: Uri, fileName: String): String? =
+        InputAccess.acquire(app, uri, workDir(), fileName, needChildRead = false)
 
     private fun extensionFromName(n: String): String {
         val d = n.lastIndexOf('.')

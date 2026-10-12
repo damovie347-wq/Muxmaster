@@ -125,3 +125,12 @@ dikkatle yazıldı, ancak Android Studio'da ilk sync/build sırasında küçük 
 "Failed to find package 'tools'" hatasıyla derleme başlamadan çöküyor. `.github/workflows/build.yml`
 runner'daki hazır Android SDK'yı kullanır. `.github` gizli klasör olduğundan tarayıcıdan zip
 yüklerken atlanabilir; bu durumda GitHub'da `.github/workflows/build.yml` dosyasını elle düzenleyip içeriği yapıştır.
+
+## Güncelleme 3
+
+- Oynatıcı: tam ekranda ekrana dokununca kontroller gizlenir/görünür; tam ekrana girip çıkınca konum korunur;
+  ekran yönü serbest (dikey/yatay) + döndür düğmesi; ses ve altyazı parçası seçimi (müzik/altyazı simgeleri).
+- Hassas kesim: başlangıç–ilk keyframe arası yeniden kodlanır, kalanı kayıpsız kopyalanır (libx264 gerekir; yoksa eski yönteme düşer).
+- Klasör kuyruğu için kapat (✕) düğmesi.
+- Geri tuşu alt ekranlardan ana ekrana döner.
+- Girdi dosyaları artık önbelleğe KOPYALANMAZ (fd üzerinden okunur); olmazsa otomatik eski yönteme düşer. Açılışta önbellek temizlenir.

@@ -20,7 +20,8 @@ object TrackProber {
         val resolution: String,
         val durationMs: Long,
         val videoStreamIndex: Int = 0, // mkvmerge -d için: kaynaktaki gerçek video track id'si
-        val hasVideo: Boolean = true
+        val hasVideo: Boolean = true,
+        val pixFmt: String = ""
     )
 
     data class ExistingAudio(
@@ -71,6 +72,7 @@ object TrackProber {
         var durationMs = 0L
         var videoStreamIndex = 0
         var hasVideo = false
+        var pixFmt = ""
 
         for (i in 0 until streams.length()) {
             val stream = streams.getJSONObject(i)
@@ -94,6 +96,7 @@ object TrackProber {
                         durationMs = (dur * 1000).toLong()
                         videoStreamIndex = index
                         hasVideo = true
+                        pixFmt = stream.optString("pix_fmt", "")
                     }
                 }
                 "audio" -> {
@@ -134,7 +137,7 @@ object TrackProber {
             durationMs = (dur * 1000).toLong()
         }
 
-        ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex, hasVideo)
+        ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex, hasVideo, pixFmt)
     }
 
     /**

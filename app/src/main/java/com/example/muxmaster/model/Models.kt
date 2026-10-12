@@ -80,7 +80,8 @@ data class VideoFile(
     val durationMs: Long = 0L,
     val fileSizeMb: Float = 0f,
     val videoStreamIndex: Int = 0, // mkvmerge -d için: kaynaktaki gerçek video track id'si
-    val isAudioOnly: Boolean = false // true ise dosyada video akışı yok (sadece ses)
+    val isAudioOnly: Boolean = false, // true ise dosyada video akışı yok (sadece ses)
+    val pixFmt: String = "" // ffprobe pix_fmt (örn. yuv420p); hassas kesim için 8-bit kontrolü
 )
 
 /**
