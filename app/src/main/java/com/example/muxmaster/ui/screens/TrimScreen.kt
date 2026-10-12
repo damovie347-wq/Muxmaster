@@ -59,6 +59,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -688,6 +693,10 @@ private fun TrimPlayer(
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var aspect by remember { mutableFloatStateOf(16f / 9f) }
+    var videoWpx by remember { mutableIntStateOf(0) }
+    var videoHpx by remember { mutableIntStateOf(0) }
+    var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
+    var speed by remember { mutableFloatStateOf(1f) }
     var fullscreen by remember { mutableStateOf(false) }
     var tracks by remember { mutableStateOf(Tracks.EMPTY) }
     var cueText by remember { mutableStateOf("") }
@@ -701,6 +710,8 @@ private fun TrimPlayer(
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
+                    videoWpx = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
+                    videoHpx = videoSize.height
                 }
             }
             override fun onTracksChanged(t: Tracks) { tracks = t }
@@ -744,6 +755,9 @@ private fun TrimPlayer(
             player.seekTo((endMs - 1500L).coerceAtLeast(startState.value))
         }
     }
+    // Oynatma hızı (0.25x – 5x)
+    LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
+
     // Kırpma başlayınca oynatmayı durdur
     LaunchedEffect(isTrimming) {
         if (isTrimming) player.pause()
@@ -812,12 +826,13 @@ private fun TrimPlayer(
                     Icon(Icons.Filled.MusicNote, null, tint = PurpleLight, modifier = Modifier.size(48.dp))
                 }
             } else if (!fullscreen) {
-                Box(modifier = Modifier.aspectRatio(aspect)) {
-                    AndroidView(
-                        factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    SubtitleOverlay(cueText, Modifier.align(Alignment.BottomCenter))
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val byWidth = maxWidth / aspect.coerceAtLeast(0.1f)
+                    val h = if (byWidth < 280.dp) byWidth else 280.dp
+                    Box(modifier = Modifier.fillMaxWidth().height(h)) {
+                        VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
+                        SubtitleOverlay(cueText, Modifier.align(Alignment.BottomCenter))
+                    }
                 }
             } else {
                 Box(Modifier.fillMaxWidth().height(120.dp))
@@ -832,6 +847,11 @@ private fun TrimPlayer(
             onTogglePlay = togglePlay,
             onSeekBy = seekBy,
             onSeekTo = seekTo,
+            speed = speed,
+            onSpeedChange = { speed = it },
+            scaleMode = scaleMode,
+            onScaleChange = { scaleMode = it },
+            showScale = !video.isAudioOnly,
             modifier = Modifier.padding(horizontal = 12.dp),
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -864,6 +884,12 @@ private fun TrimPlayer(
             tracks = tracks,
             cueText = cueText,
             aspect = aspect,
+            videoWpx = videoWpx,
+            videoHpx = videoHpx,
+            scaleMode = scaleMode,
+            onScaleChange = { scaleMode = it },
+            speed = speed,
+            onSpeedChange = { speed = it },
             isPlaying = isPlaying,
             positionMs = positionMs,
             startMs = startMs,
@@ -885,6 +911,13 @@ private fun PlayerControls(
     onTogglePlay: () -> Unit,
     onSeekBy: (Long) -> Unit,
     onSeekTo: (Long) -> Unit,
+    speed: Float = 1f,
+    onSpeedChange: (Float) -> Unit = {},
+    scaleMode: ScaleMode = ScaleMode.FIT,
+    onScaleChange: (ScaleMode) -> Unit = {},
+    showScale: Boolean = true,
+    onMenuOpen: (Boolean) -> Unit = {},
+    textColor: Color = TextPrimary,
     modifier: Modifier = Modifier,
     trailing: @Composable () -> Unit = {}
 ) {
@@ -933,6 +966,150 @@ private fun PlayerControls(
             }
             Box(modifier = Modifier.align(Alignment.CenterEnd)) { trailing() }
         }
+        // Ölçekleme + oynatma hızı
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(28.dp, Alignment.CenterHorizontally),
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 2.dp)
+        ) {
+            if (showScale) ScaleButton(scaleMode, onScaleChange, onMenuOpen, textColor)
+            SpeedButton(speed, onSpeedChange, onMenuOpen, textColor)
+        }
+    }
+}
+
+/** Video ölçekleme modları (oynatıcıdaki ekran sığdırma düğmesi). */
+enum class ScaleMode(val label: String) {
+    FIT("En uygun"),
+    CROP("Klibi genişlet (kırp)"),
+    STRETCH("Ekrana yay"),
+    ORIGINAL("Orijinal boyut (%100)")
+}
+
+private val SPEED_PRESETS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f, 5f)
+
+private fun speedLabel(v: Float): String {
+    val r = Math.round(v * 100f) / 100f
+    val t = if (r == r.toInt().toFloat()) r.toInt().toString() else r.toString().trimEnd('0').trimEnd('.')
+    return "${t}X"
+}
+
+@Composable
+private fun VideoSurface(
+    player: ExoPlayer,
+    aspect: Float,
+    videoWpx: Int,
+    videoHpx: Int,
+    mode: ScaleMode,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
+        val cw = maxWidth
+        val ch = maxHeight
+        val a = aspect.coerceAtLeast(0.1f)
+        val wider = (cw / ch) > a
+        val size: Pair<Dp, Dp> = when (mode) {
+            ScaleMode.FIT -> if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
+            ScaleMode.CROP -> if (wider) Pair(cw, cw / a) else Pair(ch * a, ch)
+            ScaleMode.STRETCH -> Pair(cw, ch)
+            ScaleMode.ORIGINAL -> if (videoWpx > 0 && videoHpx > 0) {
+                with(density) { Pair(videoWpx.toDp(), videoHpx.toDp()) }
+            } else if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
+        }
+        AndroidView(
+            factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
+            modifier = Modifier.requiredSize(size.first, size.second)
+        )
+    }
+}
+
+@Composable
+private fun ScaleButton(
+    mode: ScaleMode,
+    onChange: (ScaleMode) -> Unit,
+    onMenuOpen: (Boolean) -> Unit,
+    tint: Color
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true; onMenuOpen(true) }, modifier = Modifier.size(40.dp)) {
+            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(26.dp))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false; onMenuOpen(false) }) {
+            Text(
+                "Ölçekleme", fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+            ScaleMode.values().forEach { m ->
+                DropdownMenuItem(
+                    text = { Text(m.label) },
+                    leadingIcon = {
+                        if (m == mode) Icon(Icons.Filled.Check, null, modifier = Modifier.size(20.dp))
+                        else Spacer(Modifier.size(20.dp))
+                    },
+                    onClick = { onChange(m); open = false; onMenuOpen(false) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SpeedButton(
+    speed: Float,
+    onChange: (Float) -> Unit,
+    onMenuOpen: (Boolean) -> Unit,
+    tint: Color
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .clickable { open = true; onMenuOpen(true) },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(speedLabel(speed), color = tint, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false; onMenuOpen(false) }) {
+            Column(modifier = Modifier.width(260.dp).padding(horizontal = 12.dp, vertical = 4.dp)) {
+                Text(
+                    "Oynatma hızı: ${speedLabel(speed)}", fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = { onChange(((speed - 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
+                        modifier = Modifier.size(36.dp)
+                    ) { Icon(Icons.Filled.Remove, "Yavaşlat") }
+                    Slider(
+                        value = speed,
+                        onValueChange = { v -> onChange((Math.round(v * 20f) / 20f).coerceIn(0.25f, 5f)) },
+                        valueRange = 0.25f..5f,
+                        modifier = Modifier.weight(1f),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = SurfaceHigh
+                        )
+                    )
+                    IconButton(
+                        onClick = { onChange(((speed + 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
+                        modifier = Modifier.size(36.dp)
+                    ) { Icon(Icons.Filled.Add, "Hızlandır") }
+                }
+            }
+            SPEED_PRESETS.forEach { v ->
+                DropdownMenuItem(
+                    text = { Text(speedLabel(v)) },
+                    leadingIcon = {
+                        if (kotlin.math.abs(v - speed) < 0.001f) Icon(Icons.Filled.Check, null, modifier = Modifier.size(20.dp))
+                        else Spacer(Modifier.size(20.dp))
+                    },
+                    onClick = { onChange(v); open = false; onMenuOpen(false) }
+                )
+            }
+        }
     }
 }
 
@@ -942,6 +1119,12 @@ private fun FullscreenPlayerDialog(
     tracks: Tracks,
     cueText: String,
     aspect: Float,
+    videoWpx: Int,
+    videoHpx: Int,
+    scaleMode: ScaleMode,
+    onScaleChange: (ScaleMode) -> Unit,
+    speed: Float,
+    onSpeedChange: (Float) -> Unit,
     isPlaying: Boolean,
     positionMs: Long,
     startMs: Long,
@@ -988,10 +1171,7 @@ private fun FullscreenPlayerDialog(
         }
 
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(
-                factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
-                modifier = Modifier.align(Alignment.Center).aspectRatio(aspect)
-            )
+            VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
 
             // Dokunma katmanı: ekrana tıklayınca kontroller gizlenir / görünür
             Box(
@@ -1005,7 +1185,7 @@ private fun FullscreenPlayerDialog(
 
             SubtitleOverlay(
                 cueText,
-                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 110.dp else 24.dp)
+                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 160.dp else 24.dp)
             )
 
             if (controlsVisible) {
@@ -1030,6 +1210,12 @@ private fun FullscreenPlayerDialog(
                         onTogglePlay = { interaction++; onTogglePlay() },
                         onSeekBy = { interaction++; onSeekBy(it) },
                         onSeekTo = { interaction++; onSeekTo(it) },
+                        speed = speed,
+                        onSpeedChange = { interaction++; onSpeedChange(it) },
+                        scaleMode = scaleMode,
+                        onScaleChange = { interaction++; onScaleChange(it) },
+                        onMenuOpen = { menuOpen = it },
+                        textColor = Color.White,
                         trailing = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 TrackMenuButtons(player, tracks, Color.White) { menuOpen = it }
