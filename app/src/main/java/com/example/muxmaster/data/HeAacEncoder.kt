@@ -47,7 +47,7 @@ object HeAacEncoder {
             val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channels)
             format.setInteger(MediaFormat.KEY_AAC_PROFILE, profile)
             format.setInteger(MediaFormat.KEY_BIT_RATE, bitrateKbps * 1000)
-            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
+            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 256 * 1024)
 
             val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
             codec = c
@@ -62,64 +62,87 @@ object HeAacEncoder {
             val info = MediaCodec.BufferInfo()
             val totalBytes = pcmFile.length().coerceAtLeast(1L)
             val bytesPerFrame = channels * 2
-            val chunk = ByteArray(16 * 1024)
+            // HIZ DÜZELTMESİ: Eski döngü her turda en fazla 1 giriş + 1 çıkış tamponu işliyor ve
+            // her dequeue çağrısında 10 ms bekliyordu -> çıkış kuyruğu tıkanıyor, her AAC karesi
+            // için ~10-20 ms boşa gidiyordu (Opus 3-5 sn iken HE-AAC 20-30 sn). Artık:
+            //  * hazır olan TÜM giriş tamponları beklemeden (timeout 0) doldurulur,
+            //  * hazır olan TÜM çıkış tamponları beklemeden boşaltılır,
+            //  * yalnızca hiçbir ilerleme yoksa kısa (2 ms) beklenir.
+            val chunk = ByteArray(256 * 1024)
             var readBytes = 0L
-            var presentationUs = 0L
+            var totalFrames = 0L
             var inputDone = false
             var outputDone = false
             var lastPct = -1
 
-            FileInputStream(pcmFile).use { stream ->
+            java.io.BufferedInputStream(FileInputStream(pcmFile), 512 * 1024).use { stream ->
                 while (!outputDone) {
                     if (isCancelled()) return false
+                    var progressed = false
 
-                    if (!inputDone) {
-                        val inIdx = c.dequeueInputBuffer(10_000L)
-                        if (inIdx >= 0) {
-                            val inBuf = c.getInputBuffer(inIdx)
-                            if (inBuf == null) {
-                                c.queueInputBuffer(inIdx, 0, 0, presentationUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                inputDone = true
-                            } else {
-                                inBuf.clear()
-                                var want = minOf(inBuf.remaining(), chunk.size)
-                                want -= want % bytesPerFrame
-                                val n = if (want > 0) stream.read(chunk, 0, want) else -1
-                                if (n <= 0) {
-                                    c.queueInputBuffer(inIdx, 0, 0, presentationUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                    inputDone = true
-                                } else {
-                                    inBuf.put(chunk, 0, n)
-                                    c.queueInputBuffer(inIdx, 0, n, presentationUs, 0)
-                                    presentationUs += (n / bytesPerFrame).toLong() * 1_000_000L / sampleRate
-                                    readBytes += n
-                                    val pct = ((readBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
-                                    if (pct != lastPct) { lastPct = pct; onProgress(pct) }
-                                }
-                            }
+                    // 1) Girişleri doldur
+                    while (!inputDone) {
+                        val inIdx = c.dequeueInputBuffer(0L)
+                        if (inIdx < 0) break
+                        progressed = true
+                        val presentationUs = totalFrames * 1_000_000L / sampleRate
+                        val inBuf = c.getInputBuffer(inIdx)
+                        if (inBuf == null) {
+                            c.queueInputBuffer(inIdx, 0, 0, presentationUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                            break
+                        }
+                        inBuf.clear()
+                        var want = minOf(inBuf.remaining(), chunk.size)
+                        want -= want % bytesPerFrame
+                        var n = 0
+                        while (want > 0 && n < want) {
+                            val r = stream.read(chunk, n, want - n)
+                            if (r <= 0) break
+                            n += r
+                        }
+                        n -= n % bytesPerFrame
+                        if (n <= 0) {
+                            c.queueInputBuffer(inIdx, 0, 0, presentationUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            inBuf.put(chunk, 0, n)
+                            c.queueInputBuffer(inIdx, 0, n, presentationUs, 0)
+                            totalFrames += (n / bytesPerFrame).toLong()
+                            readBytes += n
+                            val pct = ((readBytes * 100L) / totalBytes).toInt().coerceIn(0, 100)
+                            if (pct != lastPct) { lastPct = pct; onProgress(pct) }
                         }
                     }
 
-                    val outIdx = c.dequeueOutputBuffer(info, 10_000L)
-                    if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        if (!muxerStarted) {
-                            trackIndex = m.addTrack(c.outputFormat)
-                            m.start()
-                            muxerStarted = true
+                    // 2) Çıkışları boşalt
+                    while (true) {
+                        val outIdx = c.dequeueOutputBuffer(info, if (progressed) 0L else 2_000L)
+                        if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) break
+                        progressed = true
+                        if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                            if (!muxerStarted) {
+                                trackIndex = m.addTrack(c.outputFormat)
+                                m.start()
+                                muxerStarted = true
+                            }
+                        } else if (outIdx >= 0) {
+                            val outBuf = c.getOutputBuffer(outIdx)
+                            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                info.size = 0
+                            }
+                            if (info.size > 0 && outBuf != null && muxerStarted) {
+                                outBuf.position(info.offset)
+                                outBuf.limit(info.offset + info.size)
+                                m.writeSampleData(trackIndex, outBuf, info)
+                                wroteAnySample = true
+                            }
+                            c.releaseOutputBuffer(outIdx, false)
+                            if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                outputDone = true
+                                break
+                            }
                         }
-                    } else if (outIdx >= 0) {
-                        val outBuf = c.getOutputBuffer(outIdx)
-                        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                            info.size = 0
-                        }
-                        if (info.size > 0 && outBuf != null && muxerStarted) {
-                            outBuf.position(info.offset)
-                            outBuf.limit(info.offset + info.size)
-                            m.writeSampleData(trackIndex, outBuf, info)
-                            wroteAnySample = true
-                        }
-                        c.releaseOutputBuffer(outIdx, false)
-                        if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) outputDone = true
                     }
                 }
             }

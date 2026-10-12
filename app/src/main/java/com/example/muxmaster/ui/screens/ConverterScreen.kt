@@ -28,6 +28,7 @@ import com.example.muxmaster.viewmodel.ConvertQueueItem
 import com.example.muxmaster.viewmodel.ConvertStatus
 import com.example.muxmaster.viewmodel.ConverterViewModel
 import com.example.muxmaster.viewmodel.OutputFormat
+import com.example.muxmaster.viewmodel.ChannelMode
 import com.example.muxmaster.ui.theme.*
 
 private val BITRATE_PRESETS = listOf(32, 64, 96, 128, 192, 256, 320)
@@ -193,6 +194,33 @@ fun ConverterScreen(
                 else -> stringResource(R.string.bitrate_too_high)
             }
             Text(brHint, color = if (parsedBr != null && parsedBr >= 6) TextSec else Red, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+
+            Spacer(Modifier.height(16.dp))
+
+            // ── KANAL (Otomatik / Mono / Stereo) ─────────────────────────────
+            SectionTitle("Kanal")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(
+                    ChannelMode.AUTO to "Otomatik",
+                    ChannelMode.MONO to stringResource(R.string.channel_mono),
+                    ChannelMode.STEREO to stringResource(R.string.channel_stereo)
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = viewModel.channelMode == mode,
+                        onClick = { viewModel.selectChannelMode(mode) },
+                        enabled = !viewModel.isConverting,
+                        label = { Text(label, fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                            containerColor = SurfaceHigh, labelColor = TextSec
+                        )
+                    )
+                }
+            }
+            if (viewModel.outputFormat == com.example.muxmaster.viewmodel.OutputFormat.HE_AAC_V2 && viewModel.channelMode == ChannelMode.MONO) {
+                Text("HE-AAC v2 yalnızca stereo destekler; Mono seçilince HE-AAC (v1) mono üretilir.", color = TextSec, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+            }
 
             Spacer(Modifier.height(20.dp))
 

@@ -57,6 +57,9 @@ data class ConvertQueueItem(
     val errorMessage: String? = null
 )
 
+/** Ses çıkışı kanal seçimi. */
+enum class ChannelMode { AUTO, MONO, STEREO }
+
 class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private val prefs = AppPreferences(app)
@@ -66,6 +69,9 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     var outputFormat by mutableStateOf(OutputFormat.OPUS)
         private set
     var bitrateKbpsText by mutableStateOf("128")
+        private set
+    /** Çıkış kanal düzeni: Otomatik / Mono / Stereo */
+    var channelMode by mutableStateOf(ChannelMode.AUTO)
         private set
     var outputFolderUri by mutableStateOf<Uri?>(null)
         private set
@@ -159,6 +165,8 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             old.forEach { runCatching { InputAccess.release(it.cachePath) } }
         }
     }
+
+    fun selectChannelMode(mode: ChannelMode) { channelMode = mode }
 
     fun updateBitrateText(value: String) { bitrateKbpsText = value.filter { it.isDigit() }.take(4) }
 
@@ -317,8 +325,13 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         tempOutput: File,
         onProgress: (Int) -> Unit
     ): Boolean {
-        val v2 = format == OutputFormat.HE_AAC_V2
-        val channels = if (v2) 2 else if (item.sourceChannels == 1) 1 else 2
+        // HE-AAC v2 (PS) yalnızca stereo içindir; kullanıcı Mono seçerse HE-AAC v1 mono yapılır.
+        val v2 = format == OutputFormat.HE_AAC_V2 && channelMode != ChannelMode.MONO
+        val channels = when (channelMode) {
+            ChannelMode.MONO -> 1
+            ChannelMode.STEREO -> 2
+            ChannelMode.AUTO -> if (v2) 2 else if (item.sourceChannels == 1) 1 else 2
+        }
         val sampleRate = 44100
         val lo = if (v2) 16 else if (channels == 1) 12 else 24
         val hi = if (v2) 64 else if (channels == 1) 64 else 128
@@ -371,6 +384,11 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             bitrate
         }
         val forceMono = effectiveBitrate < 48
+        val acValue: String? = when (channelMode) {
+            ChannelMode.MONO -> "1"
+            ChannelMode.STEREO -> "2"
+            ChannelMode.AUTO -> if (forceMono) "1" else null
+        }
         return buildList {
             add("-y")
             add("-analyzeduration"); add("50M")
@@ -380,7 +398,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             add("-vn"); add("-map"); add("0:a:0")
             add("-af"); add("aresample=async=1:first_pts=0,afade=t=in:st=0:d=0.01")
             add("-ar"); add("48000")
-            if (forceMono) { add("-ac"); add("1") }
+            if (acValue != null) { add("-ac"); add(acValue) }
             when (format) {
                 OutputFormat.OPUS -> {
                     add("-c:a"); add("libopus")

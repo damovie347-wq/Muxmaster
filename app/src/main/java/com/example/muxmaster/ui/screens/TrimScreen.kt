@@ -32,6 +32,8 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.view.TextureView
+import androidx.compose.ui.text.style.TextAlign
+import android.view.WindowManager
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -584,7 +586,9 @@ private fun TrackMenuButtons(
     val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
     var audioMenu by remember { mutableStateOf(false) }
     var textMenu by remember { mutableStateOf(false) }
-    LaunchedEffect(audioMenu, textMenu) { onMenuState(audioMenu || textMenu) }
+    var sizePanel by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
+    LaunchedEffect(audioMenu, textMenu, sizePanel) { onMenuState(audioMenu || textMenu || sizePanel) }
 
     val params = player.trackSelectionParameters
     val textOff = params.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
@@ -613,7 +617,7 @@ private fun TrackMenuButtons(
             IconButton(onClick = { audioMenu = true }, modifier = Modifier.size(38.dp)) {
                 Icon(Icons.Filled.MusicNote, "Ses", tint = tint, modifier = Modifier.size(24.dp))
             }
-            DropdownMenu(expanded = audioMenu, onDismissRequest = { audioMenu = false }) {
+            DropdownMenu(expanded = audioMenu, onDismissRequest = { audioMenu = false }, properties = NonFocusPopup) {
                 DropdownMenuItem(
                     text = { Text("Otomatik") },
                     leadingIcon = { TickIcon(audioAuto) },
@@ -636,13 +640,61 @@ private fun TrackMenuButtons(
     }
     if (textGroups.isNotEmpty()) {
         Box {
-            IconButton(onClick = { textMenu = true }, modifier = Modifier.size(38.dp)) {
+            // DOKUN -> altyazı parçası seçimi, BASILI TUT -> altyazı boyutu paneli
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .combinedClickable(
+                        onClick = { textMenu = true },
+                        onLongClick = { textMenu = false; sizePanel = true }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
                 Icon(
                     if (textOff) Icons.Filled.SubtitlesOff else Icons.Filled.Subtitles,
-                    "Altyazı", tint = tint, modifier = Modifier.size(24.dp)
+                    "Altyazı (basılı tut: boyut)", tint = tint, modifier = Modifier.size(24.dp)
                 )
             }
-            DropdownMenu(expanded = textMenu, onDismissRequest = { textMenu = false }) {
+            if (sizePanel) {
+                val gap = with(LocalDensity.current) { 10.dp.roundToPx() }
+                Popup(
+                    popupPositionProvider = remember(gap) { AboveCenterPositionProvider(gap) },
+                    onDismissRequest = { sizePanel = false },
+                    properties = NonFocusPopup
+                ) {
+                    val cur = subtitleSizeState.floatValue
+                    Column(
+                        modifier = Modifier
+                            .width(300.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xF2141418))
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Text("Altyazı boyutu: ${cur.toInt()}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Slider(
+                            value = cur,
+                            onValueChange = { saveSubtitleSize(ctx, it) },
+                            valueRange = SUBTITLE_MIN_SP..SUBTITLE_MAX_SP,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color.White, activeTrackColor = Color.White,
+                                inactiveTrackColor = Color(0xFF3A3A42)
+                            )
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                        ) {
+                            SUBTITLE_PRESETS.forEach { (label, v) ->
+                                OptionChip(label, kotlin.math.abs(cur - v) < 0.5f, Color.White, Color(0xFF2A2A31)) {
+                                    saveSubtitleSize(ctx, v)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            DropdownMenu(expanded = textMenu, onDismissRequest = { textMenu = false }, properties = NonFocusPopup) {
                 DropdownMenuItem(
                     text = { Text("Kapalı") },
                     leadingIcon = { TickIcon(textOff) },
@@ -674,13 +726,38 @@ private fun TrackMenuButtons(
     }
 }
 
+// ── Altyazı boyutu (kalıcı, tüm oynatıcılarda ortak) ─────────────────────────
+private const val SUBTITLE_MIN_SP = 12f
+private const val SUBTITLE_MAX_SP = 44f
+private val SUBTITLE_PRESETS = listOf("Küçük" to 16f, "Normal" to 20f, "Büyük" to 26f, "Çok büyük" to 32f, "Dev" to 40f)
+private val subtitleSizeState = mutableFloatStateOf(20f)
+private var subtitleSizeLoaded = false
+
+private fun loadSubtitleSize(ctx: Context) {
+    if (subtitleSizeLoaded) return
+    subtitleSizeLoaded = true
+    subtitleSizeState.floatValue = ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
+        .getFloat("subtitle_sp", 20f).coerceIn(SUBTITLE_MIN_SP, SUBTITLE_MAX_SP)
+}
+
+private fun saveSubtitleSize(ctx: Context, v: Float) {
+    val c = v.coerceIn(SUBTITLE_MIN_SP, SUBTITLE_MAX_SP)
+    subtitleSizeState.floatValue = c
+    ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE).edit().putFloat("subtitle_sp", c).apply()
+}
+
 @Composable
 private fun SubtitleOverlay(text: String, modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { loadSubtitleSize(ctx) }
     if (text.isBlank()) return
+    val sp = subtitleSizeState.floatValue
     Text(
         text,
         color = Color.White,
-        fontSize = 14.sp,
+        fontSize = sp.sp,
+        lineHeight = (sp * 1.2f).sp,
+        textAlign = TextAlign.Center,
         modifier = modifier
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
@@ -713,6 +790,12 @@ private fun TrimPlayer(
     var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
     var speed by remember { mutableFloatStateOf(1f) }
     var fullscreen by remember { mutableStateOf(false) }
+    // İnline önizlemede de oynatma sürerken ekran kapanmasın
+    val hostView = LocalView.current
+    DisposableEffect(hostView, isPlaying) {
+        hostView.keepScreenOn = isPlaying
+        onDispose { hostView.keepScreenOn = false }
+    }
     var tracks by remember { mutableStateOf(Tracks.EMPTY) }
     var cueText by remember { mutableStateOf("") }
 
@@ -959,48 +1042,47 @@ private fun PlayerControls(
             trailing()
         }
         Spacer(Modifier.height(4.dp))
-        // Ana kontroller: ortada, aralarında geniş boşluk ve BÜYÜK dokunma alanları
+        // Ana kontroller: sade ikonlar (arka plan yok), küçük görünüm ama GENİŞ dokunma
+        // alanı (56 dp) ve düğmeler arasında geniş yatay boşluk -> yanlış basma olmaz.
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
                 modifier = Modifier
-                    .widthIn(max = 400.dp)
                     .fillMaxWidth()
-                    .padding(bottom = 4.dp)
+                    .padding(bottom = 2.dp)
             ) {
                 if (showScale) ScaleButton(scaleMode, onScaleChange, onMenuOpen, textColor)
                 Box(
                     modifier = Modifier
-                        .size(52.dp)
+                        .size(56.dp)
                         .clip(CircleShape)
                         .clickable { onSeekBy(-10_000L) },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = textColor, modifier = Modifier.size(30.dp))
+                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = textColor, modifier = Modifier.size(26.dp))
                 }
                 Box(
                     modifier = Modifier
-                        .size(58.dp)
+                        .size(60.dp)
                         .clip(CircleShape)
-                        .background(Purple)
                         .clickable(onClick = onTogglePlay),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         if (isPlaying) "Duraklat" else "Oynat",
-                        tint = Color.White, modifier = Modifier.size(34.dp)
+                        tint = textColor, modifier = Modifier.size(38.dp)
                     )
                 }
                 Box(
                     modifier = Modifier
-                        .size(52.dp)
+                        .size(56.dp)
                         .clip(CircleShape)
                         .clickable { onSeekBy(10_000L) },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = textColor, modifier = Modifier.size(30.dp))
+                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = textColor, modifier = Modifier.size(26.dp))
                 }
                 SpeedButton(
                     speed = speed,
@@ -1176,7 +1258,7 @@ private fun ScaleButton(
     Box {
         Box(
             modifier = Modifier
-                .size(52.dp)
+                .size(56.dp)
                 .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
@@ -1189,7 +1271,7 @@ private fun ScaleButton(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(28.dp))
+            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(24.dp))
         }
         TransientLabel(hint) { hint = null }
         if (open) {
@@ -1248,7 +1330,7 @@ private fun SpeedButton(
     Box {
         Box(
             modifier = Modifier
-                .height(52.dp)
+                .height(56.dp)
                 .widthIn(min = 56.dp)
                 .clip(CircleShape)
                 .combinedClickable(
@@ -1391,7 +1473,10 @@ private fun FullscreenPlayerDialog(
     onSeekBy: (Long) -> Unit,
     onSeekTo: (Long) -> Unit,
     onExit: () -> Unit,
-    overlayText: String? = null
+    overlayText: String? = null,
+    /** Bağımsız oynatıcı: sağ alttaki düğme uygulamadan ÇIKMAZ, tam ekran <-> pencere geçişi yapar. */
+    immersive: Boolean = true,
+    onToggleImmersive: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var controlsVisible by remember { mutableStateOf(true) }
@@ -1418,18 +1503,45 @@ private fun FullscreenPlayerDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
         val view = LocalView.current
-        DisposableEffect(view) {
+        // Sistem çubukları: menü/panel açılınca ya da kontroller değişince TEKRAR gizlenir.
+        // (Eskiden açılan menü odağı çalıp çubukları geri getiriyor, alt kontroller aşağı gömülüyordu.)
+        LaunchedEffect(view, immersive, menuOpen, controlsVisible) {
             val window = (view.parent as? DialogWindowProvider)?.window
             if (window != null) {
                 WindowCompat.setDecorFitsSystemWindows(window, false)
                 val controller = WindowInsetsControllerCompat(window, view)
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                controller.hide(WindowInsetsCompat.Type.systemBars())
+                if (immersive) controller.hide(WindowInsetsCompat.Type.systemBars())
+                else controller.show(WindowInsetsCompat.Type.systemBars())
             }
-            onDispose { }
+        }
+        // EKRAN KAPANMA DÜZELTMESİ: oynatma sürerken ekran kararmaz / kapanmaz.
+        DisposableEffect(view, isPlaying) {
+            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+            val activityWindow = context.findActivity()?.window
+            val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            if (isPlaying) {
+                view.keepScreenOn = true
+                dialogWindow?.addFlags(flag)
+                activityWindow?.addFlags(flag)
+            } else {
+                view.keepScreenOn = false
+                dialogWindow?.clearFlags(flag)
+                activityWindow?.clearFlags(flag)
+            }
+            onDispose {
+                view.keepScreenOn = false
+                dialogWindow?.clearFlags(flag)
+                activityWindow?.clearFlags(flag)
+            }
         }
 
-        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .then(if (immersive) Modifier else Modifier.windowInsetsPadding(WindowInsets.systemBars))
+        ) {
             VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
 
             // Dokunma katmanı: ekrana tıklayınca kontroller gizlenir / görünür
@@ -1472,6 +1584,7 @@ private fun FullscreenPlayerDialog(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .background(Color.Black.copy(alpha = 0.55f))
+                        .windowInsetsPadding(WindowInsets.navigationBars)
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
                     PlayerControls(
@@ -1503,8 +1616,16 @@ private fun FullscreenPlayerDialog(
                                 }, modifier = Modifier.size(38.dp)) {
                                     Icon(Icons.Filled.ScreenRotation, "Döndür", tint = Color.White, modifier = Modifier.size(24.dp))
                                 }
-                                IconButton(onClick = onExit, modifier = Modifier.size(38.dp)) {
-                                    Icon(Icons.Filled.FullscreenExit, "Tam ekrandan çık", tint = Color.White, modifier = Modifier.size(26.dp))
+                                IconButton(onClick = {
+                                    interaction++
+                                    if (onToggleImmersive != null) onToggleImmersive() else onExit()
+                                }, modifier = Modifier.size(44.dp)) {
+                                    val exitIcon = onToggleImmersive == null || immersive
+                                    Icon(
+                                        if (exitIcon) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                                        if (exitIcon) "Tam ekrandan çık" else "Tam ekran",
+                                        tint = Color.White, modifier = Modifier.size(26.dp)
+                                    )
                                 }
                             }
                         }
@@ -1535,6 +1656,7 @@ fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
     var cueText by remember { mutableStateOf("") }
     var buffering by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var immersive by remember { mutableStateOf(true) }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -1625,6 +1747,8 @@ fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
         onSeekBy = { delta -> seekTo(player.currentPosition + delta) },
         onSeekTo = seekTo,
         onExit = onExit,
-        overlayText = errorText ?: if (buffering) "Yükleniyor…" else null
+        overlayText = errorText ?: if (buffering) "Yükleniyor…" else null,
+        immersive = immersive,
+        onToggleImmersive = { immersive = !immersive }
     )
 }
