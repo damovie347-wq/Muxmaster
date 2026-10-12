@@ -104,6 +104,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import android.os.Build
+import android.view.View
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.components.VideoCard
 import com.example.muxmaster.ui.theme.*
@@ -618,6 +622,7 @@ private fun TrackMenuButtons(
                 Icon(Icons.Filled.MusicNote, "Ses", tint = tint, modifier = Modifier.size(24.dp))
             }
             DropdownMenu(expanded = audioMenu, onDismissRequest = { audioMenu = false }, properties = NonFocusPopup) {
+                KeepSystemBarsHidden()
                 DropdownMenuItem(
                     text = { Text("Otomatik") },
                     leadingIcon = { TickIcon(audioAuto) },
@@ -663,6 +668,7 @@ private fun TrackMenuButtons(
                     onDismissRequest = { sizePanel = false },
                     properties = NonFocusPopup
                 ) {
+                    KeepSystemBarsHidden()
                     val cur = subtitleSizeState.floatValue
                     Column(
                         modifier = Modifier
@@ -695,6 +701,7 @@ private fun TrackMenuButtons(
                 }
             }
             DropdownMenu(expanded = textMenu, onDismissRequest = { textMenu = false }, properties = NonFocusPopup) {
+                KeepSystemBarsHidden()
                 DropdownMenuItem(
                     text = { Text("Kapalı") },
                     leadingIcon = { TickIcon(textOff) },
@@ -781,7 +788,7 @@ private fun TrimPlayer(
     isTrimming: Boolean
 ) {
     val context = LocalContext.current
-    val player = remember { ExoPlayer.Builder(context).build() }
+    val player = remember { buildFastPlayer(context) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var aspect by remember { mutableFloatStateOf(16f / 9f) }
@@ -1125,6 +1132,65 @@ private class AboveCenterPositionProvider(private val gapPx: Int) : PopupPositio
 /** Odak ÇALMAYAN popup: tam ekranda sistem çubuklarını açıp kontrolleri aşağı çökertmez. */
 private val NonFocusPopup = PopupProperties(focusable = false, dismissOnClickOutside = true, dismissOnBackPress = true)
 
+/** Verilen görünümün bağlı olduğu pencerede (dialog / popup) durum + gezinme çubuklarını gizler. */
+@Suppress("DEPRECATION")
+private fun hideSystemBarsOf(v: View) {
+    v.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
+        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+        or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        v.windowInsetsController?.let { c ->
+            c.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            c.hide(android.view.WindowInsets.Type.systemBars())
+        }
+    }
+}
+
+/**
+ * PİL GÖSTERGESİ DÜZELTMESİ: Menü / panel (ses, altyazı, hız, ölçek) ayrı bir pencere
+ * olarak açılır; bu pencere de çubukları gizlemezse sistem durum çubuğunu gösterir ve
+ * ekran kayar. Popup içeriğine konur, kendi penceresinde çubukları anında gizler.
+ */
+@Composable
+private fun KeepSystemBarsHidden() {
+    val v = LocalView.current
+    DisposableEffect(v) {
+        hideSystemBarsOf(v)
+        val r = Runnable { hideSystemBarsOf(v) }
+        v.post(r)
+        v.postDelayed(r, 120)
+        onDispose {
+            v.removeCallbacks(r)
+            v.rootView?.let { root -> root.post { hideSystemBarsOf(root) } }
+        }
+    }
+}
+
+/** Yerel dosyalarda hızlı açılış: oynatma için 2,5 sn yerine ~0,25 sn tampon yeterli. */
+private fun buildFastPlayer(context: Context): ExoPlayer {
+    val loadControl = DefaultLoadControl.Builder()
+        .setBufferDurationsMs(15_000, 50_000, 250, 1_000)
+        .setPrioritizeTimeOverSizeThresholds(true)
+        .build()
+    val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+    return ExoPlayer.Builder(context, renderers)
+        .setLoadControl(loadControl)
+        .build()
+}
+
+/** Diğer oynatıcılardaki gibi dairesel yükleniyor halkası. */
+@Composable
+private fun LoadingRing(modifier: Modifier = Modifier) {
+    CircularProgressIndicator(
+        modifier = modifier.size(40.dp),
+        color = Color(0xFF66C2B4),
+        strokeWidth = 3.dp
+    )
+}
+
 /** Popup dışına dokunup kapatınca aynı dokunuşla düğmenin tekrar açmasını engeller. */
 private var lastSpeedPopupDismissAt = 0L
 
@@ -1226,6 +1292,7 @@ private fun TransientLabel(text: String?, onDone: () -> Unit) {
         alignment = Alignment.TopCenter,
         offset = androidx.compose.ui.unit.IntOffset(0, -140)
     ) {
+        KeepSystemBarsHidden()
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
@@ -1280,6 +1347,7 @@ private fun ScaleButton(
                 onDismissRequest = close,
                 properties = NonFocusPopup
             ) {
+                KeepSystemBarsHidden()
                 Column(
                     modifier = Modifier
                         .width(menuWidth)
@@ -1353,6 +1421,7 @@ private fun SpeedButton(
                 onDismissRequest = close,
                 properties = NonFocusPopup
             ) {
+                KeepSystemBarsHidden()
                 Column(
                     modifier = Modifier
                         .width(124.dp)
@@ -1396,6 +1465,7 @@ private fun SpeedPanelPopup(
         onDismissRequest = onDismiss,
         properties = NonFocusPopup
     ) {
+        KeepSystemBarsHidden()
         Column(
             modifier = Modifier
                 .width(panelWidth)
@@ -1474,6 +1544,7 @@ private fun FullscreenPlayerDialog(
     onSeekTo: (Long) -> Unit,
     onExit: () -> Unit,
     overlayText: String? = null,
+    showLoading: Boolean = false,
     /** Bağımsız oynatıcı: sağ alttaki düğme uygulamadan ÇIKMAZ, tam ekran <-> pencere geçişi yapar. */
     immersive: Boolean = true,
     onToggleImmersive: (() -> Unit)? = null
@@ -1513,6 +1584,28 @@ private fun FullscreenPlayerDialog(
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 if (immersive) controller.hide(WindowInsetsCompat.Type.systemBars())
                 else controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+            if (immersive) {
+                hideSystemBarsOf(view)
+                context.findActivity()?.window?.let { aw ->
+                    WindowInsetsControllerCompat(aw, aw.decorView).apply {
+                        systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        hide(WindowInsetsCompat.Type.systemBars())
+                    }
+                }
+            }
+        }
+        // Çubuklar herhangi bir sebeple görünür olursa (menü açma/kapama) hemen tekrar gizle.
+        @OptIn(ExperimentalLayoutApi::class)
+        val barsVisible = WindowInsets.areSystemBarsVisible
+        LaunchedEffect(barsVisible, immersive) {
+            if (immersive && barsVisible) {
+                val window = (view.parent as? DialogWindowProvider)?.window
+                if (window != null) {
+                    WindowInsetsControllerCompat(window, view)
+                        .hide(WindowInsetsCompat.Type.systemBars())
+                }
+                hideSystemBarsOf(view)
             }
         }
         // EKRAN KAPANMA DÜZELTMESİ: oynatma sürerken ekran kararmaz / kapanmaz.
@@ -1559,6 +1652,9 @@ private fun FullscreenPlayerDialog(
                 Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 190.dp else 24.dp)
             )
 
+            if (showLoading && overlayText == null) {
+                LoadingRing(Modifier.align(Alignment.Center))
+            }
             if (overlayText != null) {
                 Text(
                     overlayText,
@@ -1584,7 +1680,7 @@ private fun FullscreenPlayerDialog(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .background(Color.Black.copy(alpha = 0.55f))
-                        .windowInsetsPadding(WindowInsets.navigationBars)
+                        .then(if (immersive) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
                     PlayerControls(
@@ -1620,7 +1716,7 @@ private fun FullscreenPlayerDialog(
                                     interaction++
                                     if (onToggleImmersive != null) onToggleImmersive() else onExit()
                                 }, modifier = Modifier.size(44.dp)) {
-                                    val exitIcon = onToggleImmersive == null || immersive
+                                    val exitIcon = onToggleImmersive == null || scaleMode == ScaleMode.CROP
                                     Icon(
                                         if (exitIcon) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
                                         if (exitIcon) "Tam ekrandan çık" else "Tam ekran",
@@ -1643,7 +1739,7 @@ private fun FullscreenPlayerDialog(
 @Composable
 fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
     val context = LocalContext.current
-    val player = remember { ExoPlayer.Builder(context).build() }
+    val player = remember { buildFastPlayer(context) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
@@ -1656,7 +1752,11 @@ fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
     var cueText by remember { mutableStateOf("") }
     var buffering by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf<String?>(null) }
-    var immersive by remember { mutableStateOf(true) }
+    // Kısa tamponlamalarda halka hiç görünmez; yalnızca 400 ms'den uzun sürerse çıkar.
+    var showRing by remember { mutableStateOf(false) }
+    LaunchedEffect(buffering) {
+        if (buffering) { delay(400); showRing = true } else showRing = false
+    }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -1747,8 +1847,10 @@ fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
         onSeekBy = { delta -> seekTo(player.currentPosition + delta) },
         onSeekTo = seekTo,
         onExit = onExit,
-        overlayText = errorText ?: if (buffering) "Yükleniyor…" else null,
-        immersive = immersive,
-        onToggleImmersive = { immersive = !immersive }
+        overlayText = errorText,
+        showLoading = showRing,
+        immersive = true,
+        // Küçült/büyüt: durum çubuğunu GÖSTERMEDEN video sığdır <-> ekranı doldur
+        onToggleImmersive = { scaleMode = if (scaleMode == ScaleMode.CROP) ScaleMode.FIT else ScaleMode.CROP }
     )
 }
