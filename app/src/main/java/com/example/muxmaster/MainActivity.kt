@@ -66,6 +66,9 @@ class MainActivity : AppCompatActivity() {
     private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) muxViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
     }
+    private val pickMuxFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) muxViewModel.onFolderSelected(uri)
+    }
     private val pickMuxAudioLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) muxViewModel.addAudioFile(uri, queryDisplayName(uri) ?: "audio_track")
     }
@@ -208,6 +211,7 @@ class MainActivity : AppCompatActivity() {
                     0 -> MuxScreen(
                         viewModel = muxViewModel,
                         onPickVideo = { pickVideoLauncher.launch(arrayOf("video/*", "*/*")) },
+                        onPickFolder = { pickMuxFolderLauncher.launch(null) },
                         onPickAudio = { pickMuxAudioLauncher.launch(arrayOf("audio/*", "video/*", "*/*")) },
                         onPickSubtitle = { pickSubtitleLauncher.launch(arrayOf("text/*", "application/x-subrip", "*/*")) },
                         onPickOutputFolder = { pickMuxOutputFolderLauncher.launch(null) },

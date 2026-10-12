@@ -22,6 +22,8 @@ import android.view.TextureView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -932,17 +934,19 @@ private fun PlayerControls(
                 )
             )
         }
-        Box(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                formatClock(positionMs.coerceIn(startMs, endMs)),
-                color = TextSec, fontSize = 11.sp,
-                modifier = Modifier.align(Alignment.CenterStart)
-            )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                Text(
+                    formatClock(positionMs.coerceIn(startMs, endMs)),
+                    color = TextSec, fontSize = 11.sp, maxLines = 1
+                )
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.align(Alignment.Center)
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
+                // Ölçekleme + oynatma hızı artık oynat/ileri/geri ile AYNI satırda
+                if (showScale) ScaleButton(scaleMode, onScaleChange, onMenuOpen, textColor)
                 IconButton(onClick = { onSeekBy(-10_000L) }, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Filled.Replay10, "10 sn geri", tint = TextPrimary, modifier = Modifier.size(28.dp))
                 }
@@ -963,17 +967,9 @@ private fun PlayerControls(
                 IconButton(onClick = { onSeekBy(10_000L) }, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Filled.Forward10, "10 sn ileri", tint = TextPrimary, modifier = Modifier.size(28.dp))
                 }
+                SpeedButton(speed, onSpeedChange, onMenuOpen, textColor)
             }
-            Box(modifier = Modifier.align(Alignment.CenterEnd)) { trailing() }
-        }
-        // Ölçekleme + oynatma hızı
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(28.dp, Alignment.CenterHorizontally),
-            modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 2.dp)
-        ) {
-            if (showScale) ScaleButton(scaleMode, onScaleChange, onMenuOpen, textColor)
-            SpeedButton(speed, onSpeedChange, onMenuOpen, textColor)
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { trailing() }
         }
     }
 }
@@ -1024,6 +1020,55 @@ private fun VideoSurface(
     }
 }
 
+/** Tek satırlık seçenek "çipi" (ölçekleme / hız menülerinde yan yana dizilir). */
+@Composable
+private fun OptionChip(text: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) Purple else SurfaceHigh)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = if (selected) Color.White else TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            maxLines = 1
+        )
+    }
+}
+
+/** Kısa süreli bilgi etiketi (dokununca değişen mod/hız gösterilir, soru sorulmaz). */
+@Composable
+private fun TransientLabel(text: String?, onDone: () -> Unit) {
+    if (text == null) return
+    LaunchedEffect(text) {
+        delay(1200)
+        onDone()
+    }
+    androidx.compose.ui.window.Popup(
+        alignment = Alignment.TopCenter,
+        offset = androidx.compose.ui.unit.IntOffset(0, -140)
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(alpha = 0.75f))
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Text(text, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        }
+    }
+}
+
+/**
+ * Ölçekleme düğmesi:
+ *  - DOKUN  -> soru sormadan sıradaki moda geçer (En uygun -> Kırp -> Yay -> Orijinal -> ...)
+ *  - BASILI TUT -> tüm seçenekler TEK SATIRDA yan yana açılır.
+ */
 @Composable
 private fun ScaleButton(
     mode: ScaleMode,
@@ -1032,29 +1077,58 @@ private fun ScaleButton(
     tint: Color
 ) {
     var open by remember { mutableStateOf(false) }
+    var hint by remember { mutableStateOf<String?>(null) }
+    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    val menuWidth = (screenW - 40).coerceIn(240, 600).dp
     Box {
-        IconButton(onClick = { open = true; onMenuOpen(true) }, modifier = Modifier.size(40.dp)) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .combinedClickable(
+                    onClick = {
+                        val all = ScaleMode.values()
+                        val next = all[(mode.ordinal + 1) % all.size]
+                        onChange(next)
+                        hint = next.label
+                    },
+                    onLongClick = { open = true; onMenuOpen(true) }
+                ),
+            contentAlignment = Alignment.Center
+        ) {
             Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(26.dp))
         }
+        TransientLabel(hint) { hint = null }
         DropdownMenu(expanded = open, onDismissRequest = { open = false; onMenuOpen(false) }) {
-            Text(
-                "Ölçekleme", fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-            )
-            ScaleMode.values().forEach { m ->
-                DropdownMenuItem(
-                    text = { Text(m.label) },
-                    leadingIcon = {
-                        if (m == mode) Icon(Icons.Filled.Check, null, modifier = Modifier.size(20.dp))
-                        else Spacer(Modifier.size(20.dp))
-                    },
-                    onClick = { onChange(m); open = false; onMenuOpen(false) }
+            Column(modifier = Modifier.width(menuWidth).padding(horizontal = 12.dp, vertical = 4.dp)) {
+                Text(
+                    "Ölçekleme", fontWeight = FontWeight.Bold, fontSize = 13.sp,
+                    modifier = Modifier.padding(bottom = 6.dp)
                 )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(bottom = 6.dp)
+                ) {
+                    ScaleMode.values().forEach { m ->
+                        OptionChip(m.label, m == mode) { onChange(m); open = false; onMenuOpen(false) }
+                    }
+                }
             }
         }
     }
 }
 
+/** Dokununca hızlı geçiş yapılan hızlar (basılı tutunca TÜM hızlar + ince ayar açılır). */
+private val SPEED_QUICK_CYCLE = listOf(1f, 1.25f, 1.5f, 2f, 0.5f, 0.75f)
+
+/**
+ * Hız düğmesi:
+ *  - DOKUN  -> soru sormadan sıradaki hıza geçer (1X -> 1.25X -> 1.5X -> 2X -> 0.5X -> 0.75X -> 1X)
+ *  - BASILI TUT -> ince ayar çubuğu + TÜM hazır hızlar TEK SATIRDA yan yana açılır.
+ */
 @Composable
 private fun SpeedButton(
     speed: Float,
@@ -1063,18 +1137,30 @@ private fun SpeedButton(
     tint: Color
 ) {
     var open by remember { mutableStateOf(false) }
+    var hint by remember { mutableStateOf<String?>(null) }
+    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    val menuWidth = (screenW - 40).coerceIn(240, 720).dp
     Box {
         Box(
             modifier = Modifier
                 .size(44.dp)
                 .clip(CircleShape)
-                .clickable { open = true; onMenuOpen(true) },
+                .combinedClickable(
+                    onClick = {
+                        val i = SPEED_QUICK_CYCLE.indexOfFirst { kotlin.math.abs(it - speed) < 0.001f }
+                        val next = if (i < 0) 1f else SPEED_QUICK_CYCLE[(i + 1) % SPEED_QUICK_CYCLE.size]
+                        onChange(next)
+                        hint = "Hız: ${speedLabel(next)}"
+                    },
+                    onLongClick = { open = true; onMenuOpen(true) }
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(speedLabel(speed), color = tint, fontSize = 14.sp, fontWeight = FontWeight.Medium)
         }
+        TransientLabel(hint) { hint = null }
         DropdownMenu(expanded = open, onDismissRequest = { open = false; onMenuOpen(false) }) {
-            Column(modifier = Modifier.width(260.dp).padding(horizontal = 12.dp, vertical = 4.dp)) {
+            Column(modifier = Modifier.width(menuWidth).padding(horizontal = 12.dp, vertical = 4.dp)) {
                 Text(
                     "Oynatma hızı: ${speedLabel(speed)}", fontWeight = FontWeight.Bold, fontSize = 13.sp,
                     modifier = Modifier.padding(bottom = 4.dp)
@@ -1098,16 +1184,20 @@ private fun SpeedButton(
                         modifier = Modifier.size(36.dp)
                     ) { Icon(Icons.Filled.Add, "Hızlandır") }
                 }
-            }
-            SPEED_PRESETS.forEach { v ->
-                DropdownMenuItem(
-                    text = { Text(speedLabel(v)) },
-                    leadingIcon = {
-                        if (kotlin.math.abs(v - speed) < 0.001f) Icon(Icons.Filled.Check, null, modifier = Modifier.size(20.dp))
-                        else Spacer(Modifier.size(20.dp))
-                    },
-                    onClick = { onChange(v); open = false; onMenuOpen(false) }
-                )
+                // Tüm hazır hızlar TEK SATIRDA (sığmazsa yatay kaydırılır)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 6.dp)
+                ) {
+                    SPEED_PRESETS.forEach { v ->
+                        OptionChip(speedLabel(v), kotlin.math.abs(v - speed) < 0.001f) {
+                            onChange(v); open = false; onMenuOpen(false)
+                        }
+                    }
+                }
             }
         }
     }

@@ -125,7 +125,74 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onVideoSelected(uri: Uri, displayName: String) {
+    // ── Klasör kuyruğu (Kırp ekranındaki "Klasör Seç" ile aynı mantık) ──────────
+    var folderQueue by mutableStateOf<List<TrimQueueEntry>>(emptyList())
+        private set
+    var queueIndex by mutableStateOf(-1)
+        private set
+    var folderName by mutableStateOf("")
+        private set
+
+    val hasNextInQueue: Boolean get() = queueIndex >= 0 && queueIndex < folderQueue.size - 1
+    val hasPrevInQueue: Boolean get() = queueIndex > 0 && folderQueue.isNotEmpty()
+
+    fun clearFolderQueue() {
+        folderQueue = emptyList(); queueIndex = -1; folderName = ""
+    }
+
+    /** Klasör seçtirir: içindeki tüm videoları kuyruğa alır, ilkini açar. */
+    fun onFolderSelected(treeUri: Uri) {
+        if (isMuxing) return
+        try {
+            app.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: Exception) { }
+        viewModelScope.launch {
+            isLoading = true
+            loadingMessage = "Klasör taranıyor..."
+            val items = withContext(Dispatchers.IO) {
+                runCatching {
+                    DocumentFile.fromTreeUri(app, treeUri)?.listFiles()
+                        ?.filter { it.isFile && isVideoDoc(it) }
+                        ?.sortedBy { (it.name ?: "").lowercase() }
+                        ?.map { TrimQueueEntry(it.uri, it.name ?: "video.mkv") }
+                }.getOrNull() ?: emptyList()
+            }
+            isLoading = false
+            loadingMessage = ""
+            if (items.isEmpty()) {
+                resultMessage = "Klasörde video dosyası bulunamadı."
+                isSuccess = false
+                return@launch
+            }
+            folderQueue = items
+            queueIndex = 0
+            folderName = runCatching { DocumentFile.fromTreeUri(app, treeUri)?.name }.getOrNull()
+                ?: (treeUri.lastPathSegment ?: "")
+            onVideoSelected(items[0].uri, items[0].name, fromQueue = true)
+        }
+    }
+
+    fun nextInQueue() {
+        if (isMuxing || isLoading || !hasNextInQueue) return
+        queueIndex += 1
+        val e = folderQueue[queueIndex]
+        onVideoSelected(e.uri, e.name, fromQueue = true)
+    }
+
+    fun prevInQueue() {
+        if (isMuxing || isLoading || !hasPrevInQueue) return
+        queueIndex -= 1
+        val e = folderQueue[queueIndex]
+        onVideoSelected(e.uri, e.name, fromQueue = true)
+    }
+
+    private fun isVideoDoc(d: DocumentFile): Boolean {
+        if (d.type.orEmpty().startsWith("video/")) return true
+        return extensionFromName(d.name.orEmpty()) in VIDEO_EXTS
+    }
+
+    fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
+        if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1; folderName = "" }
         viewModelScope.launch {
             isLoading = true
             loadingMessage = app.getString(R.string.video_analyzing)
@@ -742,5 +809,12 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                 }
             }
         } catch (_: Exception) { }
+    }
+
+    companion object {
+        private val VIDEO_EXTS = setOf(
+            "mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "m2ts", "mts", "flv",
+            "wmv", "3gp", "mpg", "mpeg", "vob", "ogv", "divx", "asf", "rmvb"
+        )
     }
 }

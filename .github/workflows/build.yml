@@ -68,6 +68,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y binutils zstd xz-utils patchelf
+          sudo apt-get install -y binutils-aarch64-linux-gnu || echo "Uyari: aarch64 strip kurulamadi; NDK llvm-strip kullanilacak."
           python3 scripts/fetch_mkvtoolnix_assets.py
 
       - name: Release APK derle (minify açık, ffmpeg-kit + mkvtoolnix native dosyaları dahil)

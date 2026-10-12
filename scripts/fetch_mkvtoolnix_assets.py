@@ -26,6 +26,7 @@ YENI YAKLASIM:
      eksik varsa build ACIKCA basarisiz olur (sessiz/yaniltici basari YOK).
 """
 
+import glob
 import gzip
 import os
 import re
@@ -249,6 +250,84 @@ def set_rpath_origin(path):
         log(f"UYARI: patchelf rpath basarisiz ({path}): {e}")
 
 
+# --- BOYUT OPTIMIZASYONU: debug sembollerini temizleme -----------------------
+# Termux'tan gelen bazi kutuphaneler (ozellikle libc++_shared.so ~9.4 MB) "with
+# debug_info, not stripped" halde geliyor. Debug bilgisi calisma zamaninda HIC
+# kullanilmaz; sadece APK'yi ve cihazdaki kurulum boyutunu sisirir. Burada
+# sadece ".debug_*" bolumleri silinir (--strip-debug). Dinamik sembol tablosu,
+# NEEDED/SONAME kayitlari ve kod AYNEN kalir; yani islevsel hicbir fark olmaz.
+# Guvenlik: strip edilen kopya, NEEDED listesi birebir ayni cikmazsa KULLANILMAZ
+# (orijinal dosya korunur). Strip araci bulunamazsa adim sessizce atlanir.
+def find_strip_tool():
+    cands = []
+    for env in ("ANDROID_NDK_LATEST_HOME", "ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "ANDROID_NDK"):
+        v = os.environ.get(env)
+        if v:
+            cands.append(os.path.join(v, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-strip"))
+    for env in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        v = os.environ.get(env)
+        if v:
+            for d in sorted(glob.glob(os.path.join(v, "ndk", "*")), reverse=True):
+                cands.append(os.path.join(d, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-strip"))
+            cands.append(os.path.join(v, "ndk-bundle", "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin", "llvm-strip"))
+    for name in ("llvm-strip", "aarch64-linux-gnu-strip"):
+        w = shutil.which(name)
+        if w:
+            cands.append(w)
+    for c in cands:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def has_debug_sections(path):
+    try:
+        out = subprocess.run(["readelf", "-S", "-W", path], capture_output=True, text=True).stdout
+        return ".debug_" in out
+    except Exception:
+        return False
+
+
+def strip_debug_all(out_dir):
+    tool = find_strip_tool()
+    if not tool:
+        log("UYARI: strip araci bulunamadi; debug sembol temizligi atlandi (islevsel sorun yok).")
+        return
+    log(f"== Debug semboller temizleniyor ({tool}) ==")
+    saved = 0
+    for fn in sorted(os.listdir(out_dir)):
+        path = os.path.join(out_dir, fn)
+        if not os.path.isfile(path) or not has_debug_sections(path):
+            continue
+        tmp = path + ".stripped_tmp"
+        try:
+            r = subprocess.run([tool, "--strip-debug", "-o", tmp, path], capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.isfile(tmp):
+                log(f"  UYARI: {fn} strip edilemedi, orijinal korunuyor.")
+                continue
+            if get_needed(tmp) != get_needed(path):
+                log(f"  UYARI: {fn} strip sonrasi NEEDED degisti, orijinal korunuyor.")
+                continue
+            before = os.path.getsize(path)
+            after = os.path.getsize(tmp)
+            if after >= before:
+                continue
+            mode = os.stat(path).st_mode
+            os.replace(tmp, path)
+            os.chmod(path, mode)
+            saved += before - after
+            log(f"  {fn}: {before} -> {after} bytes")
+        except Exception as e:
+            log(f"  UYARI: {fn} strip hatasi ({e}), orijinal korunuyor.")
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+    log(f"  Toplam kazanc: {saved / (1024*1024):.1f} MB")
+
+
 def main():
     log("== mkvtoolnix paket indeksi yukleniyor ==")
     combined = load_all_packages()
@@ -366,6 +445,9 @@ def main():
             log(f"    - {s}")
         log("APK bu haliyle derlense bile mkvmerge/mkvextract calisma zamaninda CRASH olur.")
         sys.exit(1)
+
+    # --- Boyut optimizasyonu: debug sembolleri (patchelf'ten ONCE) ---
+    strip_debug_all(OUT_DIR)
 
     # --- IZOLASYON: projede ffmpeg-kit (com.moizhassan.ffmpeg:ffmpeg-kit-16kb) da
     # kendi native .so dosyalarini AYNI jniLibs/arm64-v8a klasorune koyuyor, ve

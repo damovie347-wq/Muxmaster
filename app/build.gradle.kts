@@ -16,6 +16,9 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+        // Boyut optimizasyonu: sadece uygulamanin destekledigi diller (tr varsayilan
+        // "values", en, de) paketlenir; kutuphanelerin onlarca dil cevirisi atilir.
+        resourceConfigurations += listOf("tr", "en", "de")
     }
 
     buildTypes {
@@ -45,6 +48,11 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/DEPENDENCIES"
+            // Calisma zamaninda kullanilmayan meta dosyalar (boyut optimizasyonu)
+            excludes += "/META-INF/*.version"
+            excludes += "/META-INF/androidx.*"
+            excludes += "DebugProbesKt.bin"
+            excludes += "kotlin-tooling-metadata.json"
         }
         jniLibs { pickFirsts += "**/*.so" }
     }

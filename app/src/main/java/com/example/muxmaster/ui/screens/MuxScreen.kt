@@ -2,7 +2,16 @@ package com.example.muxmaster.ui.screens
 
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -39,6 +48,7 @@ import kotlinx.coroutines.launch
 fun MuxScreen(
     viewModel: MuxViewModel,
     onPickVideo: () -> Unit,
+    onPickFolder: () -> Unit = {},
     onPickAudio: () -> Unit,
     onPickSubtitle: () -> Unit,
     onPickOutputFolder: () -> Unit,
@@ -108,6 +118,67 @@ fun MuxScreen(
                 .fillMaxSize()
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
+            // ── KLASÖR SEÇ + ÖNCEKİ / SONRAKİ VİDEO (toplu dublaj için) ──────────
+            val busy = viewModel.isMuxing || viewModel.isLoading
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = onPickFolder,
+                    enabled = !busy,
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, Purple)
+                ) {
+                    Icon(Icons.Filled.FolderOpen, null, tint = PurpleLight, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Klasör Seç", color = PurpleLight, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.weight(1f))
+                if (viewModel.folderQueue.isNotEmpty()) {
+                    IconButton(onClick = viewModel::prevInQueue, enabled = viewModel.hasPrevInQueue && !busy) {
+                        Icon(
+                            Icons.Filled.SkipPrevious, "Önceki video",
+                            tint = if (viewModel.hasPrevInQueue && !busy) TextPrimary else TextMuted
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    Button(
+                        onClick = viewModel::nextInQueue,
+                        enabled = viewModel.hasNextInQueue && !busy,
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Purple, disabledContainerColor = SurfaceHigh)
+                    ) {
+                        Icon(Icons.Filled.ArrowForward, "Sonraki video", modifier = Modifier.size(22.dp))
+                    }
+                }
+            }
+            if (viewModel.folderQueue.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(SurfaceHigh, RoundedCornerShape(10.dp))
+                        .padding(start = 12.dp, end = 4.dp)
+                ) {
+                    Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        viewModel.folderName.ifBlank { "Klasör" },
+                        color = TextPrimary, fontSize = 13.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "${viewModel.queueIndex + 1}/${viewModel.folderQueue.size}",
+                        color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.Medium
+                    )
+                    IconButton(onClick = viewModel::clearFolderQueue) {
+                        Icon(Icons.Filled.Close, "Klasörü kapat", tint = TextSec, modifier = Modifier.size(20.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+
             VideoCard(
                 video = viewModel.videoFile,
                 isLoading = viewModel.isLoading,
