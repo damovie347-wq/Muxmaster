@@ -81,7 +81,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     /** Başlangıcı tam istenen kareden başlat (başlangıç–ilk keyframe arası yeniden kodlanır). */
     var preciseCut by mutableStateOf(true)
         private set
-    fun setPreciseCut(v: Boolean) { preciseCut = v }
+    fun updatePreciseCut(v: Boolean) { preciseCut = v }
     private var x264Checked = false
     private var x264Available = false
 

@@ -275,7 +275,7 @@ fun TrimScreen(
                         }
                         Switch(
                             checked = viewModel.preciseCut,
-                            onCheckedChange = viewModel::setPreciseCut,
+                            onCheckedChange = viewModel::updatePreciseCut,
                             enabled = !viewModel.isTrimming,
                             colors = SwitchDefaults.colors(checkedTrackColor = Purple)
                         )
