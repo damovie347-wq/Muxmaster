@@ -1,6 +1,19 @@
 package com.example.muxmaster.ui.screens
 
 import android.app.Activity
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+import androidx.media3.common.PlaybackException
 import android.content.res.Configuration
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.filled.Check
@@ -923,6 +936,8 @@ private fun PlayerControls(
     modifier: Modifier = Modifier,
     trailing: @Composable () -> Unit = {}
 ) {
+    // Basılı tutunca açılan hız paneli: süre çubuğunun HEMEN ÜSTÜNDE, ortalanmış açılır.
+    var speedPanel by remember { mutableStateOf(false) }
     Column(modifier = modifier.fillMaxWidth()) {
         if (endMs > startMs) {
             Slider(
@@ -934,25 +949,39 @@ private fun PlayerControls(
                 )
             )
         }
+        // Süre (solda) + izler / tam ekran (sağda)
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                Text(
-                    formatClock(positionMs.coerceIn(startMs, endMs)),
-                    color = TextSec, fontSize = 11.sp, maxLines = 1
-                )
-            }
+            Text(
+                formatClock(positionMs.coerceIn(startMs, maxOf(startMs, endMs))),
+                color = TextSec, fontSize = 11.sp, maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            trailing()
+        }
+        Spacer(Modifier.height(4.dp))
+        // Ana kontroller: ortada, aralarında geniş boşluk ve BÜYÜK dokunma alanları
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                modifier = Modifier
+                    .widthIn(max = 400.dp)
+                    .fillMaxWidth()
+                    .padding(bottom = 4.dp)
             ) {
-                // Ölçekleme + oynatma hızı artık oynat/ileri/geri ile AYNI satırda
                 if (showScale) ScaleButton(scaleMode, onScaleChange, onMenuOpen, textColor)
-                IconButton(onClick = { onSeekBy(-10_000L) }, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = TextPrimary, modifier = Modifier.size(28.dp))
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .clickable { onSeekBy(-10_000L) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = textColor, modifier = Modifier.size(30.dp))
                 }
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(58.dp)
                         .clip(CircleShape)
                         .background(Purple)
                         .clickable(onClick = onTogglePlay),
@@ -961,18 +990,61 @@ private fun PlayerControls(
                     Icon(
                         if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         if (isPlaying) "Duraklat" else "Oynat",
-                        tint = Color.White, modifier = Modifier.size(30.dp)
+                        tint = Color.White, modifier = Modifier.size(34.dp)
                     )
                 }
-                IconButton(onClick = { onSeekBy(10_000L) }, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = TextPrimary, modifier = Modifier.size(28.dp))
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .clickable { onSeekBy(10_000L) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = textColor, modifier = Modifier.size(30.dp))
                 }
-                SpeedButton(speed, onSpeedChange, onMenuOpen, textColor)
+                SpeedButton(
+                    speed = speed,
+                    onChange = onSpeedChange,
+                    onMenuOpen = onMenuOpen,
+                    tint = textColor,
+                    onOpenPanel = { speedPanel = true; onMenuOpen(true) }
+                )
             }
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { trailing() }
+        }
+        if (speedPanel) {
+            SpeedPanelPopup(
+                speed = speed,
+                onChange = onSpeedChange,
+                onDismiss = {
+                    speedPanel = false
+                    lastSpeedPopupDismissAt = System.currentTimeMillis()
+                    onMenuOpen(false)
+                }
+            )
         }
     }
 }
+
+/** Popup'ı bağlı olduğu öğenin (anchor) HEMEN ÜSTÜNE, yatayda ORTALANMIŞ yerleştirir. */
+private class AboveCenterPositionProvider(private val gapPx: Int) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize
+    ): IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        val x = (anchorBounds.center.x - popupContentSize.width / 2).coerceIn(0, maxX)
+        val y = (anchorBounds.top - popupContentSize.height - gapPx).coerceAtLeast(0)
+        return IntOffset(x, y)
+    }
+}
+
+/** Odak ÇALMAYAN popup: tam ekranda sistem çubuklarını açıp kontrolleri aşağı çökertmez. */
+private val NonFocusPopup = PopupProperties(focusable = false, dismissOnClickOutside = true, dismissOnBackPress = true)
+
+/** Popup dışına dokunup kapatınca aynı dokunuşla düğmenin tekrar açmasını engeller. */
+private var lastSpeedPopupDismissAt = 0L
 
 /** Video ölçekleme modları (oynatıcıdaki ekran sığdırma düğmesi). */
 enum class ScaleMode(val label: String) {
@@ -1005,35 +1077,54 @@ private fun VideoSurface(
         val ch = maxHeight
         val a = aspect.coerceAtLeast(0.1f)
         val wider = (cw / ch) > a
-        val size: Pair<Dp, Dp> = when (mode) {
-            ScaleMode.FIT -> if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
+        // Taban boyut: "En uygun". Diğer modlar GPU üzerinde ölçek (graphicsLayer) ile
+        // animasyonlu uygulanır -> ani atlama/titreme olmaz, yumuşak geçiş yapar.
+        val fit: Pair<Dp, Dp> = if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
+        val target: Pair<Dp, Dp> = when (mode) {
+            ScaleMode.FIT -> fit
             ScaleMode.CROP -> if (wider) Pair(cw, cw / a) else Pair(ch * a, ch)
             ScaleMode.STRETCH -> Pair(cw, ch)
             ScaleMode.ORIGINAL -> if (videoWpx > 0 && videoHpx > 0) {
                 with(density) { Pair(videoWpx.toDp(), videoHpx.toDp()) }
-            } else if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
+            } else fit
         }
+        val fw = fit.first.value.coerceAtLeast(1f)
+        val fh = fit.second.value.coerceAtLeast(1f)
+        val spec = tween<Float>(durationMillis = 380, easing = FastOutSlowInEasing)
+        val sx by animateFloatAsState(target.first.value / fw, spec, label = "scaleX")
+        val sy by animateFloatAsState(target.second.value / fh, spec, label = "scaleY")
         AndroidView(
             factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
-            modifier = Modifier.requiredSize(size.first, size.second)
+            modifier = Modifier
+                .requiredSize(fit.first, fit.second)
+                .graphicsLayer {
+                    scaleX = sx
+                    scaleY = sy
+                }
         )
     }
 }
 
 /** Tek satırlık seçenek "çipi" (ölçekleme / hız menülerinde yan yana dizilir). */
 @Composable
-private fun OptionChip(text: String, selected: Boolean, onClick: () -> Unit) {
+private fun OptionChip(
+    text: String,
+    selected: Boolean,
+    textColor: Color = TextPrimary,
+    bg: Color = SurfaceHigh,
+    onClick: () -> Unit
+) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(if (selected) Purple else SurfaceHigh)
+            .background(if (selected) Purple else bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text,
-            color = if (selected) Color.White else TextPrimary,
+            color = if (selected) Color.White else textColor,
             fontSize = 13.sp,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1
@@ -1067,7 +1158,7 @@ private fun TransientLabel(text: String?, onDone: () -> Unit) {
 /**
  * Ölçekleme düğmesi:
  *  - DOKUN  -> soru sormadan sıradaki moda geçer (En uygun -> Kırp -> Yay -> Orijinal -> ...)
- *  - BASILI TUT -> tüm seçenekler TEK SATIRDA yan yana açılır.
+ *  - BASILI TUT -> tüm seçenekler düğmenin üstünde TEK SATIRDA açılır.
  */
 @Composable
 private fun ScaleButton(
@@ -1078,12 +1169,14 @@ private fun ScaleButton(
 ) {
     var open by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf<String?>(null) }
-    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
-    val menuWidth = (screenW - 40).coerceIn(240, 600).dp
+    val screenW = LocalConfiguration.current.screenWidthDp
+    val menuWidth = (screenW - 32).coerceIn(240, 560).dp
+    val gap = with(LocalDensity.current) { 10.dp.roundToPx() }
+    val close = { open = false; onMenuOpen(false) }
     Box {
         Box(
             modifier = Modifier
-                .size(40.dp)
+                .size(52.dp)
                 .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
@@ -1096,24 +1189,31 @@ private fun ScaleButton(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(26.dp))
+            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(28.dp))
         }
         TransientLabel(hint) { hint = null }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false; onMenuOpen(false) }) {
-            Column(modifier = Modifier.width(menuWidth).padding(horizontal = 12.dp, vertical = 4.dp)) {
-                Text(
-                    "Ölçekleme", fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                    modifier = Modifier.padding(bottom = 6.dp)
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+        if (open) {
+            Popup(
+                popupPositionProvider = remember(gap) { AboveCenterPositionProvider(gap) },
+                onDismissRequest = close,
+                properties = NonFocusPopup
+            ) {
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(bottom = 6.dp)
+                        .width(menuWidth)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xF2141418))
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
-                    ScaleMode.values().forEach { m ->
-                        OptionChip(m.label, m == mode) { onChange(m); open = false; onMenuOpen(false) }
+                    Text("Ölçekleme", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    ) {
+                        ScaleMode.values().forEach { m ->
+                            OptionChip(m.label, m == mode, Color.White, Color(0xFF2A2A31)) { onChange(m); close() }
+                        }
                     }
                 }
             }
@@ -1121,81 +1221,149 @@ private fun ScaleButton(
     }
 }
 
-/** Dokununca hızlı geçiş yapılan hızlar (basılı tutunca TÜM hızlar + ince ayar açılır). */
-private val SPEED_QUICK_CYCLE = listOf(1f, 1.25f, 1.5f, 2f, 0.5f, 0.75f)
+/** Dokununca açılan dikey listedeki hızlar (basılı tutunca ince ayar paneli açılır). */
+private val SPEED_LIST = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
 /**
  * Hız düğmesi:
- *  - DOKUN  -> soru sormadan sıradaki hıza geçer (1X -> 1.25X -> 1.5X -> 2X -> 0.5X -> 0.75X -> 1X)
- *  - BASILI TUT -> ince ayar çubuğu + TÜM hazır hızlar TEK SATIRDA yan yana açılır.
+ *  - DOKUN  -> düğmenin ÜSTÜNDE dikey hız listesi açılır (0.25X ... 2X), seçince uygulanır.
+ *  - BASILI TUT -> ince ayar çubuğu + TÜM hazır hızlar, süre çubuğunun üstünde ortada açılır.
  */
 @Composable
 private fun SpeedButton(
     speed: Float,
     onChange: (Float) -> Unit,
     onMenuOpen: (Boolean) -> Unit,
-    tint: Color
+    tint: Color,
+    onOpenPanel: () -> Unit
 ) {
-    var open by remember { mutableStateOf(false) }
-    var hint by remember { mutableStateOf<String?>(null) }
-    val screenW = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
-    val menuWidth = (screenW - 40).coerceIn(240, 720).dp
+    var listOpen by remember { mutableStateOf(false) }
+    val screenH = LocalConfiguration.current.screenHeightDp
+    val gap = with(LocalDensity.current) { 6.dp.roundToPx() }
+    val close = {
+        listOpen = false
+        lastSpeedPopupDismissAt = System.currentTimeMillis()
+        onMenuOpen(false)
+    }
     Box {
         Box(
             modifier = Modifier
-                .size(44.dp)
+                .height(52.dp)
+                .widthIn(min = 56.dp)
                 .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
-                        val i = SPEED_QUICK_CYCLE.indexOfFirst { kotlin.math.abs(it - speed) < 0.001f }
-                        val next = if (i < 0) 1f else SPEED_QUICK_CYCLE[(i + 1) % SPEED_QUICK_CYCLE.size]
-                        onChange(next)
-                        hint = "Hız: ${speedLabel(next)}"
+                        if (System.currentTimeMillis() - lastSpeedPopupDismissAt > 350L) {
+                            listOpen = true
+                            onMenuOpen(true)
+                        }
                     },
-                    onLongClick = { open = true; onMenuOpen(true) }
-                ),
+                    onLongClick = { listOpen = false; onOpenPanel() }
+                )
+                .padding(horizontal = 8.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(speedLabel(speed), color = tint, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(speedLabel(speed), color = tint, fontSize = 15.sp, fontWeight = FontWeight.Medium)
         }
-        TransientLabel(hint) { hint = null }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false; onMenuOpen(false) }) {
-            Column(modifier = Modifier.width(menuWidth).padding(horizontal = 12.dp, vertical = 4.dp)) {
-                Text(
-                    "Oynatma hızı: ${speedLabel(speed)}", fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                    modifier = Modifier.padding(bottom = 4.dp)
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = { onChange(((speed - 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
-                        modifier = Modifier.size(36.dp)
-                    ) { Icon(Icons.Filled.Remove, "Yavaşlat") }
-                    Slider(
-                        value = speed,
-                        onValueChange = { v -> onChange((Math.round(v * 20f) / 20f).coerceIn(0.25f, 5f)) },
-                        valueRange = 0.25f..5f,
-                        modifier = Modifier.weight(1f),
-                        colors = SliderDefaults.colors(
-                            thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = SurfaceHigh
-                        )
-                    )
-                    IconButton(
-                        onClick = { onChange(((speed + 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
-                        modifier = Modifier.size(36.dp)
-                    ) { Icon(Icons.Filled.Add, "Hızlandır") }
-                }
-                // Tüm hazır hızlar TEK SATIRDA (sığmazsa yatay kaydırılır)
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+        if (listOpen) {
+            Popup(
+                popupPositionProvider = remember(gap) { AboveCenterPositionProvider(gap) },
+                onDismissRequest = close,
+                properties = NonFocusPopup
+            ) {
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(vertical = 6.dp)
+                        .width(124.dp)
+                        .heightIn(max = (screenH * 0.6f).dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color(0xF2161616))
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp)
                 ) {
-                    SPEED_PRESETS.forEach { v ->
-                        OptionChip(speedLabel(v), kotlin.math.abs(v - speed) < 0.001f) {
-                            onChange(v); open = false; onMenuOpen(false)
-                        }
+                    SPEED_LIST.forEach { v ->
+                        val sel = kotlin.math.abs(v - speed) < 0.001f
+                        Text(
+                            speedLabel(v),
+                            color = if (sel) PurpleLight else Color.White,
+                            fontSize = 16.sp,
+                            fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onChange(v); close() }
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Basılı tutunca açılan ince ayar paneli (süre çubuğunun hemen üstünde, ortada). */
+@Composable
+private fun SpeedPanelPopup(
+    speed: Float,
+    onChange: (Float) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val screenW = LocalConfiguration.current.screenWidthDp
+    val panelWidth = (screenW - 32).coerceIn(260, 560).dp
+    val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+    Popup(
+        popupPositionProvider = remember(gap) { AboveCenterPositionProvider(gap) },
+        onDismissRequest = onDismiss,
+        properties = NonFocusPopup
+    ) {
+        Column(
+            modifier = Modifier
+                .width(panelWidth)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xF2141418))
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Text(
+                "Oynatma hızı: ${speedLabel(speed)}",
+                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2A2A31))
+                        .clickable { onChange(((speed - 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Filled.Remove, "Yavaşlat", tint = Color.White) }
+                Slider(
+                    value = speed,
+                    onValueChange = { v -> onChange((Math.round(v * 20f) / 20f).coerceIn(0.25f, 5f)) },
+                    valueRange = 0.25f..5f,
+                    modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = Color(0xFF3A3A42)
+                    )
+                )
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF2A2A31))
+                        .clickable { onChange(((speed + 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Filled.Add, "Hızlandır", tint = Color.White) }
+            }
+            Spacer(Modifier.height(16.dp))
+            // Tüm hazır hızlar TEK SATIRDA (sığmazsa yatay kaydırılır), aralıkları geniş
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                SPEED_PRESETS.forEach { v ->
+                    OptionChip(speedLabel(v), kotlin.math.abs(v - speed) < 0.001f, Color.White, Color(0xFF2A2A31)) {
+                        onChange(v); onDismiss()
                     }
                 }
             }
@@ -1222,7 +1390,8 @@ private fun FullscreenPlayerDialog(
     onTogglePlay: () -> Unit,
     onSeekBy: (Long) -> Unit,
     onSeekTo: (Long) -> Unit,
-    onExit: () -> Unit
+    onExit: () -> Unit,
+    overlayText: String? = null
 ) {
     val context = LocalContext.current
     var controlsVisible by remember { mutableStateOf(true) }
@@ -1275,8 +1444,21 @@ private fun FullscreenPlayerDialog(
 
             SubtitleOverlay(
                 cueText,
-                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 160.dp else 24.dp)
+                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 190.dp else 24.dp)
             )
+
+            if (overlayText != null) {
+                Text(
+                    overlayText,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
+                )
+            }
 
             if (controlsVisible) {
                 IconButton(
@@ -1331,4 +1513,118 @@ private fun FullscreenPlayerDialog(
             }
         }
     }
+}
+
+/**
+ * Bağımsız video oynatıcı: dosya yöneticisi / Google Drive "Birlikte aç" veya bir
+ * http(s) bağlantısı ile gelen videoyu doğrudan (indirmeden, akış olarak) oynatır.
+ */
+@Composable
+fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
+    val context = LocalContext.current
+    val player = remember { ExoPlayer.Builder(context).build() }
+    var isPlaying by remember { mutableStateOf(false) }
+    var positionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var aspect by remember { mutableFloatStateOf(16f / 9f) }
+    var videoWpx by remember { mutableIntStateOf(0) }
+    var videoHpx by remember { mutableIntStateOf(0) }
+    var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
+    var speed by remember { mutableFloatStateOf(1f) }
+    var tracks by remember { mutableStateOf(Tracks.EMPTY) }
+    var cueText by remember { mutableStateOf("") }
+    var buffering by remember { mutableStateOf(true) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
+                    videoWpx = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
+                    videoHpx = videoSize.height
+                }
+            }
+            override fun onTracksChanged(t: Tracks) { tracks = t }
+            override fun onCues(cueGroup: CueGroup) {
+                cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
+            }
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                buffering = playbackState == Player.STATE_BUFFERING
+                if (playbackState == Player.STATE_READY) errorText = null
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                errorText = "Oynatılamadı: " + (error.message ?: error.errorCodeName)
+            }
+        }
+        player.addListener(listener)
+        val owner = context.findActivity() as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) player.pause()
+        }
+        owner?.lifecycle?.addObserver(observer)
+        onDispose {
+            owner?.lifecycle?.removeObserver(observer)
+            player.removeListener(listener)
+            player.release()
+        }
+    }
+
+    LaunchedEffect(uri) {
+        errorText = null
+        player.setMediaItem(MediaItem.fromUri(uri))
+        player.prepare()
+        player.playWhenReady = true
+    }
+    LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
+
+    LaunchedEffect(player) {
+        while (true) {
+            val state = player.playbackState
+            isPlaying = player.playWhenReady && state != Player.STATE_ENDED && state != Player.STATE_IDLE
+            positionMs = player.currentPosition.coerceAtLeast(0L)
+            val d = player.duration
+            durationMs = if (d != C.TIME_UNSET && d > 0) d else 0L
+            delay(100)
+        }
+    }
+
+    val togglePlay: () -> Unit = {
+        if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
+            player.pause()
+        } else {
+            if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+            player.play()
+        }
+    }
+    val seekTo: (Long) -> Unit = { t ->
+        val target = if (durationMs > 0) t.coerceIn(0L, durationMs) else t.coerceAtLeast(0L)
+        player.seekTo(target)
+        positionMs = target
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black))
+
+    FullscreenPlayerDialog(
+        player = player,
+        tracks = tracks,
+        cueText = cueText,
+        aspect = aspect,
+        videoWpx = videoWpx,
+        videoHpx = videoHpx,
+        scaleMode = scaleMode,
+        onScaleChange = { scaleMode = it },
+        speed = speed,
+        onSpeedChange = { speed = it },
+        isPlaying = isPlaying,
+        positionMs = positionMs,
+        startMs = 0L,
+        endMs = durationMs,
+        onTogglePlay = togglePlay,
+        onSeekBy = { delta -> seekTo(player.currentPosition + delta) },
+        onSeekTo = seekTo,
+        onExit = onExit,
+        overlayText = errorText ?: if (buffering) "Yükleniyor…" else null
+    )
 }

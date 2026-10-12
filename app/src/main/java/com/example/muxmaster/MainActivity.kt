@@ -42,6 +42,8 @@ import com.example.muxmaster.ui.screens.MergeScreen
 import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.screens.SettingsScreen
 import com.example.muxmaster.ui.screens.TrimScreen
+import com.example.muxmaster.ui.screens.StreamPlayerScreen
+import androidx.compose.material.icons.filled.PlayCircle
 import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.ui.theme.ThemeMode
 import com.example.muxmaster.viewmodel.ConverterViewModel
@@ -57,6 +59,8 @@ class MainActivity : AppCompatActivity() {
     private val mergeViewModel: MergeViewModel by viewModels()
 
     private var screenState: MutableState<Int>? = null
+    /** Bağımsız oynatıcıda açılacak video (Birlikte aç / http akışı). */
+    private val playUri = mutableStateOf<Uri?>(null)
 
     /** "Birlikte aç" ile gelen video: kullanıcıya ne yapmak istediği sorulur. */
     private val pendingOpen = mutableStateOf<Pair<Uri, String>?>(null)
@@ -200,6 +204,7 @@ class MainActivity : AppCompatActivity() {
                     OpenWithChooser(
                         fileName = name,
                         onDismiss = { pendingOpen.value = null },
+                        onPlay = { pendingOpen.value = null; playUri.value = uri; screen = 5 },
                         onMux = { pendingOpen.value = null; muxViewModel.onVideoSelected(uri, name); screen = 0 },
                         onTrim = { pendingOpen.value = null; trimViewModel.onVideoSelected(uri, name); screen = 2 },
                         onMerge = { pendingOpen.value = null; mergeViewModel.onVideosSelected(listOf(uri to name)); screen = 4 },
@@ -233,6 +238,14 @@ class MainActivity : AppCompatActivity() {
                         onPickOutputFolder = { pickTrimOutputFolderLauncher.launch(null) },
                         onNavigateBack = { screen = 0 }
                     )
+                    5 -> {
+                        val u = playUri.value
+                        if (u == null) {
+                            LaunchedEffect(Unit) { screen = 0 }
+                        } else {
+                            StreamPlayerScreen(uri = u, onExit = { playUri.value = null; screen = 0 })
+                        }
+                    }
                     4 -> MergeScreen(
                         viewModel = mergeViewModel,
                         onPickVideos = { pickMergeVideosLauncher.launch(arrayOf("video/*", "*/*")) },
@@ -268,8 +281,17 @@ class MainActivity : AppCompatActivity() {
             else -> null
         } ?: return
 
+        // İnternet bağlantısı (http/https): sormadan doğrudan oynatıcıda akış olarak aç
+        val scheme = uri.scheme?.lowercase()
+        if (scheme == "http" || scheme == "https") {
+            playUri.value = uri
+            screenState?.value = 5
+            intent.action = null
+            return
+        }
+
         try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        catch (_: SecurityException) { }
+        catch (_: Exception) { }
 
         val displayName = queryDisplayName(uri) ?: "file"
         val mimeType = intent.type ?: contentResolver.getType(uri).orEmpty()
@@ -316,6 +338,7 @@ class MainActivity : AppCompatActivity() {
 private fun OpenWithChooser(
     fileName: String,
     onDismiss: () -> Unit,
+    onPlay: () -> Unit,
     onMux: () -> Unit,
     onTrim: () -> Unit,
     onMerge: () -> Unit,
@@ -334,6 +357,7 @@ private fun OpenWithChooser(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(fileName, maxLines = 2)
+                Choice(Icons.Filled.PlayCircle, "Oynat (video oynatıcı)", onPlay)
                 Choice(Icons.Filled.Layers, "Mux Master (ses / altyazı ekle-çıkar)", onMux)
                 Choice(Icons.Filled.ContentCut, "Kırp / Kes", onTrim)
                 Choice(Icons.Filled.CallMerge, "Birleştir", onMerge)

@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- İnternetteki videoları (http/https akışı, Google Drive vb.) oynatmak için -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- API 32 ve altı için (Storage Access Framework yine de kullanılıyor,
          ama bazı OEM/eski cihazlarda fallback için maxSdkVersion ile sınırlı tutuluyor) -->
     <uses-permission
@@ -39,6 +42,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="MuxMaster"
         android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true"
         android:extractNativeLibs="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.MuxMaster"
@@ -73,6 +77,16 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="audio/*" />
+            </intent-filter>
+
+            <!-- İnternetteki video bağlantıları (http/https akış) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:mimeType="video/*" />
             </intent-filter>
 
             <!-- Dosya yöneticilerinden "Paylaş / Share" -->
