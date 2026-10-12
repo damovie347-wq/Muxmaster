@@ -425,7 +425,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         }
 
     private fun copyUriToCache(uri: Uri, fileName: String): String? =
-        InputAccess.acquire(app, uri, workDir(), fileName, needChildRead = false)
+        InputAccess.acquire(app, uri, File(app.cacheDir, "convert_work"), fileName, needChildRead = false)
 
     private fun extensionFromName(displayName: String): String {
         val dot = displayName.lastIndexOf('.')
