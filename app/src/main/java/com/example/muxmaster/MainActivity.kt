@@ -64,6 +64,30 @@ class MainActivity : AppCompatActivity() {
 
     /** "Birlikte aç" ile gelen video: kullanıcıya ne yapmak istediği sorulur. */
     private val pendingOpen = mutableStateOf<Pair<Uri, String>?>(null)
+    /** Video başka bir uygulamadan (dosya yöneticisi vb.) mı açıldı? Öyleyse geri = o uygulamaya dön. */
+    private val playFromExternal = mutableStateOf(false)
+
+    /** Uygulama içinden "Video Oynatıcı" ile video seçme. */
+    private val pickPlayVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            catch (_: Exception) { }
+            playFromExternal.value = false
+            playUri.value = uri
+            screenState?.value = 5
+        }
+    }
+
+    /** Oynatıcıdan çıkış: dışarıdan açıldıysa çağıran uygulamaya (dosya yöneticisi) geri döner. */
+    private fun exitPlayer() {
+        val external = playFromExternal.value
+        playFromExternal.value = false
+        playUri.value = null
+        screenState?.value = 0
+        if (external) {
+            if (!moveTaskToBack(true)) finish()
+        }
+    }
     /** Depolama (Tüm dosyalara erişim) izni sorulsun mu? */
     private val askStorage = mutableStateOf(false)
 
@@ -177,7 +201,9 @@ class MainActivity : AppCompatActivity() {
                 var screen by screenHolder
 
                 // Geri tuşu: alt ekrandaysan ana ekrana döner (uygulamadan çıkmaz).
-                BackHandler(enabled = screen != 0) { screen = 0 }
+                BackHandler(enabled = screen != 0) {
+                    if (screen == 5) exitPlayer() else screen = 0
+                }
 
                 LaunchedEffect(Unit) { handleIncomingIntent(intent) }
 
@@ -204,7 +230,7 @@ class MainActivity : AppCompatActivity() {
                     OpenWithChooser(
                         fileName = name,
                         onDismiss = { pendingOpen.value = null },
-                        onPlay = { pendingOpen.value = null; playUri.value = uri; screen = 5 },
+                        onPlay = { pendingOpen.value = null; playFromExternal.value = true; playUri.value = uri; screen = 5 },
                         onMux = { pendingOpen.value = null; muxViewModel.onVideoSelected(uri, name); screen = 0 },
                         onTrim = { pendingOpen.value = null; trimViewModel.onVideoSelected(uri, name); screen = 2 },
                         onMerge = { pendingOpen.value = null; mergeViewModel.onVideosSelected(listOf(uri to name)); screen = 4 },
@@ -223,7 +249,8 @@ class MainActivity : AppCompatActivity() {
                         onNavigateToConverter = { screen = 1 },
                         onNavigateToTrim = { screen = 2 },
                         onNavigateToMerge = { screen = 4 },
-                        onNavigateToSettings = { screen = 3 }
+                        onNavigateToSettings = { screen = 3 },
+                        onOpenPlayer = { pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*", "*/*")) }
                     )
                     1 -> ConverterScreen(
                         viewModel = converterViewModel,
@@ -243,7 +270,7 @@ class MainActivity : AppCompatActivity() {
                         if (u == null) {
                             LaunchedEffect(Unit) { screen = 0 }
                         } else {
-                            StreamPlayerScreen(uri = u, onExit = { playUri.value = null; screen = 0 })
+                            StreamPlayerScreen(uri = u, onExit = { exitPlayer() })
                         }
                     }
                     4 -> MergeScreen(
@@ -284,6 +311,7 @@ class MainActivity : AppCompatActivity() {
         // İnternet bağlantısı (http/https): sormadan doğrudan oynatıcıda akış olarak aç
         val scheme = uri.scheme?.lowercase()
         if (scheme == "http" || scheme == "https") {
+            playFromExternal.value = true
             playUri.value = uri
             screenState?.value = 5
             intent.action = null

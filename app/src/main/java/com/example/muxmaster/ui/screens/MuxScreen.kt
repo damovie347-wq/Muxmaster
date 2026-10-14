@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,7 +56,8 @@ fun MuxScreen(
     onNavigateToConverter: () -> Unit,
     onNavigateToTrim: () -> Unit,
     onNavigateToMerge: () -> Unit,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    onOpenPlayer: () -> Unit = {}
 ) {
     val pagerState = rememberPagerState(pageCount = { 2 })
     val scope = rememberCoroutineScope()
@@ -77,6 +79,9 @@ fun MuxScreen(
             TopAppBar(
                 title = { Text("MuxMaster", fontWeight = FontWeight.Bold, color = TextPrimary) },
                 actions = {
+                    IconButton(onClick = onOpenPlayer) {
+                        Icon(Icons.Filled.PlayCircle, "Video Oynatıcı", tint = TextSec)
+                    }
                     IconButton(onClick = onNavigateToSettings) {
                         Icon(Icons.Filled.Settings, stringResource(R.string.nav_settings_desc), tint = TextSec)
                     }

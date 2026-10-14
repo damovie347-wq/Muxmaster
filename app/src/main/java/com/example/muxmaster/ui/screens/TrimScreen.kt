@@ -34,6 +34,7 @@ import android.net.Uri
 import android.view.TextureView
 import androidx.compose.ui.text.style.TextAlign
 import android.view.WindowManager
+import android.view.ViewGroup
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -69,6 +70,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -591,6 +593,13 @@ private fun TrackMenuButtons(
     var audioMenu by remember { mutableStateOf(false) }
     var textMenu by remember { mutableStateOf(false) }
     var sizePanel by remember { mutableStateOf(false) }
+    // AÇ/KAPA DÜZELTMESİ: odak çalmayan popup, düğmeye dokunuşun ilk anında (dışarı
+    // dokunma) kapanır; ardından aynı dokunuşun "tıklama"sı menüyü tekrar açıyordu.
+    // Kapanma anı kaydedilir, hemen ardından gelen tıklama yok sayılır.
+    var audioClosedAt by remember { mutableLongStateOf(0L) }
+    var textClosedAt by remember { mutableLongStateOf(0L) }
+    var sizeClosedAt by remember { mutableLongStateOf(0L) }
+    fun recent(t: Long) = System.currentTimeMillis() - t < 400L
     val ctx = LocalContext.current
     LaunchedEffect(audioMenu, textMenu, sizePanel) { onMenuState(audioMenu || textMenu || sizePanel) }
 
@@ -618,10 +627,13 @@ private fun TrackMenuButtons(
 
     if (audioGroups.sumOf { it.length } >= 2) {
         Box {
-            IconButton(onClick = { audioMenu = true }, modifier = Modifier.size(38.dp)) {
+            IconButton(onClick = {
+                if (audioMenu) audioMenu = false
+                else if (!recent(audioClosedAt)) audioMenu = true
+            }, modifier = Modifier.size(38.dp)) {
                 Icon(Icons.Filled.MusicNote, "Ses", tint = tint, modifier = Modifier.size(24.dp))
             }
-            DropdownMenu(expanded = audioMenu, onDismissRequest = { audioMenu = false }, properties = NonFocusPopup) {
+            DropdownMenu(expanded = audioMenu, onDismissRequest = { audioMenu = false; audioClosedAt = System.currentTimeMillis() }, properties = NonFocusPopup) {
                 KeepSystemBarsHidden()
                 DropdownMenuItem(
                     text = { Text("Otomatik") },
@@ -651,8 +663,15 @@ private fun TrackMenuButtons(
                     .size(44.dp)
                     .clip(CircleShape)
                     .combinedClickable(
-                        onClick = { textMenu = true },
-                        onLongClick = { textMenu = false; sizePanel = true }
+                        onClick = {
+                            when {
+                                textMenu -> textMenu = false
+                                sizePanel -> sizePanel = false
+                                recent(textClosedAt) || recent(sizeClosedAt) -> Unit
+                                else -> textMenu = true
+                            }
+                        },
+                        onLongClick = { textMenu = false; if (!recent(sizeClosedAt)) sizePanel = true }
                     ),
                 contentAlignment = Alignment.Center
             ) {
@@ -665,7 +684,7 @@ private fun TrackMenuButtons(
                 val gap = with(LocalDensity.current) { 10.dp.roundToPx() }
                 Popup(
                     popupPositionProvider = remember(gap) { AboveCenterPositionProvider(gap) },
-                    onDismissRequest = { sizePanel = false },
+                    onDismissRequest = { sizePanel = false; sizeClosedAt = System.currentTimeMillis() },
                     properties = NonFocusPopup
                 ) {
                     KeepSystemBarsHidden()
@@ -700,7 +719,7 @@ private fun TrackMenuButtons(
                     }
                 }
             }
-            DropdownMenu(expanded = textMenu, onDismissRequest = { textMenu = false }, properties = NonFocusPopup) {
+            DropdownMenu(expanded = textMenu, onDismissRequest = { textMenu = false; textClosedAt = System.currentTimeMillis() }, properties = NonFocusPopup) {
                 KeepSystemBarsHidden()
                 DropdownMenuItem(
                     text = { Text("Kapalı") },
@@ -1574,6 +1593,36 @@ private fun FullscreenPlayerDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
         val view = LocalView.current
+        // TELEFONDA DÖNDÜRME DÜZELTMESİ: Activity configChanges ile yeniden oluşturulmadığı
+        // için Dialog penceresi döndürmeden sonra eski (dikey) boyutunda kalıyor, video
+        // küçülüp kayboluyordu. Her yön/boyut değişiminde pencere tam ekrana yeniden
+        // yayılır; çentikli telefonlarda (tablette yok) çentik alanı da kullanılır.
+        val config = LocalConfiguration.current
+        val orientationKey = config.orientation
+        val sizeKey = config.screenWidthDp * 10000 + config.screenHeightDp
+        DisposableEffect(view, orientationKey, sizeKey) {
+            val window = (view.parent as? DialogWindowProvider)?.window
+            val fix = Runnable {
+                window?.let { w ->
+                    w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        val lp = w.attributes
+                        lp.layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                        w.attributes = lp
+                    }
+                    w.decorView.requestLayout()
+                }
+                if (immersive) hideSystemBarsOf(view)
+                view.requestLayout()
+            }
+            fix.run()
+            view.post(fix)
+            view.postDelayed(fix, 250)
+            onDispose {
+                view.removeCallbacks(fix)
+            }
+        }
         // Sistem çubukları: menü/panel açılınca ya da kontroller değişince TEKRAR gizlenir.
         // (Eskiden açılan menü odağı çalıp çubukları geri getiriyor, alt kontroller aşağı gömülüyordu.)
         LaunchedEffect(view, immersive, menuOpen, controlsVisible) {
@@ -1635,7 +1684,9 @@ private fun FullscreenPlayerDialog(
                 .background(Color.Black)
                 .then(if (immersive) Modifier else Modifier.windowInsetsPadding(WindowInsets.systemBars))
         ) {
-            VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
+            key(orientationKey) {
+                VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
+            }
 
             // Dokunma katmanı: ekrana tıklayınca kontroller gizlenir / görünür
             Box(
