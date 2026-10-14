@@ -16,8 +16,6 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
-        // Boyut optimizasyonu: sadece uygulamanin destekledigi diller (tr varsayilan
-        // "values", en, de) paketlenir; kutuphanelerin onlarca dil cevirisi atilir.
         resourceConfigurations += listOf("tr", "en", "de")
     }
 
@@ -39,6 +37,7 @@ android {
         jvmTarget = "17"
         freeCompilerArgs += "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi"
         freeCompilerArgs += "-opt-in=androidx.compose.foundation.layout.ExperimentalLayoutApi"
+        freeCompilerArgs += "-opt-in=androidx.media3.common.util.UnstableApi"
     }
 
     buildFeatures { compose = true }
@@ -49,7 +48,6 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/DEPENDENCIES"
-            // Calisma zamaninda kullanilmayan meta dosyalar (boyut optimizasyonu)
             excludes += "/META-INF/*.version"
             excludes += "/META-INF/androidx.*"
             excludes += "DebugProbesKt.bin"
@@ -73,6 +71,9 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
+    implementation("androidx.media3:media3-common:1.2.1")
+    implementation("androidx.media3:media3-datasource:1.2.1")
+    implementation("androidx.media3:media3-extractor:1.2.1")
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
     debugImplementation("androidx.compose.ui:ui-tooling")

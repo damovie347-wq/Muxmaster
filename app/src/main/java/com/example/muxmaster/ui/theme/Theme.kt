@@ -1,14 +1,21 @@
 package com.example.muxmaster.ui.theme
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.graphics.drawable.ColorDrawable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
-// AMOLED artık Koyu temanın bir alt seçeneği değil, doğrudan seçilebilen 4.
-// bir mod: Sistem / Açık / Koyu / AMOLED (tam siyah arka plan).
 enum class ThemeMode { SYSTEM, LIGHT, DARK, AMOLED }
 
 private val MuxDarkColors = darkColorScheme(
@@ -29,9 +36,6 @@ private val MuxLightColors = lightColorScheme(
     outline = OutlineLightRaw, error = Red, onError = SurfaceLightRaw
 )
 
-// AMOLED: Koyu temayla birebir aynı metin/vurgu renkleri, ama arka plan ve
-// surface tam siyah (#000000) -- AMOLED ekranlarda o pikselleri tamamen
-// kapatarak pil tasarrufu sağlar.
 private val MuxAmoledColors = darkColorScheme(
     primary = PurpleDarkRaw, onPrimary = TextPrimaryDarkRaw,
     secondary = PurpleLightDarkRaw, onSecondary = BgAmoledRaw,
@@ -40,6 +44,15 @@ private val MuxAmoledColors = darkColorScheme(
     surfaceVariant = SurfaceHighAmoledRaw, onSurfaceVariant = TextSecDarkRaw,
     outline = OutlineAmoledRaw, error = Red, onError = TextPrimaryDarkRaw
 )
+
+private fun Context.findWindowActivity(): Activity? {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
 
 @Composable
 fun MuxMasterTheme(themeMode: ThemeMode = ThemeMode.DARK, content: @Composable () -> Unit) {
@@ -53,6 +66,25 @@ fun MuxMasterTheme(themeMode: ThemeMode = ThemeMode.DARK, content: @Composable (
         ThemeVariant.LIGHT -> MuxLightColors
         ThemeVariant.DARK -> MuxDarkColors
         ThemeVariant.AMOLED -> MuxAmoledColors
+    }
+    val view = LocalView.current
+    val context = LocalContext.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val activity = context.findWindowActivity()
+            val window = activity?.window
+            if (window != null) {
+                val bgArgb = colorScheme.background.toArgb()
+                window.statusBarColor = bgArgb
+                window.navigationBarColor = bgArgb
+                window.setBackgroundDrawable(ColorDrawable(bgArgb))
+                window.decorView.setBackgroundColor(bgArgb)
+                val controller = WindowCompat.getInsetsController(window, view)
+                val isLight = variant == ThemeVariant.LIGHT
+                controller.isAppearanceLightStatusBars = isLight
+                controller.isAppearanceLightNavigationBars = isLight
+            }
+        }
     }
     CompositionLocalProvider(LocalThemeVariant provides variant) {
         MaterialTheme(

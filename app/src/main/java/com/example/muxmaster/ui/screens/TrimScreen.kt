@@ -14,7 +14,6 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -34,8 +33,6 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloseFullscreen
-import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
@@ -46,15 +43,11 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.SubtitlesOff
@@ -112,18 +105,25 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.mkv.MatroskaExtractor
+import androidx.media3.extractor.mp4.Mp4Extractor
 import com.example.muxmaster.data.DriveStreamResolver
-import com.example.muxmaster.data.GoogleDriveBrowserDialog
 import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.components.VideoCard
 import com.example.muxmaster.ui.theme.*
 import com.example.muxmaster.viewmodel.TrimViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+
+/** Yüklenme halkası (LoadingRing) ve oynatıcı slider'ı için turkuaz vurgu rengi. */
+internal val PlayerTurquoise = Color(0xFF66C2B4)
 
 private fun formatClock(ms: Long): String {
     val safe = ms.coerceAtLeast(0L)
@@ -277,7 +277,7 @@ fun TrimScreen(
                     valueRange = 0f..durationMs.toFloat(),
                     enabled = !viewModel.isTrimming,
                     colors = SliderDefaults.colors(
-                        thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = SurfaceHigh
+                        thumbColor = PlayerTurquoise, activeTrackColor = PlayerTurquoise, inactiveTrackColor = SurfaceHigh
                     )
                 )
 
@@ -678,7 +678,7 @@ internal fun TrackMenuButtons(
                             onValueChange = { saveSubtitleSize(ctx, it) },
                             valueRange = SUBTITLE_MIN_SP..SUBTITLE_MAX_SP,
                             colors = SliderDefaults.colors(
-                                thumbColor = Color.White, activeTrackColor = Color.White,
+                                thumbColor = PlayerTurquoise, activeTrackColor = PlayerTurquoise,
                                 inactiveTrackColor = Color(0xFF3A3A42)
                             )
                         )
@@ -877,7 +877,7 @@ private fun TrimPlayer(
                 isPlaying = false
                 break
             }
-            delay(100)
+            delay(200)
         }
     }
 
@@ -994,8 +994,14 @@ private fun TrimPlayer(
     }
 }
 
+/**
+ * Klasik (eski) video oynatıcı alt kontrol paneli:
+ * - Üstte tam genişlikte Turkuaz (#66C2B4) Slider
+ * - Ortada süre göstergesi (sol) ve ses/altyazı/döndürme/tam ekran butonları (sağ)
+ * - Altta sol köşede opsiyonel "+ Ekle" butonu, ortada En-Boy Oranı (ScaleButton), -10sn, Oynat/Duraklat, +10sn, Hız (1X)
+ */
 @Composable
-private fun PlayerControls(
+internal fun PlayerControls(
     isPlaying: Boolean,
     positionMs: Long,
     startMs: Long,
@@ -1011,41 +1017,56 @@ private fun PlayerControls(
     onMenuOpen: (Boolean) -> Unit = {},
     textColor: Color = TextPrimary,
     modifier: Modifier = Modifier,
+    leadingBottom: (@Composable () -> Unit)? = null,
     trailing: @Composable () -> Unit = {}
 ) {
     var speedPanel by remember { mutableStateOf(false) }
+    val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     Column(modifier = modifier.fillMaxWidth()) {
-        if (endMs > startMs) {
-            Slider(
-                value = positionMs.coerceIn(startMs, endMs).toFloat(),
-                onValueChange = { onSeekTo(it.toLong()) },
-                valueRange = startMs.toFloat()..endMs.toFloat(),
-                colors = SliderDefaults.colors(
-                    thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = SurfaceHigh
-                )
+        Slider(
+            value = positionMs.coerceIn(startMs, safeEnd).toFloat(),
+            onValueChange = { if (endMs > startMs) onSeekTo(it.toLong()) },
+            valueRange = startMs.toFloat()..safeEnd.toFloat(),
+            enabled = endMs > startMs,
+            colors = SliderDefaults.colors(
+                thumbColor = PlayerTurquoise,
+                activeTrackColor = PlayerTurquoise,
+                inactiveTrackColor = Color(0xFF3A3A42),
+                disabledThumbColor = PlayerTurquoise.copy(alpha = 0.5f),
+                disabledActiveTrackColor = PlayerTurquoise.copy(alpha = 0.5f),
+                disabledInactiveTrackColor = Color(0xFF2A2A31)
             )
-        }
+        )
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            val timeLabel = if (endMs > 0L) {
+                "${formatClock(positionMs.coerceIn(startMs, safeEnd))} / ${formatClock(endMs)}"
+            } else {
+                formatClock(positionMs.coerceAtLeast(0L))
+            }
             Text(
-                formatClock(positionMs.coerceIn(startMs, maxOf(startMs, endMs))),
+                timeLabel,
                 color = TextSec, fontSize = 11.sp, maxLines = 1,
                 modifier = Modifier.weight(1f)
             )
             trailing()
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(2.dp))
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            if (leadingBottom != null) {
+                Box(modifier = Modifier.align(Alignment.CenterStart)) {
+                    leadingBottom()
+                }
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 2.dp)
+                    .padding(start = if (leadingBottom != null) 76.dp else 0.dp, bottom = 2.dp)
             ) {
                 if (showScale) ScaleButton(scaleMode, onScaleChange, onMenuOpen, textColor)
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
                         .clickable { onSeekBy(-10_000L) },
                     contentAlignment = Alignment.Center
@@ -1054,7 +1075,7 @@ private fun PlayerControls(
                 }
                 Box(
                     modifier = Modifier
-                        .size(60.dp)
+                        .size(54.dp)
                         .clip(CircleShape)
                         .clickable(onClick = onTogglePlay),
                     contentAlignment = Alignment.Center
@@ -1062,12 +1083,12 @@ private fun PlayerControls(
                     Icon(
                         if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         if (isPlaying) "Duraklat" else "Oynat",
-                        tint = textColor, modifier = Modifier.size(38.dp)
+                        tint = textColor, modifier = Modifier.size(36.dp)
                     )
                 }
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
                         .clickable { onSeekBy(10_000L) },
                     contentAlignment = Alignment.Center
@@ -1162,13 +1183,20 @@ internal fun isCloudAuthority(a: String?): Boolean {
         x.contains("onedrive") || x.contains("dropbox") || x.contains("cloud")
 }
 
+/**
+ * Minimum CPU/GPU/RAM ve Google Drive SAF doğrudan akış optimizasyonlu ExoPlayer:
+ * - MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES: .mkv dosyalarının sonundaki Cues tablosunu
+ *   okumak için 1+ GB dosyanın sonuna atlamayı devre dışı bırakır; 0. bayttan anında oynatır!
+ * - Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS & ConstantBitrateSeeking: akış üzerinde
+ *   hızlı açılış ve ileri/geri sarma sağlar.
+ */
 internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): ExoPlayer {
-    val minBufferMs = if (isMultiView) 6_000 else 12_000
-    val maxBufferMs = if (isMultiView) 18_000 else 40_000
-    val targetBytes = if (isMultiView) 12 * 1024 * 1024 else 32 * 1024 * 1024
+    val minBufferMs = if (isMultiView) 4_000 else 8_000
+    val maxBufferMs = if (isMultiView) 14_000 else 28_000
+    val targetBytes = if (isMultiView) 8 * 1024 * 1024 else 20 * 1024 * 1024
 
     val loadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(minBufferMs, maxBufferMs, 250, 500)
+        .setBufferDurationsMs(minBufferMs, maxBufferMs, 200, 400)
         .setTargetBufferBytes(targetBytes)
         .setPrioritizeTimeOverSizeThresholds(true)
         .setBackBuffer(0, false)
@@ -1180,8 +1208,14 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): Ex
         .setEnableAudioTrackPlaybackParams(true)
         .forceEnableMediaCodecAsynchronousQueueing()
 
+    val extractorsFactory = DefaultExtractorsFactory()
+        .setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
+        .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
+        .setConstantBitrateSeekingEnabled(true)
+        .setConstantBitrateSeekingAlwaysEnabled(true)
+
     val dataSourceFactory = DriveStreamResolver.buildDataSourceFactory(context)
-    val mediaSourceFactory = DefaultMediaSourceFactory(context)
+    val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
         .setDataSourceFactory(dataSourceFactory)
 
     return ExoPlayer.Builder(context, renderers)
@@ -1208,8 +1242,8 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): Ex
 @Composable
 internal fun LoadingRing(modifier: Modifier = Modifier) {
     CircularProgressIndicator(
-        modifier = modifier.size(36.dp),
-        color = Color(0xFF66C2B4),
+        modifier = modifier.size(38.dp),
+        color = PlayerTurquoise,
         strokeWidth = 3.dp
     )
 }
@@ -1223,14 +1257,18 @@ enum class ScaleMode(val label: String) {
     ORIGINAL("Orijinal boyut (%100)")
 }
 
-internal val SPEED_PRESETS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f)
+internal val SPEED_PRESETS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f, 5f)
 
 internal fun speedLabel(v: Float): String {
     val r = Math.round(v * 100f) / 100f
     val t = if (r == r.toInt().toFloat()) r.toInt().toString() else r.toString().trimEnd('0').trimEnd('.')
-    return "${t}x"
+    return "${t}X"
 }
 
+/**
+ * Donanım birleştiricisi (Hardware Composer Overlay) kullanan SurfaceView:
+ * TextureView veya animasyonlu GPU ölçekleme kullanmadığı için ısınma yapmaz.
+ */
 @Composable
 internal fun VideoSurface(
     player: ExoPlayer,
@@ -1300,7 +1338,7 @@ internal fun OptionChip(
 }
 
 @Composable
-private fun TransientLabel(text: String?, onDone: () -> Unit) {
+internal fun TransientLabel(text: String?, onDone: () -> Unit) {
     if (text == null) return
     LaunchedEffect(text) {
         delay(1000)
@@ -1323,11 +1361,13 @@ private fun TransientLabel(text: String?, onDone: () -> Unit) {
 }
 
 @Composable
-private fun ScaleButton(
+internal fun ScaleButton(
     mode: ScaleMode,
     onChange: (ScaleMode) -> Unit,
     onMenuOpen: (Boolean) -> Unit,
-    tint: Color
+    tint: Color,
+    buttonSize: Dp = 48.dp,
+    iconSize: Dp = 24.dp
 ) {
     var open by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf<String?>(null) }
@@ -1338,7 +1378,7 @@ private fun ScaleButton(
     Box {
         Box(
             modifier = Modifier
-                .size(56.dp)
+                .size(buttonSize)
                 .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
@@ -1351,7 +1391,7 @@ private fun ScaleButton(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(24.dp))
+            Icon(Icons.Filled.AspectRatio, "Ölçekleme: ${mode.label}", tint = tint, modifier = Modifier.size(iconSize))
         }
         TransientLabel(hint) { hint = null }
         if (open) {
@@ -1387,12 +1427,14 @@ private fun ScaleButton(
 private val SPEED_LIST = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
 @Composable
-private fun SpeedButton(
+internal fun SpeedButton(
     speed: Float,
     onChange: (Float) -> Unit,
     onMenuOpen: (Boolean) -> Unit,
     tint: Color,
-    onOpenPanel: () -> Unit
+    onOpenPanel: () -> Unit,
+    buttonHeight: Dp = 48.dp,
+    fontSizeSp: Int = 15
 ) {
     var listOpen by remember { mutableStateOf(false) }
     val screenH = LocalConfiguration.current.screenHeightDp
@@ -1405,8 +1447,8 @@ private fun SpeedButton(
     Box {
         Box(
             modifier = Modifier
-                .height(56.dp)
-                .widthIn(min = 56.dp)
+                .height(buttonHeight)
+                .widthIn(min = buttonHeight)
                 .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
@@ -1417,10 +1459,10 @@ private fun SpeedButton(
                     },
                     onLongClick = { listOpen = false; onOpenPanel() }
                 )
-                .padding(horizontal = 8.dp),
+                .padding(horizontal = 6.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(speedLabel(speed), color = tint, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Text(speedLabel(speed), color = tint, fontSize = fontSizeSp.sp, fontWeight = FontWeight.Medium)
         }
         if (listOpen) {
             Popup(
@@ -1442,7 +1484,7 @@ private fun SpeedButton(
                         val sel = kotlin.math.abs(v - speed) < 0.001f
                         Text(
                             speedLabel(v),
-                            color = if (sel) PurpleLight else Color.White,
+                            color = if (sel) PlayerTurquoise else Color.White,
                             fontSize = 16.sp,
                             fontWeight = if (sel) FontWeight.Bold else FontWeight.Normal,
                             modifier = Modifier
@@ -1458,7 +1500,7 @@ private fun SpeedButton(
 }
 
 @Composable
-private fun SpeedPanelPopup(
+internal fun SpeedPanelPopup(
     speed: Float,
     onChange: (Float) -> Unit,
     onDismiss: () -> Unit
@@ -1499,7 +1541,7 @@ private fun SpeedPanelPopup(
                     valueRange = 0.25f..5f,
                     modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
                     colors = SliderDefaults.colors(
-                        thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = Color(0xFF3A3A42)
+                        thumbColor = PlayerTurquoise, activeTrackColor = PlayerTurquoise, inactiveTrackColor = Color(0xFF3A3A42)
                     )
                 )
                 Box(
@@ -1549,9 +1591,7 @@ private fun FullscreenPlayerDialog(
     onSeekTo: (Long) -> Unit,
     onExit: () -> Unit,
     overlayText: String? = null,
-    showLoading: Boolean = false,
-    immersive: Boolean = true,
-    onToggleImmersive: (() -> Unit)? = null
+    showLoading: Boolean = false
 ) {
     val context = LocalContext.current
     var controlsVisible by remember { mutableStateOf(true) }
@@ -1579,6 +1619,7 @@ private fun FullscreenPlayerDialog(
         val config = LocalConfiguration.current
         val orientationKey = config.orientation
         val sizeKey = config.screenWidthDp * 10000 + config.screenHeightDp
+        KeepSystemBarsHidden()
         DisposableEffect(view, orientationKey, sizeKey) {
             val window = (view.parent as? DialogWindowProvider)?.window
             val fix = Runnable {
@@ -1592,7 +1633,7 @@ private fun FullscreenPlayerDialog(
                     }
                     w.decorView.requestLayout()
                 }
-                if (immersive) hideSystemBarsOf(view)
+                hideSystemBarsOf(view)
                 view.requestLayout()
             }
             fix.run()
@@ -1602,29 +1643,26 @@ private fun FullscreenPlayerDialog(
                 view.removeCallbacks(fix)
             }
         }
-        LaunchedEffect(view, immersive, menuOpen, controlsVisible) {
+        LaunchedEffect(view, menuOpen, controlsVisible) {
             val window = (view.parent as? DialogWindowProvider)?.window
             if (window != null) {
                 WindowCompat.setDecorFitsSystemWindows(window, false)
                 val controller = WindowInsetsControllerCompat(window, view)
                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                if (immersive) controller.hide(WindowInsetsCompat.Type.systemBars())
-                else controller.show(WindowInsetsCompat.Type.systemBars())
+                controller.hide(WindowInsetsCompat.Type.systemBars())
             }
-            if (immersive) {
-                hideSystemBarsOf(view)
-                context.findActivity()?.window?.let { aw ->
-                    WindowInsetsControllerCompat(aw, aw.decorView).apply {
-                        systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                        hide(WindowInsetsCompat.Type.systemBars())
-                    }
+            hideSystemBarsOf(view)
+            context.findActivity()?.window?.let { aw ->
+                WindowInsetsControllerCompat(aw, aw.decorView).apply {
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    hide(WindowInsetsCompat.Type.systemBars())
                 }
             }
         }
         @OptIn(ExperimentalLayoutApi::class)
         val barsVisible = WindowInsets.areSystemBarsVisible
-        LaunchedEffect(barsVisible, immersive) {
-            if (immersive && barsVisible) {
+        LaunchedEffect(barsVisible) {
+            if (barsVisible) {
                 val window = (view.parent as? DialogWindowProvider)?.window
                 if (window != null) {
                     WindowInsetsControllerCompat(window, view)
@@ -1657,7 +1695,6 @@ private fun FullscreenPlayerDialog(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .then(if (immersive) Modifier else Modifier.windowInsetsPadding(WindowInsets.systemBars))
         ) {
             key(orientationKey) {
                 VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
@@ -1674,7 +1711,7 @@ private fun FullscreenPlayerDialog(
 
             SubtitleOverlay(
                 cueText,
-                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 190.dp else 24.dp)
+                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 180.dp else 24.dp)
             )
 
             if (showLoading && overlayText == null) {
@@ -1688,7 +1725,7 @@ private fun FullscreenPlayerDialog(
                     modifier = Modifier
                         .align(Alignment.Center)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xB3000000))
+                        .background(Color(0xCC000000))
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 )
             }
@@ -1704,8 +1741,7 @@ private fun FullscreenPlayerDialog(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(Color(0xCC0D0E12))
-                        .then(if (immersive) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
+                        .background(Color.Black.copy(alpha = 0.65f))
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
                     PlayerControls(
@@ -1739,12 +1775,11 @@ private fun FullscreenPlayerDialog(
                                 }
                                 IconButton(onClick = {
                                     interaction++
-                                    if (onToggleImmersive != null) onToggleImmersive() else onExit()
+                                    onExit()
                                 }, modifier = Modifier.size(44.dp)) {
-                                    val exitIcon = onToggleImmersive == null || scaleMode == ScaleMode.CROP
                                     Icon(
-                                        if (exitIcon) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                                        if (exitIcon) "Tam ekrandan çık" else "Tam ekran",
+                                        Icons.Filled.FullscreenExit,
+                                        "Tam ekrandan çık",
                                         tint = Color.White, modifier = Modifier.size(26.dp)
                                     )
                                 }
@@ -1758,17 +1793,16 @@ private fun FullscreenPlayerDialog(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  ÇOKLU VİDEO OYNATICI (1–4 EŞZAMANLI VİDEO, GOOGLE DRIVE AKIŞ VE EKLE SİSTEMİ)
+//  ÇOKLU VE TEKLİ VİDEO OYNATICI (1–4 EŞZAMANLI VİDEO, KLASİK TURKUAZ SLIDER,
+//  SIFIR GRİ ÇİZGİ, TAM EKRAN IMMERSIVE VE KESİNTİSİZ ODAK GEÇİŞİ)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Oynatıcıdaki tek bir video yuvası (en fazla 4 yuva aynı anda çalışır). */
 data class PlayerVideoSlot(
     val id: Long,
     val uri: Uri,
     val title: String? = null
 )
 
-/** Çoklu video ızgara düzeni modları. */
 enum class MultiGridMode(val badge: String) {
     AUTO("Otomatik"),
     SINGLE("1x1"),
@@ -1786,7 +1820,152 @@ private fun formatShortTime(ms: Long): String {
     else String.format(Locale.US, "%02d:%02d", m, s)
 }
 
-/** Geriye dönük uyumlu tek URI çağrısı. */
+/**
+ * Her bir video yuvasının ExoPlayer örneğini ve tüm oynatma durumunu üst seviyede tutar.
+ * Böylece videolardan biri tam ekran yapıldığında (focusedSlotId değiştiğinde) veya
+ * ızgara düzenine geri dönüldüğünde hiçbir ExoPlayer yeniden oluşturulmaz ve 00:00'a dönmez!
+ */
+internal class SlotPlayerHolder(
+    val slotId: Long,
+    context: Context,
+    isMultiView: Boolean
+) {
+    val appContext: Context = context.applicationContext
+    val player: ExoPlayer = buildFastPlayer(appContext, isMultiView = isMultiView)
+
+    var loadedUri: Uri? by mutableStateOf(null)
+    var isPlaying: Boolean by mutableStateOf(false)
+    var positionMs: Long by mutableLongStateOf(0L)
+    var durationMs: Long by mutableLongStateOf(0L)
+    var aspect: Float by mutableFloatStateOf(16f / 9f)
+    var videoWpx: Int by mutableIntStateOf(0)
+    var videoHpx: Int by mutableIntStateOf(0)
+    var scaleMode: ScaleMode by mutableStateOf(ScaleMode.FIT)
+    var speed: Float by mutableFloatStateOf(1f)
+    var muted: Boolean by mutableStateOf(false)
+    var tracks: Tracks by mutableStateOf(Tracks.EMPTY)
+    var cueText: String by mutableStateOf("")
+    var buffering: Boolean by mutableStateOf(true)
+    var errorText: String? by mutableStateOf(null)
+
+    private val listener = object : Player.Listener {
+        override fun onVideoSizeChanged(videoSize: VideoSize) {
+            if (videoSize.width > 0 && videoSize.height > 0) {
+                aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
+                videoWpx = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
+                videoHpx = videoSize.height
+            }
+        }
+        override fun onTracksChanged(t: Tracks) {
+            tracks = t
+        }
+        override fun onCues(cueGroup: CueGroup) {
+            cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
+        }
+        override fun onIsPlayingChanged(playing: Boolean) {
+            isPlaying = playing
+            positionMs = player.currentPosition.coerceAtLeast(0L)
+            val d = player.duration
+            if (d != C.TIME_UNSET && d > 0) durationMs = d
+        }
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            buffering = playbackState == Player.STATE_BUFFERING
+            if (playbackState == Player.STATE_READY) {
+                errorText = null
+                val d = player.duration
+                if (d != C.TIME_UNSET && d > 0) durationMs = d
+            }
+        }
+        override fun onPlayerError(error: PlaybackException) {
+            errorText = "Oynatılamadı: " + (error.message ?: error.errorCodeName)
+        }
+    }
+
+    init {
+        player.addListener(listener)
+    }
+
+    fun loadIfNeeded(uri: Uri, scope: CoroutineScope) {
+        if (loadedUri == uri) return
+        loadedUri = uri
+        errorText = null
+        buffering = true
+
+        scope.launch {
+            val urlStr = uri.toString()
+            var finalUri = uri
+
+            if ((uri.scheme == "http" || uri.scheme == "https") &&
+                DriveStreamResolver.isGoogleDriveUrl(urlStr) &&
+                !urlStr.contains("googleusercontent.com") &&
+                !urlStr.contains("confirm=t&uuid=")
+            ) {
+                val driveId = DriveStreamResolver.extractDriveFileId(urlStr)
+                if (driveId != null) {
+                    val resolved = DriveStreamResolver.resolveDriveFileIdToStream(driveId)
+                    if (resolved != null) {
+                        finalUri = Uri.parse(resolved.streamUrl)
+                    } else {
+                        finalUri = Uri.parse("https://drive.usercontent.google.com/download?id=$driveId&export=download&confirm=t")
+                    }
+                }
+            } else if (uri.scheme == "content" && !isCloudAuthority(uri.authority)) {
+                val localPath = withContext(Dispatchers.IO) {
+                    InputAccess.realPath(appContext, uri)
+                }
+                if (localPath != null) {
+                    finalUri = Uri.fromFile(File(localPath))
+                }
+            }
+
+            player.setMediaItem(MediaItem.fromUri(finalUri))
+            player.prepare()
+            player.playWhenReady = true
+        }
+    }
+
+    fun togglePlay() {
+        if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
+            player.pause()
+        } else {
+            if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+            player.play()
+        }
+    }
+
+    fun seekTo(targetMs: Long) {
+        val safe = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
+        player.seekTo(safe)
+        positionMs = safe
+    }
+
+    fun seekBy(deltaMs: Long) {
+        seekTo(player.currentPosition + deltaMs)
+    }
+
+    fun updateSpeed(newSpeed: Float) {
+        speed = newSpeed
+        player.setPlaybackSpeed(newSpeed)
+    }
+
+    fun toggleMute() {
+        muted = !muted
+        player.volume = if (muted) 0f else 1f
+    }
+
+    fun syncPositionFromPlayer() {
+        positionMs = player.currentPosition.coerceAtLeast(0L)
+        val d = player.duration
+        if (d != C.TIME_UNSET && d > 0) durationMs = d
+    }
+
+    fun release() {
+        player.removeListener(listener)
+        player.release()
+    }
+}
+
 @Composable
 fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
     val slots = remember(uri) { mutableStateListOf(PlayerVideoSlot(1L, uri)) }
@@ -1832,244 +2011,254 @@ fun StreamPlayerScreen(
     onExit: () -> Unit
 ) {
     val context = LocalContext.current
-    val view = LocalView.current
+    val scope = rememberCoroutineScope()
     val config = LocalConfiguration.current
     val isLandscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-    val activePlayers = remember { mutableStateMapOf<Long, ExoPlayer>() }
-    val slotPlayingMap = remember { mutableStateMapOf<Long, Boolean>() }
+    // Tüm ExoPlayer örnekleri üst seviyede tutulur: odak/tam ekran değiştiğinde ASLA sıfırlanmaz!
+    val holders = remember { mutableStateMapOf<Long, SlotPlayerHolder>() }
 
     var controlsVisible by remember { mutableStateOf(true) }
     var interactionTick by remember { mutableIntStateOf(0) }
     var anyPopupOpen by remember { mutableStateOf(false) }
 
-    var immersiveFullscreen by remember { mutableStateOf(false) }
     var focusedSlotId by remember { mutableStateOf<Long?>(null) }
     var gridMode by remember { mutableStateOf(MultiGridMode.AUTO) }
-
-    var masterVolume by remember { mutableFloatStateOf(1f) }
-    var masterMuted by remember { mutableStateOf(false) }
-
     var showAddDialog by remember { mutableStateOf(false) }
-    var showDriveBrowserForAdd by remember { mutableStateOf(false) }
-    var addDriveInitialFileId by remember { mutableStateOf<String?>(null) }
 
-    var resolvingSlot by remember { mutableStateOf<Pair<Long, DriveStreamResolver.SafDriveInfo>?>(null) }
-
-    LaunchedEffect(slots.size) {
-        if (focusedSlotId != null && slots.none { it.id == focusedSlotId }) {
-            focusedSlotId = null
+    // Yuvalar eklendikçe/silindikçe SlotPlayerHolder örneklerini eşitle
+    val slotIds = slots.map { it.id }.toSet()
+    slots.forEach { slot ->
+        val holder = holders.getOrPut(slot.id) {
+            SlotPlayerHolder(slot.id, context, isMultiView = slots.size > 1)
         }
+        holder.loadIfNeeded(slot.uri, scope)
     }
-
-    BackHandler {
-        when {
-            focusedSlotId != null -> focusedSlotId = null
-            immersiveFullscreen -> immersiveFullscreen = false
-            else -> onExit()
+    LaunchedEffect(slotIds) {
+        val removedIds = holders.keys.filter { it !in slotIds }
+        removedIds.forEach { id ->
+            holders.remove(id)?.release()
+        }
+        if (focusedSlotId != null && focusedSlotId !in slotIds) {
+            focusedSlotId = null
         }
     }
 
     DisposableEffect(Unit) {
         val activity = context.findActivity()
         val prevOrientation = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        val owner = activity as? LifecycleOwner
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                holders.values.forEach { it.player.pause() }
+            }
+        }
+        owner?.lifecycle?.addObserver(observer)
         onDispose {
+            owner?.lifecycle?.removeObserver(observer)
             activity?.requestedOrientation = prevOrientation
+            holders.values.forEach { it.release() }
+            holders.clear()
         }
     }
 
-    val anyPlaying = slotPlayingMap.values.any { it }
-    DisposableEffect(view, anyPlaying) {
-        val activityWindow = context.findActivity()?.window
-        val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        if (anyPlaying) {
-            view.keepScreenOn = true
-            activityWindow?.addFlags(flag)
-        } else {
-            view.keepScreenOn = false
-            activityWindow?.clearFlags(flag)
-        }
-        onDispose {
-            view.keepScreenOn = false
-            activityWindow?.clearFlags(flag)
-        }
-    }
+    val anyPlaying = holders.values.any { it.isPlaying }
 
-    LaunchedEffect(view, immersiveFullscreen, controlsVisible) {
-        val actWindow = context.findActivity()?.window ?: return@LaunchedEffect
-        WindowCompat.setDecorFitsSystemWindows(actWindow, !immersiveFullscreen)
-        val controller = WindowInsetsControllerCompat(actWindow, view)
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        if (immersiveFullscreen || !controlsVisible) {
-            controller.hide(WindowInsetsCompat.Type.systemBars())
-            hideSystemBarsOf(view)
-        } else {
-            controller.show(WindowInsetsCompat.Type.systemBars())
+    // Yalnızca kontroller görünürken konum güncellemesi yapılır -> gizliyken 0 recomposition, 0 ısınma!
+    LaunchedEffect(controlsVisible, anyPlaying, slots.size) {
+        while (controlsVisible && anyPlaying) {
+            holders.values.forEach { it.syncPositionFromPlayer() }
+            delay(250)
         }
     }
 
     LaunchedEffect(controlsVisible, anyPlaying, interactionTick, anyPopupOpen, showAddDialog) {
-        if (controlsVisible && anyPlaying && !anyPopupOpen && !showAddDialog && resolvingSlot == null) {
-            delay(4000)
+        if (controlsVisible && anyPlaying && !anyPopupOpen && !showAddDialog) {
+            delay(3500)
             controlsVisible = false
         }
     }
 
-    val effectiveLayoutLabel = when {
-        focusedSlotId != null -> "1x1"
-        gridMode != MultiGridMode.AUTO -> gridMode.badge
-        slots.size <= 1 -> "1x1"
-        slots.size == 2 -> if (isLandscape) "1x2" else "2x1"
-        else -> "2x2"
+    val handleBack: () -> Unit = {
+        if (focusedSlotId != null) {
+            focusedSlotId = null
+        } else {
+            onExit()
+        }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF090A0D))
-            .then(if (immersiveFullscreen) Modifier else Modifier.windowInsetsPadding(WindowInsets.systemBars))
+    BackHandler(onBack = handleBack)
+
+    // Tam ekran Immersive Dialog: pil ve durum çubuğu HER ZAMAN gizli, arka plan %100 simsiyah (#000000)
+    Dialog(
+        onDismissRequest = handleBack,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
-        if (controlsVisible && !immersiveFullscreen) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .background(Color(0xFF0D0E12))
-                    .padding(horizontal = 8.dp)
-            ) {
-                IconButton(onClick = {
-                    if (focusedSlotId != null) focusedSlotId = null else onExit()
-                }) {
-                    Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White)
+        val view = LocalView.current
+        val orientationKey = config.orientation
+        val sizeKey = config.screenWidthDp * 10000 + config.screenHeightDp
+        KeepSystemBarsHidden()
+
+        DisposableEffect(view, orientationKey, sizeKey) {
+            val window = (view.parent as? DialogWindowProvider)?.window
+            val fix = Runnable {
+                window?.let { w ->
+                    w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        val lp = w.attributes
+                        lp.layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                        w.attributes = lp
+                    }
+                    w.decorView.requestLayout()
                 }
-                Icon(
-                    Icons.Filled.PlayCircle,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(26.dp)
-                )
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "Video Oynatıcı",
-                    color = Color.White,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-                )
-                if (slots.size > 1) {
-                    Text(
-                        "${slots.size}/4 Video",
-                        color = TextSec,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(end = 12.dp)
-                    )
+                hideSystemBarsOf(view)
+                view.requestLayout()
+            }
+            fix.run()
+            view.post(fix)
+            view.postDelayed(fix, 250)
+            onDispose {
+                view.removeCallbacks(fix)
+            }
+        }
+
+        LaunchedEffect(view, controlsVisible, anyPopupOpen, showAddDialog, focusedSlotId) {
+            val window = (view.parent as? DialogWindowProvider)?.window
+            if (window != null) {
+                WindowCompat.setDecorFitsSystemWindows(window, false)
+                val controller = WindowInsetsControllerCompat(window, view)
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            }
+            hideSystemBarsOf(view)
+            context.findActivity()?.window?.let { aw ->
+                WindowCompat.setDecorFitsSystemWindows(aw, false)
+                WindowInsetsControllerCompat(aw, aw.decorView).apply {
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    hide(WindowInsetsCompat.Type.systemBars())
                 }
             }
         }
 
+        @OptIn(ExperimentalLayoutApi::class)
+        val barsVisible = WindowInsets.areSystemBarsVisible
+        LaunchedEffect(barsVisible) {
+            if (barsVisible) {
+                val window = (view.parent as? DialogWindowProvider)?.window
+                if (window != null) {
+                    WindowInsetsControllerCompat(window, view)
+                        .hide(WindowInsetsCompat.Type.systemBars())
+                }
+                hideSystemBarsOf(view)
+            }
+        }
+
+        DisposableEffect(view, anyPlaying) {
+            val dialogWindow = (view.parent as? DialogWindowProvider)?.window
+            val activityWindow = context.findActivity()?.window
+            val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            if (anyPlaying) {
+                view.keepScreenOn = true
+                dialogWindow?.addFlags(flag)
+                activityWindow?.addFlags(flag)
+            } else {
+                view.keepScreenOn = false
+                dialogWindow?.clearFlags(flag)
+                activityWindow?.clearFlags(flag)
+            }
+            onDispose {
+                view.keepScreenOn = false
+                dialogWindow?.clearFlags(flag)
+                activityWindow?.clearFlags(flag)
+            }
+        }
+
+        val singleSlot = when {
+            focusedSlotId != null -> slots.firstOrNull { it.id == focusedSlotId }
+            slots.size == 1 -> slots.firstOrNull()
+            gridMode == MultiGridMode.SINGLE -> slots.firstOrNull()
+            else -> null
+        }
+
         Box(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .background(Color(0xFF090A0D))
-                .padding(if (slots.size > 1 && focusedSlotId == null) 4.dp else 0.dp)
+                .fillMaxSize()
+                .background(Color.Black)
         ) {
-            val focusedSlot = slots.firstOrNull { it.id == focusedSlotId }
-            if (focusedSlot != null) {
-                key(focusedSlot.id) {
-                    SingleVideoSlotView(
-                        slot = focusedSlot,
-                        isMultiView = slots.size > 1,
-                        canClose = slots.size > 1,
-                        isFocused = true,
+            if (singleSlot != null) {
+                val holder = holders[singleSlot.id]
+                if (holder != null) {
+                    SingleOrFocusedPlayerContent(
+                        holder = holder,
+                        isFocusedFromMulti = focusedSlotId != null && slots.size > 1,
                         controlsVisible = controlsVisible,
-                        masterVolume = if (masterMuted) 0f else masterVolume,
-                        onToggleScreenControls = {
+                        onToggleControls = {
                             controlsVisible = !controlsVisible
+                            if (controlsVisible) holder.syncPositionFromPlayer()
                             interactionTick++
                         },
-                        onUserInteraction = { interactionTick++ },
-                        onPopupStateChange = { anyPopupOpen = it },
-                        onToggleFocus = { focusedSlotId = null },
-                        onCloseSlot = {
-                            focusedSlotId = null
-                            onRemoveSlot(focusedSlot.id)
+                        onInteraction = { interactionTick++ },
+                        onMenuOpen = { anyPopupOpen = it },
+                        onOpenAddDialog = {
+                            interactionTick++
+                            showAddDialog = true
                         },
-                        onPlayerRegistered = { p -> activePlayers[focusedSlot.id] = p },
-                        onPlayerUnregistered = {
-                            activePlayers.remove(focusedSlot.id)
-                            slotPlayingMap.remove(focusedSlot.id)
-                        },
-                        onPlayingStateChanged = { playing -> slotPlayingMap[focusedSlot.id] = playing },
-                        onNeedDriveSafResolve = { info -> resolvingSlot = focusedSlot.id to info },
-                        onResolvedDirectUri = { newUri, newTitle ->
-                            onUpdateSlotUri(focusedSlot.id, newUri, newTitle)
-                        },
-                        modifier = Modifier.fillMaxSize()
+                        onBackOrUnfocus = handleBack
                     )
                 }
             } else {
                 val modeToRender = when {
                     gridMode != MultiGridMode.AUTO -> gridMode
-                    slots.size <= 1 -> MultiGridMode.SINGLE
                     slots.size == 2 -> if (isLandscape) MultiGridMode.SPLIT_H else MultiGridMode.SPLIT_V
                     else -> MultiGridMode.GRID_2X2
                 }
+                val effectiveLayoutLabel = when (modeToRender) {
+                    MultiGridMode.SINGLE -> "1x1"
+                    MultiGridMode.SPLIT_H -> "1x2"
+                    MultiGridMode.SPLIT_V -> "2x1"
+                    MultiGridMode.GRID_2X2, MultiGridMode.AUTO -> "2x2"
+                }
 
                 @Composable
-                fun RenderSlot(slot: PlayerVideoSlot, mod: Modifier) {
-                    key(slot.id) {
-                        SingleVideoSlotView(
-                            slot = slot,
-                            isMultiView = slots.size > 1,
-                            canClose = slots.size > 1,
-                            isFocused = false,
-                            controlsVisible = controlsVisible,
-                            masterVolume = if (masterMuted) 0f else masterVolume,
-                            onToggleScreenControls = {
-                                controlsVisible = !controlsVisible
-                                interactionTick++
-                            },
-                            onUserInteraction = { interactionTick++ },
-                            onPopupStateChange = { anyPopupOpen = it },
-                            onToggleFocus = {
-                                if (slots.size > 1) {
+                fun RenderCell(slot: PlayerVideoSlot, mod: Modifier) {
+                    val holder = holders[slot.id]
+                    if (holder != null) {
+                        key(slot.id) {
+                            MultiGridVideoCell(
+                                holder = holder,
+                                controlsVisible = controlsVisible,
+                                onToggleControls = {
+                                    controlsVisible = !controlsVisible
+                                    if (controlsVisible) holders.values.forEach { it.syncPositionFromPlayer() }
+                                    interactionTick++
+                                },
+                                onInteraction = { interactionTick++ },
+                                onPopupStateChange = { anyPopupOpen = it },
+                                onMaximize = {
+                                    interactionTick++
+                                    holder.syncPositionFromPlayer()
                                     focusedSlotId = slot.id
-                                } else {
-                                    immersiveFullscreen = !immersiveFullscreen
-                                }
-                            },
-                            onCloseSlot = { onRemoveSlot(slot.id) },
-                            onPlayerRegistered = { p -> activePlayers[slot.id] = p },
-                            onPlayerUnregistered = {
-                                activePlayers.remove(slot.id)
-                                slotPlayingMap.remove(slot.id)
-                            },
-                            onPlayingStateChanged = { playing -> slotPlayingMap[slot.id] = playing },
-                            onNeedDriveSafResolve = { info -> resolvingSlot = slot.id to info },
-                            onResolvedDirectUri = { newUri, newTitle ->
-                                onUpdateSlotUri(slot.id, newUri, newTitle)
-                            },
-                            modifier = mod
-                        )
+                                },
+                                onCloseSlot = {
+                                    interactionTick++
+                                    onRemoveSlot(slot.id)
+                                },
+                                modifier = mod
+                            )
+                        }
                     }
                 }
 
+                // 4'lü ve 2'li ızgara: arka plan %100 simsiyah (#000000), gri çizgi yok, yuvarlak köşe yok!
                 when (modeToRender) {
-                    MultiGridMode.SINGLE -> {
-                        val first = slots.firstOrNull()
-                        if (first != null) {
-                            RenderSlot(first, Modifier.fillMaxSize())
-                        }
-                    }
                     MultiGridMode.SPLIT_H -> {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.fillMaxSize()
+                            horizontalArrangement = Arrangement.spacedBy(1.dp),
+                            modifier = Modifier.fillMaxSize().background(Color.Black)
                         ) {
                             slots.take(2).forEach { s ->
-                                RenderSlot(s, Modifier.weight(1f).fillMaxHeight())
+                                RenderCell(s, Modifier.weight(1f).fillMaxHeight())
                             }
                             if (slots.size < 2) {
                                 EmptyVideoSlotCard(
@@ -2081,11 +2270,11 @@ fun StreamPlayerScreen(
                     }
                     MultiGridMode.SPLIT_V -> {
                         Column(
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.fillMaxSize()
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                            modifier = Modifier.fillMaxSize().background(Color.Black)
                         ) {
                             slots.take(2).forEach { s ->
-                                RenderSlot(s, Modifier.weight(1f).fillMaxWidth())
+                                RenderCell(s, Modifier.weight(1f).fillMaxWidth())
                             }
                             if (slots.size < 2) {
                                 EmptyVideoSlotCard(
@@ -2095,248 +2284,139 @@ fun StreamPlayerScreen(
                             }
                         }
                     }
-                    MultiGridMode.GRID_2X2, MultiGridMode.AUTO -> {
+                    else -> {
                         Column(
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.fillMaxSize()
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                            modifier = Modifier.fillMaxSize().background(Color.Black)
                         ) {
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(1.dp),
                                 modifier = Modifier.weight(1f).fillMaxWidth()
                             ) {
                                 val s0 = slots.getOrNull(0)
-                                if (s0 != null) RenderSlot(s0, Modifier.weight(1f).fillMaxHeight())
+                                if (s0 != null) RenderCell(s0, Modifier.weight(1f).fillMaxHeight())
                                 else EmptyVideoSlotCard({ showAddDialog = true }, Modifier.weight(1f).fillMaxHeight())
 
                                 val s1 = slots.getOrNull(1)
-                                if (s1 != null) RenderSlot(s1, Modifier.weight(1f).fillMaxHeight())
+                                if (s1 != null) RenderCell(s1, Modifier.weight(1f).fillMaxHeight())
                                 else EmptyVideoSlotCard({ showAddDialog = true }, Modifier.weight(1f).fillMaxHeight())
                             }
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(1.dp),
                                 modifier = Modifier.weight(1f).fillMaxWidth()
                             ) {
                                 val s2 = slots.getOrNull(2)
-                                if (s2 != null) RenderSlot(s2, Modifier.weight(1f).fillMaxHeight())
+                                if (s2 != null) RenderCell(s2, Modifier.weight(1f).fillMaxHeight())
                                 else EmptyVideoSlotCard({ showAddDialog = true }, Modifier.weight(1f).fillMaxHeight())
 
                                 val s3 = slots.getOrNull(3)
-                                if (s3 != null) RenderSlot(s3, Modifier.weight(1f).fillMaxHeight())
+                                if (s3 != null) RenderCell(s3, Modifier.weight(1f).fillMaxHeight())
                                 else EmptyVideoSlotCard({ showAddDialog = true }, Modifier.weight(1f).fillMaxHeight())
                             }
                         }
                     }
                 }
-            }
-        }
 
-        if (controlsVisible && !immersiveFullscreen) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(60.dp)
-                    .background(Color(0xFF0D0E12))
-                    .padding(horizontal = 12.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Box(
+                // Çoklu görünümde yalnızca kontroller açıkken sol üstte kompakt yüzen kontrol çubuğu
+                if (controlsVisible) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
-                            .height(38.dp)
-                            .clip(RoundedCornerShape(19.dp))
-                            .background(Color(0xFF1A1D24))
-                            .border(1.dp, Color(0xFF2A2E39), RoundedCornerShape(19.dp))
-                            .clickable {
-                                interactionTick++
-                                showAddDialog = true
-                            }
-                            .padding(horizontal = 14.dp),
-                        contentAlignment = Alignment.Center
+                            .align(Alignment.TopStart)
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.Black.copy(alpha = 0.72f))
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.Link,
-                                contentDescription = "Video Ekle",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "Ekle",
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                        IconButton(
+                            onClick = onExit,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White, modifier = Modifier.size(20.dp))
                         }
-                    }
 
-                    Box(
-                        modifier = Modifier
-                            .height(38.dp)
-                            .clip(RoundedCornerShape(19.dp))
-                            .background(Color(0xFF1A1D24))
-                            .border(1.dp, Color(0xFF2A2E39), RoundedCornerShape(19.dp))
-                            .clickable {
-                                interactionTick++
-                                focusedSlotId = null
-                                gridMode = when (gridMode) {
-                                    MultiGridMode.AUTO -> MultiGridMode.GRID_2X2
-                                    MultiGridMode.GRID_2X2 -> MultiGridMode.SPLIT_H
-                                    MultiGridMode.SPLIT_H -> MultiGridMode.SPLIT_V
-                                    MultiGridMode.SPLIT_V -> MultiGridMode.SINGLE
-                                    MultiGridMode.SINGLE -> MultiGridMode.AUTO
+                        Box(
+                            modifier = Modifier
+                                .height(30.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF18181C))
+                                .clickable {
+                                    interactionTick++
+                                    showAddDialog = true
                                 }
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.Add, "Video Ekle", tint = PlayerTurquoise, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Ekle", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                             }
-                            .padding(horizontal = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                Icons.Filled.GridView,
-                                contentDescription = "Düzen",
-                                tint = Color.White,
-                                modifier = Modifier.size(17.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                effectiveLayoutLabel,
-                                color = Color.White,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
                         }
-                    }
-                }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    IconButton(
-                        onClick = {
-                            interactionTick++
-                            activePlayers.values.forEach { p ->
-                                p.seekTo((p.currentPosition - 10_000L).coerceAtLeast(0L))
-                            }
-                        },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(Icons.Filled.SkipPrevious, "Tümünü 10 sn geri sar", tint = Color.White, modifier = Modifier.size(22.dp))
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(Color.White)
-                            .clickable {
-                                interactionTick++
-                                if (anyPlaying) {
-                                    activePlayers.values.forEach { it.pause() }
-                                } else {
-                                    activePlayers.values.forEach { p ->
-                                        if (p.playbackState == Player.STATE_ENDED) p.seekTo(0L)
-                                        if (p.playbackState == Player.STATE_IDLE) p.prepare()
-                                        p.play()
+                        Box(
+                            modifier = Modifier
+                                .height(30.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF18181C))
+                                .clickable {
+                                    interactionTick++
+                                    gridMode = when (gridMode) {
+                                        MultiGridMode.AUTO -> MultiGridMode.GRID_2X2
+                                        MultiGridMode.GRID_2X2 -> MultiGridMode.SPLIT_H
+                                        MultiGridMode.SPLIT_H -> MultiGridMode.SPLIT_V
+                                        MultiGridMode.SPLIT_V -> MultiGridMode.SINGLE
+                                        MultiGridMode.SINGLE -> MultiGridMode.AUTO
                                     }
                                 }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            if (anyPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = if (anyPlaying) "Tümünü Duraklat" else "Tümünü Oynat",
-                            tint = Color(0xFF0D0E12),
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            interactionTick++
-                            activePlayers.values.forEach { p ->
-                                val dur = p.duration
-                                val target = p.currentPosition + 10_000L
-                                p.seekTo(if (dur > 0) target.coerceAtMost(dur) else target)
+                                .padding(horizontal = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.GridView, "Düzen", tint = Color.White, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(effectiveLayoutLabel, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                             }
-                        },
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(Icons.Filled.SkipNext, "Tümünü 10 sn ileri sar", tint = Color.White, modifier = Modifier.size(22.dp))
-                    }
-                }
+                        }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (isLandscape && config.screenWidthDp >= 560) {
                         IconButton(
                             onClick = {
                                 interactionTick++
-                                masterMuted = !masterMuted
+                                if (anyPlaying) {
+                                    holders.values.forEach { it.player.pause() }
+                                } else {
+                                    holders.values.forEach { h ->
+                                        if (h.player.playbackState == Player.STATE_ENDED) h.player.seekTo(0L)
+                                        if (h.player.playbackState == Player.STATE_IDLE) h.player.prepare()
+                                        h.player.play()
+                                    }
+                                }
                             },
                             modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
-                                if (masterMuted || masterVolume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                                contentDescription = "Ana Ses",
-                                tint = Color.White,
-                                modifier = Modifier.size(20.dp)
+                                if (anyPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                if (anyPlaying) "Tümünü Duraklat" else "Tümünü Oynat",
+                                tint = PlayerTurquoise,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
-                        Slider(
-                            value = if (masterMuted) 0f else masterVolume,
-                            onValueChange = {
-                                interactionTick++
-                                masterMuted = false
-                                masterVolume = it
-                            },
-                            valueRange = 0f..1f,
-                            modifier = Modifier.width(96.dp),
-                            colors = SliderDefaults.colors(
-                                thumbColor = Color.White,
-                                activeTrackColor = Color.White,
-                                inactiveTrackColor = Color(0xFF343844)
-                            )
-                        )
-                    }
 
-                    Box(
-                        modifier = Modifier
-                            .height(38.dp)
-                            .clip(RoundedCornerShape(19.dp))
-                            .background(Color(0xFF1A1D24))
-                            .border(1.dp, Color(0xFF2A2E39), RoundedCornerShape(19.dp))
-                            .clickable {
+                        IconButton(
+                            onClick = {
                                 interactionTick++
-                                immersiveFullscreen = !immersiveFullscreen
                                 val act = context.findActivity()
-                                if (act != null && !isLandscape) {
-                                    act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                if (act != null) {
+                                    val landscape = act.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                                    act.requestedOrientation = if (landscape)
+                                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                                    else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                                 }
-                            }
-                            .padding(horizontal = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                if (immersiveFullscreen) Icons.Filled.CloseFullscreen else Icons.Filled.OpenInFull,
-                                contentDescription = "Tam Ekran",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "Tam Ekran",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Filled.ScreenRotation, "Döndür", tint = Color.White, modifier = Modifier.size(19.dp))
                         }
                     }
                 }
@@ -2353,20 +2433,7 @@ fun StreamPlayerScreen(
             onAddUrl = { rawUrl ->
                 showAddDialog = false
                 val normalized = if (rawUrl.contains("://")) rawUrl else "https://$rawUrl"
-                val driveId = if (DriveStreamResolver.isGoogleDriveUrl(normalized)) {
-                    DriveStreamResolver.extractDriveFileId(normalized)
-                } else null
-                if (driveId != null) {
-                    addDriveInitialFileId = driveId
-                    showDriveBrowserForAdd = true
-                } else {
-                    onAddVideo(Uri.parse(normalized), null)
-                }
-            },
-            onOpenGoogleDrive = {
-                showAddDialog = false
-                addDriveInitialFileId = null
-                showDriveBrowserForAdd = true
+                onAddVideo(Uri.parse(normalized), null)
             },
             onPickSystemFile = {
                 showAddDialog = false
@@ -2378,274 +2445,269 @@ fun StreamPlayerScreen(
             }
         )
     }
-
-    if (showDriveBrowserForAdd) {
-        GoogleDriveBrowserDialog(
-            initialFileId = addDriveInitialFileId,
-            autoSearchFileName = null,
-            onDismiss = {
-                showDriveBrowserForAdd = false
-                addDriveInitialFileId = null
-            },
-            onStreamReady = { streamUri, title ->
-                showDriveBrowserForAdd = false
-                addDriveInitialFileId = null
-                onAddVideo(streamUri, title)
-            }
-        )
-    }
-
-    resolvingSlot?.let { (slotId, safInfo) ->
-        GoogleDriveBrowserDialog(
-            initialFileId = safInfo.fileId,
-            autoSearchFileName = safInfo.displayName,
-            onDismiss = { resolvingSlot = null },
-            onStreamReady = { streamUri, title ->
-                resolvingSlot = null
-                onUpdateSlotUri(slotId, streamUri, title ?: safInfo.displayName)
-            }
-        )
-    }
 }
 
+/**
+ * Tek video veya 4'lü ızgaradan büyütülmüş (focused) video görünümü:
+ * Eski klasik PlayerControls arayüzünü, turkuaz slider'ı, en-boy oranı (ScaleButton) butonunu
+ * ve sol alttaki "+ Ekle" butonunu birebir sunar.
+ */
 @Composable
-private fun EmptyVideoSlotCard(onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(Color(0xFF12141A))
-            .border(1.dp, Color(0xFF222631), RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.Filled.Add,
-                contentDescription = "Video Ekle",
-                tint = TextSec,
-                modifier = Modifier.size(32.dp)
-            )
-            Spacer(Modifier.height(6.dp))
-            Text("Video Ekle", color = TextSec, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-        }
-    }
-}
-
-@Composable
-private fun SingleVideoSlotView(
-    slot: PlayerVideoSlot,
-    isMultiView: Boolean,
-    canClose: Boolean,
-    isFocused: Boolean,
+private fun SingleOrFocusedPlayerContent(
+    holder: SlotPlayerHolder,
+    isFocusedFromMulti: Boolean,
     controlsVisible: Boolean,
-    masterVolume: Float,
-    onToggleScreenControls: () -> Unit,
-    onUserInteraction: () -> Unit,
-    onPopupStateChange: (Boolean) -> Unit,
-    onToggleFocus: () -> Unit,
-    onCloseSlot: () -> Unit,
-    onPlayerRegistered: (ExoPlayer) -> Unit,
-    onPlayerUnregistered: () -> Unit,
-    onPlayingStateChanged: (Boolean) -> Unit,
-    onNeedDriveSafResolve: (DriveStreamResolver.SafDriveInfo) -> Unit,
-    onResolvedDirectUri: (Uri, String?) -> Unit,
-    modifier: Modifier = Modifier
+    onToggleControls: () -> Unit,
+    onInteraction: () -> Unit,
+    onMenuOpen: (Boolean) -> Unit,
+    onOpenAddDialog: () -> Unit,
+    onBackOrUnfocus: () -> Unit
 ) {
     val context = LocalContext.current
-    val player = remember { buildFastPlayer(context, isMultiView = isMultiView) }
+    val orientationKey = LocalConfiguration.current.orientation
+    var showRing by remember { mutableStateOf(false) }
 
-    var isPlaying by remember { mutableStateOf(false) }
-    var positionMs by remember { mutableLongStateOf(0L) }
-    var durationMs by remember { mutableLongStateOf(0L) }
-    var aspect by remember { mutableFloatStateOf(16f / 9f) }
-    var videoWpx by remember { mutableIntStateOf(0) }
-    var videoHpx by remember { mutableIntStateOf(0) }
-    var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
-    var speed by remember { mutableFloatStateOf(1f) }
-    var slotMuted by remember { mutableStateOf(false) }
-    var tracks by remember { mutableStateOf(Tracks.EMPTY) }
-    var cueText by remember { mutableStateOf("") }
-    var buffering by remember { mutableStateOf(true) }
-    var showLoadingRing by remember { mutableStateOf(false) }
-    var errorText by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(holder.buffering) {
+        if (holder.buffering) {
+            delay(400)
+            showRing = true
+        } else {
+            showRing = false
+        }
+    }
 
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        key(holder.slotId, orientationKey) {
+            VideoSurface(
+                player = holder.player,
+                aspect = holder.aspect,
+                videoWpx = holder.videoWpx,
+                videoHpx = holder.videoHpx,
+                mode = holder.scaleMode,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onToggleControls
+                )
+        )
+
+        SubtitleOverlay(
+            text = holder.cueText,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = if (controlsVisible) 180.dp else 24.dp)
+        )
+
+        if (showRing && holder.errorText == null) {
+            LoadingRing(Modifier.align(Alignment.Center))
+        }
+
+        if (holder.errorText != null) {
+            Text(
+                text = holder.errorText ?: "",
+                color = Color.White,
+                fontSize = 14.sp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xCC000000))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            )
+        }
+
+        if (controlsVisible) {
+            IconButton(
+                onClick = onBackOrUnfocus,
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+            ) {
+                Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White)
+            }
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                PlayerControls(
+                    isPlaying = holder.isPlaying,
+                    positionMs = holder.positionMs,
+                    startMs = 0L,
+                    endMs = holder.durationMs,
+                    onTogglePlay = {
+                        onInteraction()
+                        holder.togglePlay()
+                    },
+                    onSeekBy = { delta ->
+                        onInteraction()
+                        holder.seekBy(delta)
+                    },
+                    onSeekTo = { pos ->
+                        onInteraction()
+                        holder.seekTo(pos)
+                    },
+                    speed = holder.speed,
+                    onSpeedChange = { newSpeed ->
+                        onInteraction()
+                        holder.updateSpeed(newSpeed)
+                    },
+                    scaleMode = holder.scaleMode,
+                    onScaleChange = { newScale ->
+                        onInteraction()
+                        holder.scaleMode = newScale
+                    },
+                    onMenuOpen = onMenuOpen,
+                    textColor = Color.White,
+                    leadingBottom = {
+                        Box(
+                            modifier = Modifier
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF18181C))
+                                .clickable(onClick = onOpenAddDialog)
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Filled.Add,
+                                    contentDescription = "Video Ekle",
+                                    tint = PlayerTurquoise,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    "Ekle",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    },
+                    trailing = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TrackMenuButtons(holder.player, holder.tracks, Color.White) { onMenuOpen(it) }
+                            IconButton(
+                                onClick = {
+                                    onInteraction()
+                                    holder.toggleMute()
+                                },
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Icon(
+                                    if (holder.muted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                                    contentDescription = "Ses",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    onInteraction()
+                                    val act = context.findActivity()
+                                    if (act != null) {
+                                        val landscape = act.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                                        act.requestedOrientation = if (landscape)
+                                            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                                        else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                    }
+                                },
+                                modifier = Modifier.size(38.dp)
+                            ) {
+                                Icon(Icons.Filled.ScreenRotation, "Döndür", tint = Color.White, modifier = Modifier.size(24.dp))
+                            }
+                            IconButton(
+                                onClick = {
+                                    onInteraction()
+                                    if (isFocusedFromMulti) {
+                                        onBackOrUnfocus()
+                                    } else {
+                                        holder.scaleMode = if (holder.scaleMode == ScaleMode.CROP) ScaleMode.FIT else ScaleMode.CROP
+                                    }
+                                },
+                                modifier = Modifier.size(42.dp)
+                            ) {
+                                val exitIcon = isFocusedFromMulti || holder.scaleMode == ScaleMode.CROP
+                                Icon(
+                                    if (exitIcon) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
+                                    if (exitIcon) "Küçült" else "Tam ekran",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(26.dp)
+                                )
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Çoklu (2–4) video ızgarasındaki her bir hücre:
+ * - Gri çerçeve ve yuvarlak köşe YOK (%100 simsiyah arka plan)
+ * - Dikey modda bile kaydırıcının (Slider) tam genişlikte rahatça kullanılabilmesi için
+ *   Turkuaz Slider üst satırda tam genişlikte, kontrol ve En-Boy Oranı (AspectRatio) butonları alt satırda yer alır.
+ */
+@Composable
+private fun MultiGridVideoCell(
+    holder: SlotPlayerHolder,
+    controlsVisible: Boolean,
+    onToggleControls: () -> Unit,
+    onInteraction: () -> Unit,
+    onPopupStateChange: (Boolean) -> Unit,
+    onMaximize: () -> Unit,
+    onCloseSlot: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var showRing by remember { mutableStateOf(false) }
+    var scaleHint by remember { mutableStateOf<String?>(null) }
     var speedMenuOpen by remember { mutableStateOf(false) }
-    var settingsMenuOpen by remember { mutableStateOf(false) }
 
-    LaunchedEffect(speedMenuOpen, settingsMenuOpen) {
-        onPopupStateChange(speedMenuOpen || settingsMenuOpen)
+    LaunchedEffect(speedMenuOpen) {
+        onPopupStateChange(speedMenuOpen)
     }
 
-    LaunchedEffect(buffering) {
-        if (buffering) {
+    LaunchedEffect(holder.buffering) {
+        if (holder.buffering) {
             delay(450)
-            showLoadingRing = true
+            showRing = true
         } else {
-            showLoadingRing = false
+            showRing = false
         }
     }
 
-    LaunchedEffect(player, masterVolume, slotMuted) {
-        player.volume = if (slotMuted) 0f else masterVolume
-    }
-
-    LaunchedEffect(player, speed) {
-        player.setPlaybackSpeed(speed)
-    }
-
-    DisposableEffect(player) {
-        onPlayerRegistered(player)
-        val listener = object : Player.Listener {
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                if (videoSize.width > 0 && videoSize.height > 0) {
-                    aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
-                    videoWpx = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
-                    videoHpx = videoSize.height
-                }
-            }
-            override fun onTracksChanged(t: Tracks) {
-                tracks = t
-            }
-            override fun onCues(cueGroup: CueGroup) {
-                cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
-            }
-            override fun onIsPlayingChanged(playing: Boolean) {
-                isPlaying = playing
-                onPlayingStateChanged(playing)
-                positionMs = player.currentPosition.coerceAtLeast(0L)
-                val d = player.duration
-                if (d != C.TIME_UNSET && d > 0) durationMs = d
-            }
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                buffering = playbackState == Player.STATE_BUFFERING
-                if (playbackState == Player.STATE_READY) {
-                    errorText = null
-                    val d = player.duration
-                    if (d != C.TIME_UNSET && d > 0) durationMs = d
-                }
-            }
-            override fun onPlayerError(error: PlaybackException) {
-                errorText = "Oynatılamadı: " + (error.message ?: error.errorCodeName)
-            }
+    LaunchedEffect(scaleHint) {
+        if (scaleHint != null) {
+            delay(900)
+            scaleHint = null
         }
-        player.addListener(listener)
-
-        val owner = context.findActivity() as? LifecycleOwner
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) player.pause()
-        }
-        owner?.lifecycle?.addObserver(observer)
-
-        onDispose {
-            owner?.lifecycle?.removeObserver(observer)
-            onPlayerUnregistered()
-            player.removeListener(listener)
-            player.release()
-        }
-    }
-
-    LaunchedEffect(slot.uri) {
-        errorText = null
-        buffering = true
-        val uri = slot.uri
-        val urlStr = uri.toString()
-
-        if (DriveStreamResolver.isGoogleDriveSafUri(uri)) {
-            val info = withContext(Dispatchers.IO) {
-                DriveStreamResolver.inspectSafDriveUri(context, uri)
-            }
-            if (info.fileId != null) {
-                val resolved = DriveStreamResolver.resolveDriveFileIdToStream(info.fileId)
-                if (resolved != null) {
-                    onResolvedDirectUri(Uri.parse(resolved.streamUrl), resolved.title ?: info.displayName)
-                    return@LaunchedEffect
-                }
-            }
-            onNeedDriveSafResolve(info)
-            return@LaunchedEffect
-        }
-
-        if (DriveStreamResolver.isGoogleDriveUrl(urlStr) &&
-            !urlStr.contains("googleusercontent.com") &&
-            !urlStr.contains("confirm=t&uuid=")
-        ) {
-            val driveId = DriveStreamResolver.extractDriveFileId(urlStr)
-            if (driveId != null) {
-                val resolved = DriveStreamResolver.resolveDriveFileIdToStream(driveId)
-                if (resolved != null) {
-                    onResolvedDirectUri(Uri.parse(resolved.streamUrl), resolved.title)
-                    return@LaunchedEffect
-                } else {
-                    onNeedDriveSafResolve(
-                        DriveStreamResolver.SafDriveInfo(
-                            fileId = driveId,
-                            displayName = slot.title ?: "Google Drive Video",
-                            sizeBytes = -1L
-                        )
-                    )
-                    return@LaunchedEffect
-                }
-            }
-        }
-
-        val cloud = uri.scheme == "content" && isCloudAuthority(uri.authority)
-        val playable = if (uri.scheme == "content" && !cloud) {
-            withContext(Dispatchers.IO) {
-                InputAccess.realPath(context, uri)
-            }?.let { Uri.fromFile(File(it)) } ?: uri
-        } else {
-            uri
-        }
-
-        player.setMediaItem(MediaItem.fromUri(playable))
-        player.prepare()
-        player.playWhenReady = true
-    }
-
-    LaunchedEffect(player, isPlaying, controlsVisible) {
-        while (isPlaying && controlsVisible) {
-            positionMs = player.currentPosition.coerceAtLeast(0L)
-            val d = player.duration
-            if (d != C.TIME_UNSET && d > 0) durationMs = d
-            delay(500)
-        }
-    }
-
-    val togglePlay: () -> Unit = {
-        onUserInteraction()
-        if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
-            player.pause()
-        } else {
-            if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-            if (player.playbackState == Player.STATE_IDLE) player.prepare()
-            player.play()
-        }
-    }
-
-    val seekTo: (Long) -> Unit = { targetMs ->
-        onUserInteraction()
-        val safe = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
-        player.seekTo(safe)
-        positionMs = safe
     }
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(if (isMultiView && !isFocused) 6.dp else 0.dp))
             .background(Color.Black)
-            .then(
-                if (isMultiView && !isFocused)
-                    Modifier.border(1.dp, Color(0xFF1F222B), RoundedCornerShape(6.dp))
-                else Modifier
-            )
             .clipToBounds()
     ) {
         VideoSurface(
-            player = player,
-            aspect = aspect,
-            videoWpx = videoWpx,
-            videoHpx = videoHpx,
-            mode = scaleMode,
+            player = holder.player,
+            aspect = holder.aspect,
+            videoWpx = holder.videoWpx,
+            videoHpx = holder.videoHpx,
+            mode = holder.scaleMode,
             modifier = Modifier.fillMaxSize()
         )
 
@@ -2655,231 +2717,265 @@ private fun SingleVideoSlotView(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onToggleScreenControls
+                    onClick = onToggleControls
                 )
         )
 
         SubtitleOverlay(
-            text = cueText,
+            text = holder.cueText,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = if (controlsVisible) 48.dp else 10.dp),
-            fontScale = if (isMultiView && !isFocused) 0.72f else 1f
+                .padding(bottom = if (controlsVisible) 64.dp else 8.dp),
+            fontScale = 0.72f
         )
 
-        if (showLoadingRing && errorText == null) {
+        if (showRing && holder.errorText == null) {
             LoadingRing(Modifier.align(Alignment.Center))
         }
 
-        if (errorText != null) {
+        if (scaleHint != null) {
             Text(
-                text = errorText ?: "",
+                text = scaleHint ?: "",
                 color = Color.White,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .padding(12.dp)
-                    .background(Color(0xCC141418), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .background(Color(0xD9000000), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            )
+        }
+
+        if (holder.errorText != null) {
+            Text(
+                text = holder.errorText ?: "",
+                color = Color.White,
+                fontSize = 11.sp,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(8.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
             )
         }
 
         if (controlsVisible) {
+            // Sağ üstte yalnızca kapatma ve büyütme kısayolu
             Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(8.dp)
+                    .padding(6.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xB3101218))
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
                         .clickable {
-                            onUserInteraction()
-                            onToggleFocus()
+                            onInteraction()
+                            onMaximize()
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        if (isFocused) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                        contentDescription = "Büyüt / Küçült",
+                        Icons.Filled.Fullscreen,
+                        contentDescription = "Büyüt",
                         tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
-
-                if (canClose) {
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xB3101218))
-                            .clickable {
-                                onUserInteraction()
-                                onCloseSlot()
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "Videoyu Kapat",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .clickable {
+                            onInteraction()
+                            onCloseSlot()
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Videoyu Kapat",
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            // Hücre alt kontrol paneli:
+            // 1. Satır: Tam genişlikte Turkuaz Slider (dikey telefonda bile rahatça görünür ve kaydırılır!)
+            // 2. Satır: Süre + En-Boy Oranı (AspectRatio), Oynat/Duraklat, Ses, Hız (1X), Tam Ekran
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(40.dp)
-                    .background(Color(0xD90E1015))
-                    .padding(horizontal = 8.dp)
+                    .background(Color.Black.copy(alpha = 0.72f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
-                IconButton(
-                    onClick = togglePlay,
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = if (isPlaying) "Duraklat" else "Oynat",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                Spacer(Modifier.width(2.dp))
-
-                IconButton(
-                    onClick = {
-                        onUserInteraction()
-                        slotMuted = !slotMuted
-                    },
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        if (slotMuted || masterVolume == 0f) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
-                        contentDescription = "Ses",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
-                Spacer(Modifier.width(4.dp))
-
-                Text(
-                    text = "${formatShortTime(positionMs)} / ${formatShortTime(durationMs)}",
-                    color = Color(0xFFE2E4EA),
-                    fontSize = 11.sp,
-                    maxLines = 1
-                )
-
-                Spacer(Modifier.width(6.dp))
-
-                val safeMax = durationMs.coerceAtLeast(1L).toFloat()
-                val safeCur = positionMs.coerceIn(0L, durationMs.coerceAtLeast(1L)).toFloat()
+                val safeMax = holder.durationMs.coerceAtLeast(1L).toFloat()
+                val safeCur = holder.positionMs.coerceIn(0L, holder.durationMs.coerceAtLeast(1L)).toFloat()
                 Slider(
                     value = safeCur,
-                    onValueChange = { seekTo(it.toLong()) },
+                    onValueChange = {
+                        onInteraction()
+                        holder.seekTo(it.toLong())
+                    },
                     valueRange = 0f..safeMax,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(26.dp),
                     colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = Color.White,
-                        inactiveTrackColor = Color(0xFF3A3E4C)
+                        thumbColor = PlayerTurquoise,
+                        activeTrackColor = PlayerTurquoise,
+                        inactiveTrackColor = Color(0xFF3A3A42)
                     )
                 )
 
-                Spacer(Modifier.width(6.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                ) {
+                    Text(
+                        text = "${formatShortTime(holder.positionMs)}/${formatShortTime(holder.durationMs)}",
+                        color = Color(0xFFE0E0E0),
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
+                    )
 
-                Box {
-                    Box(
-                        modifier = Modifier
-                            .height(24.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF232732))
-                            .clickable {
-                                onUserInteraction()
-                                speedMenuOpen = true
-                            }
-                            .padding(horizontal = 8.dp),
-                        contentAlignment = Alignment.Center
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Text(
-                            text = speedLabel(speed),
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = speedMenuOpen,
-                        onDismissRequest = { speedMenuOpen = false },
-                        properties = NonFocusPopup
-                    ) {
-                        SPEED_PRESETS.forEach { preset ->
-                            val selected = kotlin.math.abs(preset - speed) < 0.01f
-                            DropdownMenuItem(
-                                text = { Text(speedLabel(preset)) },
-                                leadingIcon = {
-                                    if (selected) Icon(Icons.Filled.Check, null, modifier = Modifier.size(18.dp))
-                                    else Spacer(Modifier.size(18.dp))
-                                },
-                                onClick = {
-                                    speed = preset
-                                    speedMenuOpen = false
-                                }
+                        // En-Boy Oranı (AspectRatio) butonu: her basışta En uygun -> Kırp -> Yay -> Orijinal geçişi yapar
+                        IconButton(
+                            onClick = {
+                                onInteraction()
+                                val all = ScaleMode.values()
+                                val next = all[(holder.scaleMode.ordinal + 1) % all.size]
+                                holder.scaleMode = next
+                                scaleHint = next.label
+                            },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.AspectRatio,
+                                contentDescription = "En-Boy Oranı: ${holder.scaleMode.label}",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
+
+                        IconButton(
+                            onClick = {
+                                onInteraction()
+                                holder.seekBy(-10_000L)
+                            },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Replay10,
+                                contentDescription = "10 sn geri",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                onInteraction()
+                                holder.togglePlay()
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(
+                                if (holder.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = if (holder.isPlaying) "Duraklat" else "Oynat",
+                                tint = PlayerTurquoise,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                onInteraction()
+                                holder.seekBy(10_000L)
+                            },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Forward10,
+                                contentDescription = "10 sn ileri",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        IconButton(
+                            onClick = {
+                                onInteraction()
+                                holder.toggleMute()
+                            },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(
+                                if (holder.muted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                                contentDescription = "Ses",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+
+                        Box {
+                            Box(
+                                modifier = Modifier
+                                    .height(22.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFF1F1F24))
+                                    .clickable {
+                                        onInteraction()
+                                        speedMenuOpen = true
+                                    }
+                                    .padding(horizontal = 5.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = speedLabel(holder.speed),
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = speedMenuOpen,
+                                onDismissRequest = { speedMenuOpen = false },
+                                properties = NonFocusPopup
+                            ) {
+                                KeepSystemBarsHidden()
+                                SPEED_PRESETS.forEach { preset ->
+                                    val selected = kotlin.math.abs(preset - holder.speed) < 0.01f
+                                    DropdownMenuItem(
+                                        text = { Text(speedLabel(preset)) },
+                                        leadingIcon = {
+                                            if (selected) Icon(Icons.Filled.Check, null, modifier = Modifier.size(18.dp))
+                                            else Spacer(Modifier.size(18.dp))
+                                        },
+                                        onClick = {
+                                            holder.updateSpeed(preset)
+                                            speedMenuOpen = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
-                }
-
-                Spacer(Modifier.width(4.dp))
-
-                Box {
-                    IconButton(
-                        onClick = {
-                            onUserInteraction()
-                            settingsMenuOpen = true
-                        },
-                        modifier = Modifier.size(28.dp)
-                    ) {
-                        Icon(
-                            Icons.Filled.Settings,
-                            contentDescription = "Ayarlar",
-                            tint = Color.White,
-                            modifier = Modifier.size(17.dp)
-                        )
-                    }
-                    SlotSettingsMenu(
-                        expanded = settingsMenuOpen,
-                        onDismiss = { settingsMenuOpen = false },
-                        player = player,
-                        tracks = tracks,
-                        scaleMode = scaleMode,
-                        onScaleModeChange = { scaleMode = it }
-                    )
-                }
-
-                IconButton(
-                    onClick = {
-                        onUserInteraction()
-                        onToggleFocus()
-                    },
-                    modifier = Modifier.size(28.dp)
-                ) {
-                    Icon(
-                        if (isFocused) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                        contentDescription = "Tam Ekran",
-                        tint = Color.White,
-                        modifier = Modifier.size(19.dp)
-                    )
                 }
             }
         }
@@ -2887,96 +2983,22 @@ private fun SingleVideoSlotView(
 }
 
 @Composable
-private fun SlotSettingsMenu(
-    expanded: Boolean,
-    onDismiss: () -> Unit,
-    player: ExoPlayer,
-    tracks: Tracks,
-    scaleMode: ScaleMode,
-    onScaleModeChange: (ScaleMode) -> Unit
-) {
-    val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-    val textGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
-    val params = player.trackSelectionParameters
-    val textOff = params.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
-
-    DropdownMenu(
-        expanded = expanded,
-        onDismissRequest = onDismiss,
-        properties = NonFocusPopup
+private fun EmptyVideoSlotCard(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .background(Color.Black)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
-        DropdownMenuItem(
-            text = { Text("Görüntü: ${scaleMode.label}", fontWeight = FontWeight.SemiBold) },
-            onClick = {
-                val all = ScaleMode.values()
-                onScaleModeChange(all[(scaleMode.ordinal + 1) % all.size])
-                onDismiss()
-            }
-        )
-
-        if (audioGroups.isNotEmpty()) {
-            Divider(color = Outline, thickness = 0.5.dp)
-            var aIdx = 0
-            audioGroups.forEach { g ->
-                for (i in 0 until g.length) {
-                    val label = trackLabel(g.getTrackFormat(i), true, aIdx++)
-                    val sel = g.isTrackSelected(i)
-                    DropdownMenuItem(
-                        text = { Text("Ses: $label") },
-                        leadingIcon = {
-                            if (sel) Icon(Icons.Filled.Check, null, modifier = Modifier.size(18.dp))
-                            else Spacer(Modifier.size(18.dp))
-                        },
-                        onClick = {
-                            player.trackSelectionParameters = player.trackSelectionParameters
-                                .buildUpon()
-                                .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i))
-                                .build()
-                            onDismiss()
-                        }
-                    )
-                }
-            }
-        }
-
-        if (textGroups.isNotEmpty()) {
-            Divider(color = Outline, thickness = 0.5.dp)
-            DropdownMenuItem(
-                text = { Text("Altyazı: Kapalı") },
-                leadingIcon = {
-                    if (textOff) Icon(Icons.Filled.Check, null, modifier = Modifier.size(18.dp))
-                    else Spacer(Modifier.size(18.dp))
-                },
-                onClick = {
-                    player.trackSelectionParameters = player.trackSelectionParameters
-                        .buildUpon()
-                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                        .build()
-                    onDismiss()
-                }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                Icons.Filled.Add,
+                contentDescription = "Video Ekle",
+                tint = TextMuted,
+                modifier = Modifier.size(28.dp)
             )
-            var tIdx = 0
-            textGroups.forEach { g ->
-                for (i in 0 until g.length) {
-                    val label = trackLabel(g.getTrackFormat(i), false, tIdx++)
-                    val sel = !textOff && g.isTrackSelected(i)
-                    DropdownMenuItem(
-                        text = { Text("Altyazı: $label") },
-                        leadingIcon = {
-                            if (sel) Icon(Icons.Filled.Check, null, modifier = Modifier.size(18.dp))
-                            else Spacer(Modifier.size(18.dp))
-                        },
-                        onClick = {
-                            player.trackSelectionParameters = player.trackSelectionParameters
-                                .buildUpon()
-                                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i))
-                                .build()
-                            onDismiss()
-                        }
-                    )
-                }
-            }
+            Spacer(Modifier.height(4.dp))
+            Text("Video Ekle", color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
     }
 }
@@ -2988,7 +3010,6 @@ private fun AddVideoSourceDialog(
     onNeedStorage: () -> Unit,
     onDismiss: () -> Unit,
     onAddUrl: (String) -> Unit,
-    onOpenGoogleDrive: () -> Unit,
     onPickSystemFile: () -> Unit,
     onPlayLocalFile: (File) -> Unit
 ) {
@@ -3012,6 +3033,7 @@ private fun AddVideoSourceDialog(
     }
 
     Dialog(onDismissRequest = onDismiss) {
+        KeepSystemBarsHidden()
         Column(
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier
@@ -3039,7 +3061,7 @@ private fun AddVideoSourceDialog(
             OutlinedTextField(
                 value = urlText,
                 onValueChange = { urlText = it },
-                label = { Text("URL veya Google Drive Bağlantısı") },
+                label = { Text("URL") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = {
@@ -3056,14 +3078,6 @@ private fun AddVideoSourceDialog(
             ) {
                 Icon(Icons.Filled.Link, null, modifier = Modifier.padding(end = 8.dp))
                 Text("URL'yi Ekle ve Oynat")
-            }
-
-            OutlinedButton(
-                onClick = onOpenGoogleDrive,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Filled.CloudQueue, null, tint = PurpleLight, modifier = Modifier.padding(end = 8.dp))
-                Text("Google Drive'dan Seç (İndirmeden)", color = TextPrimary)
             }
 
             OutlinedButton(

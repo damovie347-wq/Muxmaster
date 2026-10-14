@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.AlertDialog
@@ -69,28 +70,46 @@ class MainActivity : AppCompatActivity() {
     private val playSlots = mutableStateListOf<PlayerVideoSlot>()
     private var nextSlotId = 1L
 
-    /** Sistem seçicisinden yeni video ekleme mi yapılıyor, yoksa ilk video mu açılıyor? */
+    /** Sistem seçicisinden yeni video ekleme mi yapılıyor, yoksa tekli video mu açılıyor? */
     private var pickingToAddSlot = false
 
     /** "Birlikte aç" ile gelen video: kullanıcıya ne yapmak istediği sorulur. */
     private val pendingOpen = mutableStateOf<Pair<Uri, String>?>(null)
+
+    /** Uygulama içinden zaten video oynarken yeni bir video seçildiğinde tekli mi çoklu mu sorulur. */
+    private val pendingSingleOrMulti = mutableStateOf<Pair<Uri, String?>?>(null)
+
     /** Video başka bir uygulamadan (dosya yöneticisi vb.) mı açıldı? Öyleyse geri = o uygulamaya dön. */
     private val playFromExternal = mutableStateOf(false)
 
     private fun openSingleInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean = false) {
         playFromExternal.value = fromExternal
+        DriveStreamResolver.releaseAllSessions()
         playSlots.clear()
         playSlots.add(PlayerVideoSlot(nextSlotId++, uri, title))
         screenState?.value = 5
     }
 
-    private fun addSlotInPlayer(uri: Uri, title: String? = null) {
+    private fun addSlotInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean? = null) {
+        if (fromExternal != null && playSlots.isEmpty()) {
+            playFromExternal.value = fromExternal
+        }
         if (playSlots.size < 4) {
             playSlots.add(PlayerVideoSlot(nextSlotId++, uri, title))
         } else {
+            val removed = playSlots.lastOrNull()
+            DriveStreamResolver.releaseSession(removed?.uri)
             playSlots[playSlots.lastIndex] = PlayerVideoSlot(nextSlotId++, uri, title)
         }
         screenState?.value = 5
+    }
+
+    private fun handleInternalPlayerOpen(uri: Uri, title: String?) {
+        if (playSlots.isNotEmpty()) {
+            pendingSingleOrMulti.value = uri to title
+        } else {
+            openSingleInPlayer(uri, title, fromExternal = false)
+        }
     }
 
     /** Uygulama içinden "Video Oynatıcı" ile video seçme. */
@@ -106,17 +125,15 @@ class MainActivity : AppCompatActivity() {
         val addMode = pickingToAddSlot
         pickingToAddSlot = false
         if (uri != null) {
-            // Google Drive SAF URI'lerinde openDocument/indirme tetiklenmemesi için
-            // yalnızca yerel sağlayıcılarda persistable izin alınır.
             if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
                 try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
                 catch (_: Exception) { }
             }
             val name = queryDisplayName(uri)
-            if (addMode && playSlots.isNotEmpty()) {
-                addSlotInPlayer(uri, name)
+            if (addMode) {
+                addSlotInPlayer(uri, name, fromExternal = false)
             } else {
-                openSingleInPlayer(uri, name, fromExternal = false)
+                handleInternalPlayerOpen(uri, name)
             }
         }
     }
@@ -125,6 +142,7 @@ class MainActivity : AppCompatActivity() {
     private fun exitPlayer() {
         val external = playFromExternal.value
         playFromExternal.value = false
+        DriveStreamResolver.releaseAllSessions()
         playSlots.clear()
         screenState?.value = if (external) 0 else 6
         if (external) {
@@ -264,17 +282,32 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
 
+                pendingSingleOrMulti.value?.let { (uri, title) ->
+                    SingleOrMultiPlayDialog(
+                        fileName = title ?: uri.lastPathSegment ?: "Video",
+                        onDismiss = { pendingSingleOrMulti.value = null },
+                        onPlaySingle = {
+                            pendingSingleOrMulti.value = null
+                            openSingleInPlayer(uri, title, fromExternal = false)
+                        },
+                        onPlayMulti = {
+                            pendingSingleOrMulti.value = null
+                            addSlotInPlayer(uri, title, fromExternal = false)
+                        }
+                    )
+                }
+
                 pendingOpen.value?.let { (uri, name) ->
                     OpenWithChooser(
                         fileName = name,
                         onDismiss = { pendingOpen.value = null },
-                        onPlay = {
+                        onPlaySingle = {
                             pendingOpen.value = null
-                            if (screen == 5 && playSlots.isNotEmpty() && playSlots.size < 4) {
-                                addSlotInPlayer(uri, name)
-                            } else {
-                                openSingleInPlayer(uri, name, fromExternal = true)
-                            }
+                            openSingleInPlayer(uri, name, fromExternal = true)
+                        },
+                        onPlayMulti = {
+                            pendingOpen.value = null
+                            addSlotInPlayer(uri, name, fromExternal = true)
                         },
                         onMux = { pendingOpen.value = null; muxViewModel.onVideoSelected(uri, name); screen = 0 },
                         onTrim = { pendingOpen.value = null; trimViewModel.onVideoSelected(uri, name); screen = 2 },
@@ -318,6 +351,8 @@ class MainActivity : AppCompatActivity() {
                                 slots = playSlots,
                                 onAddVideo = { uri, title -> addSlotInPlayer(uri, title) },
                                 onRemoveSlot = { id ->
+                                    val target = playSlots.firstOrNull { it.id == id }
+                                    DriveStreamResolver.releaseSession(target?.uri)
                                     playSlots.removeAll { it.id == id }
                                     if (playSlots.isEmpty()) exitPlayer()
                                 },
@@ -344,17 +379,17 @@ class MainActivity : AppCompatActivity() {
                         onBack = { screen = 0 },
                         onOpenUrl = { text ->
                             val u = if (text.contains("://")) text else "https://$text"
-                            openSingleInPlayer(Uri.parse(u), fromExternal = false)
+                            handleInternalPlayerOpen(Uri.parse(u), null)
                         },
                         onPickFile = {
                             pickingToAddSlot = false
                             pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*"))
                         },
                         onPlayFile = { f ->
-                            openSingleInPlayer(Uri.fromFile(f), f.name, fromExternal = false)
+                            handleInternalPlayerOpen(Uri.fromFile(f), f.name)
                         },
                         onOpenStreamUri = { streamUri ->
-                            openSingleInPlayer(streamUri, fromExternal = false)
+                            handleInternalPlayerOpen(streamUri, null)
                         },
                         onNeedStorage = { requestStorageAccess() },
                         hasStorage = { com.example.muxmaster.data.InputAccess.hasStorageAccess(this@MainActivity) }
@@ -396,8 +431,8 @@ class MainActivity : AppCompatActivity() {
 
         val scheme = uri.scheme?.lowercase()
         if (scheme == "http" || scheme == "https") {
-            if (screenState?.value == 5 && playSlots.isNotEmpty() && playSlots.size < 4) {
-                addSlotInPlayer(uri)
+            if (playSlots.isNotEmpty()) {
+                pendingOpen.value = uri to (uri.lastPathSegment ?: uri.toString())
             } else {
                 openSingleInPlayer(uri, fromExternal = true)
             }
@@ -450,10 +485,39 @@ class MainActivity : AppCompatActivity() {
 }
 
 @Composable
+private fun SingleOrMultiPlayDialog(
+    fileName: String,
+    onDismiss: () -> Unit,
+    onPlaySingle: () -> Unit,
+    onPlayMulti: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Videoyu nasıl oynatmak istiyorsunuz?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(fileName, maxLines = 2)
+                OutlinedButton(onClick = onPlaySingle, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.PlayCircle, null, modifier = Modifier.padding(end = 10.dp))
+                    Text("Tek video olarak oynat", modifier = Modifier.weight(1f))
+                }
+                OutlinedButton(onClick = onPlayMulti, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.GridView, null, modifier = Modifier.padding(end = 10.dp))
+                    Text("Çoklu videoya ekle (Multi Video)", modifier = Modifier.weight(1f))
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
+    )
+}
+
+@Composable
 private fun OpenWithChooser(
     fileName: String,
     onDismiss: () -> Unit,
-    onPlay: () -> Unit,
+    onPlaySingle: () -> Unit,
+    onPlayMulti: () -> Unit,
     onMux: () -> Unit,
     onTrim: () -> Unit,
     onMerge: () -> Unit,
@@ -472,7 +536,8 @@ private fun OpenWithChooser(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(fileName, maxLines = 2)
-                Choice(Icons.Filled.PlayCircle, "Oynat (video oynatıcı)", onPlay)
+                Choice(Icons.Filled.PlayCircle, "Oynat (video oynatıcı)", onPlaySingle)
+                Choice(Icons.Filled.GridView, "Çoklu Oynat (Multi Video)", onPlayMulti)
                 Choice(Icons.Filled.Layers, "Mux Master (ses / altyazı ekle-çıkar)", onMux)
                 Choice(Icons.Filled.ContentCut, "Kırp / Kes", onTrim)
                 Choice(Icons.Filled.CallMerge, "Birleştir", onMerge)
