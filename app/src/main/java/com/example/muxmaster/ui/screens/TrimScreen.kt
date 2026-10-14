@@ -1,45 +1,21 @@
 package com.example.muxmaster.ui.screens
 
 import android.app.Activity
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
-import androidx.media3.common.PlaybackException
-import android.content.res.Configuration
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.filled.Subtitles
-import androidx.compose.material.icons.filled.SubtitlesOff
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.unit.Dp
-import androidx.media3.common.C
-import androidx.media3.common.Format
-import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.Tracks
-import androidx.media3.common.text.CueGroup
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
-import android.net.Uri
-import android.view.TextureView
-import androidx.compose.ui.text.style.TextAlign
-import android.view.WindowManager
+import android.content.res.Configuration
+import android.os.Build
+import android.view.SurfaceView
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -47,8 +23,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
@@ -61,16 +40,21 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.SubtitlesOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -79,45 +63,55 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AspectRatio
-import androidx.compose.material.icons.filled.Remove
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.common.text.CueGroup
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
-import android.os.Build
-import android.view.View
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.components.VideoCard
 import com.example.muxmaster.ui.theme.*
 import com.example.muxmaster.viewmodel.TrimViewModel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.Locale
 
 private fun formatClock(ms: Long): String {
@@ -128,7 +122,7 @@ private fun formatClock(ms: Long): String {
     return String.format(Locale.US, "%02d:%02d.%03d", m, s, msec)
 }
 
-private fun Context.findActivity(): Activity? {
+internal fun Context.findActivity(): Activity? {
     var c: Context? = this
     while (c is ContextWrapper) {
         if (c is Activity) return c
@@ -171,7 +165,6 @@ fun TrimScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            // ── OYNATICI: seçilen aralığı birebir önizler ─────────────────────
             if (video != null) {
                 TrimPlayer(
                     video = video,
@@ -182,7 +175,6 @@ fun TrimScreen(
                 Spacer(Modifier.height(12.dp))
             }
 
-            // ── KLASÖR SEÇ + SIRADAKİ VİDEO ──────────────────────────────────
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = onPickFolder,
@@ -214,7 +206,6 @@ fun TrimScreen(
                     }
                 }
             }
-            // Seçili klasör + sayaç + KAPAT (çarpı)
             if (viewModel.folderQueue.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Row(
@@ -494,27 +485,6 @@ private fun TimeInputGroup(
     }
 }
 
-/**
- * Sayısal zaman alanı (dakika / saniye / salise).
- *
- * KÖK NEDEN (eski hata - "20 yazan kutuyu silip 12 yazamıyorum"): bu alanın
- * gösterdiği metin eskiden HER recomposition'da dışarıdaki `value`den (üstteki
- * trimStartMs/trimEndMs'ten bölünerek) yeniden hesaplanıyordu. Kullanıcı bir
- * tuşa bastığında bu, üst state'e anında yansıyor, üst state ise (ör. minimum
- * aralık sınırlaması) değeri farklı bir sayıya yuvarlayabiliyordu; Compose'un
- * "value: String" alan TextField'ı da dışarıdan gelen değerle kendi tuttuğu
- * son metin uyuşmayınca imleci/metni dışarıdaki değere göre sıfırlıyordu. Sonuç
- * olarak atılan tuş "yutuluyor" ve kutu eski sayıya (ör. "20") geri dönüyormuş
- * gibi görünüyordu.
- *
- * ÇÖZÜM: Alan artık KENDİ yerel metnini (`text`) tutar ve ekranda her zaman
- * kullanıcının o an gerçekten yazdığını gösterir. Dışarıdaki `value` sadece bu
- * alan odakta DEĞİLKEN metne yansıtılır (video ilk yüklenirken, slider
- * sürüklenirken ya da kardeş bir alan değiştiğinde); alan odaktan çıkınca
- * (blur) nihai/sınırlanmış değere göre normalize edilir. Böylece dışarıdaki
- * yeniden hesaplamalar, kullanıcı o kutuya yazarken asla onun tuşlarının
- * üzerine yazmaz.
- */
 @Composable
 private fun TimeField(
     value: Long,
@@ -547,8 +517,6 @@ private fun TimeField(
         textStyle = TextStyle(fontSize = 13.sp),
         modifier = modifier.onFocusChanged { state ->
             if (hasFocus && !state.isFocused) {
-                // Odaktan çıkınca kutuyu gerçek/sınırlanmış değere göre normalize et
-                // (ör. boş bırakılmışsa "0", ya da girilen sayı sınırlandıysa o değer).
                 text = value.toString()
             }
             hasFocus = state.isFocused
@@ -561,10 +529,10 @@ private fun TimeField(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  OYNATICI
+//  OYNATICI ORTAK BİLEŞENLER VE DONANIM OPTİMİZASYONU
 // ─────────────────────────────────────────────────────────────────────────────
 
-private fun trackLabel(f: Format, isAudio: Boolean, index: Int): String {
+internal fun trackLabel(f: Format, isAudio: Boolean, index: Int): String {
     val lang = f.language?.takeIf { it.isNotBlank() && it != "und" }?.let { code ->
         val name = runCatching { Locale(code).getDisplayLanguage(Locale.getDefault()) }.getOrDefault("")
         if (name.isBlank() || name.equals(code, ignoreCase = true)) code.uppercase() else name
@@ -582,9 +550,8 @@ private fun trackLabel(f: Format, isAudio: Boolean, index: Int): String {
     return listOfNotNull(base, ch).joinToString(", ")
 }
 
-/** Ses ve altyazı seçim menüleri (müzik notu / altyazı simgeleri). */
 @Composable
-private fun TrackMenuButtons(
+internal fun TrackMenuButtons(
     player: ExoPlayer,
     tracks: Tracks,
     tint: Color,
@@ -595,9 +562,6 @@ private fun TrackMenuButtons(
     var audioMenu by remember { mutableStateOf(false) }
     var textMenu by remember { mutableStateOf(false) }
     var sizePanel by remember { mutableStateOf(false) }
-    // AÇ/KAPA DÜZELTMESİ: odak çalmayan popup, düğmeye dokunuşun ilk anında (dışarı
-    // dokunma) kapanır; ardından aynı dokunuşun "tıklama"sı menüyü tekrar açıyordu.
-    // Kapanma anı kaydedilir, hemen ardından gelen tıklama yok sayılır.
     var audioClosedAt by remember { mutableLongStateOf(0L) }
     var textClosedAt by remember { mutableLongStateOf(0L) }
     var sizeClosedAt by remember { mutableLongStateOf(0L) }
@@ -659,7 +623,6 @@ private fun TrackMenuButtons(
     }
     if (textGroups.isNotEmpty()) {
         Box {
-            // DOKUN -> altyazı parçası seçimi, BASILI TUT -> altyazı boyutu paneli
             Box(
                 modifier = Modifier
                     .size(44.dp)
@@ -694,8 +657,8 @@ private fun TrackMenuButtons(
                     Column(
                         modifier = Modifier
                             .width(300.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xF2141418))
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF141418))
                             .padding(horizontal = 14.dp, vertical = 12.dp)
                     ) {
                         Text("Altyazı boyutu: ${cur.toInt()}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
@@ -754,32 +717,31 @@ private fun TrackMenuButtons(
     }
 }
 
-// ── Altyazı boyutu (kalıcı, tüm oynatıcılarda ortak) ─────────────────────────
-private const val SUBTITLE_MIN_SP = 12f
-private const val SUBTITLE_MAX_SP = 44f
-private val SUBTITLE_PRESETS = listOf("Küçük" to 16f, "Normal" to 20f, "Büyük" to 26f, "Çok büyük" to 32f, "Dev" to 40f)
-private val subtitleSizeState = mutableFloatStateOf(20f)
+internal const val SUBTITLE_MIN_SP = 12f
+internal const val SUBTITLE_MAX_SP = 44f
+internal val SUBTITLE_PRESETS = listOf("Küçük" to 16f, "Normal" to 20f, "Büyük" to 26f, "Çok büyük" to 32f, "Dev" to 40f)
+internal val subtitleSizeState = mutableFloatStateOf(20f)
 private var subtitleSizeLoaded = false
 
-private fun loadSubtitleSize(ctx: Context) {
+internal fun loadSubtitleSize(ctx: Context) {
     if (subtitleSizeLoaded) return
     subtitleSizeLoaded = true
     subtitleSizeState.floatValue = ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
         .getFloat("subtitle_sp", 20f).coerceIn(SUBTITLE_MIN_SP, SUBTITLE_MAX_SP)
 }
 
-private fun saveSubtitleSize(ctx: Context, v: Float) {
+internal fun saveSubtitleSize(ctx: Context, v: Float) {
     val c = v.coerceIn(SUBTITLE_MIN_SP, SUBTITLE_MAX_SP)
     subtitleSizeState.floatValue = c
     ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE).edit().putFloat("subtitle_sp", c).apply()
 }
 
 @Composable
-private fun SubtitleOverlay(text: String, modifier: Modifier = Modifier) {
+internal fun SubtitleOverlay(text: String, modifier: Modifier = Modifier, fontScale: Float = 1f) {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { loadSubtitleSize(ctx) }
     if (text.isBlank()) return
-    val sp = subtitleSizeState.floatValue
+    val sp = (subtitleSizeState.floatValue * fontScale).coerceIn(10f, 44f)
     Text(
         text,
         color = Color.White,
@@ -787,20 +749,12 @@ private fun SubtitleOverlay(text: String, modifier: Modifier = Modifier) {
         lineHeight = (sp * 1.2f).sp,
         textAlign = TextAlign.Center,
         modifier = modifier
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .background(Color(0xB3000000), RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 2.dp)
     )
 }
 
-/**
- * Kırpma önizleme oynatıcısı.
- *
- * - Oynatma seçili aralıkta ([startMs]..[endMs]) yapılır: bitiş noktasında durur.
- * - Başlangıç değişince o kareye, bitiş değişince bitişten ~1.5 sn öncesine atlar.
- * - Tam ekran: aynı oynatıcıyı kullanır, konum KORUNUR (başa sarmaz). Ekrana dokununca
- *   kontroller gizlenir/görünür. Ses ve altyazı parçası seçilebilir.
- */
 @Composable
 private fun TrimPlayer(
     video: VideoFile,
@@ -809,7 +763,7 @@ private fun TrimPlayer(
     isTrimming: Boolean
 ) {
     val context = LocalContext.current
-    val player = remember { buildFastPlayer(context) }
+    val player = remember { buildFastPlayer(context, isMultiView = false) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var aspect by remember { mutableFloatStateOf(16f / 9f) }
@@ -818,7 +772,6 @@ private fun TrimPlayer(
     var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
     var speed by remember { mutableFloatStateOf(1f) }
     var fullscreen by remember { mutableStateOf(false) }
-    // İnline önizlemede de oynatma sürerken ekran kapanmasın
     val hostView = LocalView.current
     DisposableEffect(hostView, isPlaying) {
         hostView.keepScreenOn = isPlaying
@@ -844,10 +797,21 @@ private fun TrimPlayer(
             override fun onCues(cueGroup: CueGroup) {
                 cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
             }
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
+                positionMs = player.currentPosition
+            }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) {
+                    player.pause()
+                    player.seekTo(startState.value)
+                    positionMs = startState.value
+                    isPlaying = false
+                }
+            }
         }
         player.addListener(listener)
 
-        // Uygulama arka plana giderken oynatmayı durdur
         val owner = context.findActivity() as? LifecycleOwner
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) player.pause()
@@ -861,7 +825,6 @@ private fun TrimPlayer(
         }
     }
 
-    // Dosya değişince yükle (kopyasız: doğrudan içerik URI'sinden)
     LaunchedEffect(video.uri) {
         player.setMediaItem(MediaItem.fromUri(video.uri))
         player.prepare()
@@ -869,47 +832,42 @@ private fun TrimPlayer(
         player.playWhenReady = false
     }
 
-    // Başlangıç noktası değişince o noktaya atla (sürüklerken her piksele seek yapma)
     LaunchedEffect(startMs) {
         delay(120)
         player.seekTo(startMs)
+        positionMs = startMs
     }
-    // Bitiş noktası değişince bitişten hemen önceki ana atla
     LaunchedEffect(endMs) {
         if (endMs != initialEnd) {
             delay(120)
-            player.seekTo((endMs - 1500L).coerceAtLeast(startState.value))
+            val target = (endMs - 1500L).coerceAtLeast(startState.value)
+            player.seekTo(target)
+            positionMs = target
         }
     }
-    // Oynatma hızı (0.25x – 5x)
     LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
 
-    // Kırpma başlayınca oynatmayı durdur
     LaunchedEffect(isTrimming) {
         if (isTrimming) player.pause()
     }
-    // Yüzey (TextureView) değişince duran videoda kare yeniden çizilsin
     LaunchedEffect(fullscreen) {
         delay(200)
         if (!player.playWhenReady) player.seekTo(player.currentPosition)
     }
 
-    // Konum takibi + bitiş noktasında durdurma
-    LaunchedEffect(player) {
-        while (true) {
-            val state = player.playbackState
-            val playing = player.playWhenReady && state != Player.STATE_ENDED && state != Player.STATE_IDLE
-            isPlaying = playing
-            positionMs = player.currentPosition
-            if (state == Player.STATE_ENDED ||
-                (player.playWhenReady && positionMs >= endState.value - 20L)
-            ) {
+    // Pil ve CPU optimizasyonu: sadece video gerçekten oynarken konum güncellemesi yapılır
+    LaunchedEffect(player, isPlaying) {
+        while (isPlaying) {
+            val pos = player.currentPosition
+            positionMs = pos
+            if (pos >= endState.value - 20L) {
                 player.pause()
                 player.seekTo(startState.value)
                 positionMs = startState.value
                 isPlaying = false
+                break
             }
-            delay(50)
+            delay(100)
         }
     }
 
@@ -986,14 +944,12 @@ private fun TrimPlayer(
                         IconButton(onClick = {
                             val pos = player.currentPosition
                             if (pos < startState.value || pos >= endState.value - 100L) {
-                                // aralık dışındaysa kırpma başlangıcından başlat
                                 player.seekTo(startState.value)
                                 positionMs = startState.value
                                 player.play()
                             } else if (pos <= startState.value + 100L && !isPlaying) {
-                                player.play() // ilk kez: kırpılan andan itibaren oynat
+                                player.play()
                             }
-                            // aksi halde kaldığı yerden DEVAM eder (başa sarmaz)
                             fullscreen = true
                         }, modifier = Modifier.size(38.dp)) {
                             Icon(Icons.Filled.Fullscreen, "Tam ekran", tint = Blue, modifier = Modifier.size(26.dp))
@@ -1047,7 +1003,6 @@ private fun PlayerControls(
     modifier: Modifier = Modifier,
     trailing: @Composable () -> Unit = {}
 ) {
-    // Basılı tutunca açılan hız paneli: süre çubuğunun HEMEN ÜSTÜNDE, ortalanmış açılır.
     var speedPanel by remember { mutableStateOf(false) }
     Column(modifier = modifier.fillMaxWidth()) {
         if (endMs > startMs) {
@@ -1060,7 +1015,6 @@ private fun PlayerControls(
                 )
             )
         }
-        // Süre (solda) + izler / tam ekran (sağda)
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
                 formatClock(positionMs.coerceIn(startMs, maxOf(startMs, endMs))),
@@ -1070,8 +1024,6 @@ private fun PlayerControls(
             trailing()
         }
         Spacer(Modifier.height(4.dp))
-        // Ana kontroller: sade ikonlar (arka plan yok), küçük görünüm ama GENİŞ dokunma
-        // alanı (56 dp) ve düğmeler arasında geniş yatay boşluk -> yanlış basma olmaz.
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1135,8 +1087,7 @@ private fun PlayerControls(
     }
 }
 
-/** Popup'ı bağlı olduğu öğenin (anchor) HEMEN ÜSTÜNE, yatayda ORTALANMIŞ yerleştirir. */
-private class AboveCenterPositionProvider(private val gapPx: Int) : PopupPositionProvider {
+internal class AboveCenterPositionProvider(private val gapPx: Int) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
         windowSize: IntSize,
@@ -1150,12 +1101,10 @@ private class AboveCenterPositionProvider(private val gapPx: Int) : PopupPositio
     }
 }
 
-/** Odak ÇALMAYAN popup: tam ekranda sistem çubuklarını açıp kontrolleri aşağı çökertmez. */
-private val NonFocusPopup = PopupProperties(focusable = false, dismissOnClickOutside = true, dismissOnBackPress = true)
+internal val NonFocusPopup = PopupProperties(focusable = false, dismissOnClickOutside = true, dismissOnBackPress = true)
 
-/** Verilen görünümün bağlı olduğu pencerede (dialog / popup) durum + gezinme çubuklarını gizler. */
 @Suppress("DEPRECATION")
-private fun hideSystemBarsOf(v: View) {
+internal fun hideSystemBarsOf(v: View) {
     v.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
         or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
         or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -1170,13 +1119,8 @@ private fun hideSystemBarsOf(v: View) {
     }
 }
 
-/**
- * PİL GÖSTERGESİ DÜZELTMESİ: Menü / panel (ses, altyazı, hız, ölçek) ayrı bir pencere
- * olarak açılır; bu pencere de çubukları gizlemezse sistem durum çubuğunu gösterir ve
- * ekran kayar. Popup içeriğine konur, kendi penceresinde çubukları anında gizler.
- */
 @Composable
-private fun KeepSystemBarsHidden() {
+internal fun KeepSystemBarsHidden() {
     val v = LocalView.current
     DisposableEffect(v) {
         hideSystemBarsOf(v)
@@ -1190,10 +1134,7 @@ private fun KeepSystemBarsHidden() {
     }
 }
 
-/**
- * Çözücü (MediaCodec) listesini uygulama açılışında arka planda sorgulayıp önbelleğe alır.
- * Bu sorgu ilk oynatmada (özellikle AV1'de) saniyeler sürebiliyordu.
- */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 fun prewarmVideoDecoders() {
     for (mime in listOf(
         androidx.media3.common.MimeTypes.VIDEO_AV1, androidx.media3.common.MimeTypes.VIDEO_H265,
@@ -1206,42 +1147,75 @@ fun prewarmVideoDecoders() {
     }
 }
 
-/** Google Drive / bulut depolama sağlayıcısı mı? */
-private fun isCloudAuthority(a: String?): Boolean {
+internal fun isCloudAuthority(a: String?): Boolean {
     val x = a.orEmpty().lowercase()
     return x.contains("com.google.android.apps.docs") || x.contains("drive") ||
         x.contains("onedrive") || x.contains("dropbox") || x.contains("cloud")
 }
 
-/** Yerel dosyalarda hızlı açılış: oynatma için 2,5 sn yerine ~0,25 sn tampon yeterli. */
-private fun buildFastPlayer(context: Context): ExoPlayer {
+/**
+ * Maksimum pil ve CPU/GPU verimliliği için optimize edilmiş ExoPlayer kurucusu:
+ * - Donanım çözücü önceliği + asenkron MediaCodec kuyruğu + tamsayı DSP ses çıkışı
+ * - Yüksek verimli tampon (sürekli CPU/ağ uyandırmasını önler, anında 250ms'de başlar)
+ * - Çoklu video modunda (isMultiView = true) RAM sınırlandırması ve handleAudioFocus = false
+ *   (videoların birbirini duraklatmasını engeller)
+ * - Google Drive çerez/oturum destekli DataSource
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): ExoPlayer {
+    val minBufferMs = if (isMultiView) 6_000 else 12_000
+    val maxBufferMs = if (isMultiView) 18_000 else 40_000
+    val targetBytes = if (isMultiView) 12 * 1024 * 1024 else 32 * 1024 * 1024
+
     val loadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(2_500, 30_000, 100, 500)
+        .setBufferDurationsMs(minBufferMs, maxBufferMs, 250, 500)
+        .setTargetBufferBytes(targetBytes)
         .setPrioritizeTimeOverSizeThresholds(true)
+        .setBackBuffer(0, false)
         .build()
+
     val renderers = DefaultRenderersFactory(context)
         .setEnableDecoderFallback(true)
-        // Codec'leri MediaCodec asenkron kuyruk modunda çalıştır: AV1/HEVC ilk karesi daha hızlı gelir
+        .setEnableAudioFloatOutput(false)
+        .setEnableAudioTrackPlaybackParams(true)
         .forceEnableMediaCodecAsynchronousQueueing()
+
+    val dataSourceFactory = DriveStreamResolver.buildDataSourceFactory(context)
+    val mediaSourceFactory = DefaultMediaSourceFactory(context)
+        .setDataSourceFactory(dataSourceFactory)
+
     return ExoPlayer.Builder(context, renderers)
+        .setMediaSourceFactory(mediaSourceFactory)
         .setLoadControl(loadControl)
+        .setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT)
         .build()
+        .apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                /* handleAudioFocus = */ false
+            )
+            if (isMultiView) {
+                trackSelectionParameters = trackSelectionParameters.buildUpon()
+                    .setMaxVideoSize(1920, 1080)
+                    .build()
+            }
+        }
 }
 
-/** Diğer oynatıcılardaki gibi dairesel yükleniyor halkası. */
 @Composable
-private fun LoadingRing(modifier: Modifier = Modifier) {
+internal fun LoadingRing(modifier: Modifier = Modifier) {
     CircularProgressIndicator(
-        modifier = modifier.size(40.dp),
+        modifier = modifier.size(36.dp),
         color = Color(0xFF66C2B4),
         strokeWidth = 3.dp
     )
 }
 
-/** Popup dışına dokunup kapatınca aynı dokunuşla düğmenin tekrar açmasını engeller. */
 private var lastSpeedPopupDismissAt = 0L
 
-/** Video ölçekleme modları (oynatıcıdaki ekran sığdırma düğmesi). */
 enum class ScaleMode(val label: String) {
     FIT("En uygun"),
     CROP("Klibi genişlet (kırp)"),
@@ -1249,16 +1223,26 @@ enum class ScaleMode(val label: String) {
     ORIGINAL("Orijinal boyut (%100)")
 }
 
-private val SPEED_PRESETS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f, 5f)
+internal val SPEED_PRESETS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f)
 
-private fun speedLabel(v: Float): String {
+internal fun speedLabel(v: Float): String {
     val r = Math.round(v * 100f) / 100f
     val t = if (r == r.toInt().toFloat()) r.toInt().toString() else r.toString().trimEnd('0').trimEnd('.')
-    return "${t}X"
+    return "${t}x"
 }
 
+/**
+ * Donanım hızlandırmalı, sıfır GPU kopyalamalı (zero-copy HWC) Video Yüzeyi.
+ *
+ * KÖK NEDEN (Isınma ve Pil Tüketimi):
+ * Eskiden SDR videolarda TextureView + animateFloatAsState + graphicsLayer kullanılıyordu.
+ * TextureView her kareyi GPU üzerinden OpenGL dokusu (texture) olarak kopyalar ve Compose
+ * ana iş parçacığını her karede yeniden çizime zorlar.
+ * SurfaceView ise kareleri MediaCodec donanım çözücüsünden doğrudan ekran donanım
+ * birleştiricisine (SurfaceFlinger / HWC) gönderir: GPU ve CPU yükü sıfıra iner, cihaz ısınmaz.
+ */
 @Composable
-private fun VideoSurface(
+internal fun VideoSurface(
     player: ExoPlayer,
     aspect: Float,
     videoWpx: Int,
@@ -1271,9 +1255,7 @@ private fun VideoSurface(
         val cw = maxWidth
         val ch = maxHeight
         val a = aspect.coerceAtLeast(0.1f)
-        val wider = (cw / ch) > a
-        // Taban boyut: "En uygun". Diğer modlar GPU üzerinde ölçek (graphicsLayer) ile
-        // animasyonlu uygulanır -> ani atlama/titreme olmaz, yumuşak geçiş yapar.
+        val wider = (cw / ch.coerceAtLeast(1.dp)) > a
         val fit: Pair<Dp, Dp> = if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
         val target: Pair<Dp, Dp> = when (mode) {
             ScaleMode.FIT -> fit
@@ -1283,82 +1265,26 @@ private fun VideoSurface(
                 with(density) { Pair(videoWpx.toDp(), videoHpx.toDp()) }
             } else fit
         }
-        val fw = fit.first.value.coerceAtLeast(1f)
-        val fh = fit.second.value.coerceAtLeast(1f)
-        val spec = tween<Float>(durationMillis = 380, easing = FastOutSlowInEasing)
-        val sx by animateFloatAsState(target.first.value / fw, spec, label = "scaleX")
-        val sy by animateFloatAsState(target.second.value / fh, spec, label = "scaleY")
-        // HDR (HDR10 / HDR10+ / HLG / Dolby Vision) videolar TextureView'da GPU üzerinden
-        // SDR gibi çizildiği için simsiyah/karanlık görünür. HDR'de SurfaceView kullanılır:
-        // görüntü doğrudan ekran birleştiricisine gider (HDR ekranda gerçek HDR, SDR ekranda
-        // donanımsal ton eşleme) -> diğer oynatıcılarla aynı parlaklık.
-        var hdr by remember(player) { mutableStateOf(isHdrFormat(player.videoFormat)) }
-        DisposableEffect(player) {
-            val l = object : Player.Listener {
-                override fun onTracksChanged(tracks: Tracks) {
-                    hdr = isHdrFormat(player.videoFormat) || tracksHaveHdr(tracks)
+
+        AndroidView(
+            factory = { ctx ->
+                SurfaceView(ctx).also { sv ->
+                    player.setVideoSurfaceView(sv)
                 }
-                override fun onVideoSizeChanged(videoSize: VideoSize) {
-                    hdr = isHdrFormat(player.videoFormat) || hdr
-                }
-            }
-            player.addListener(l)
-            onDispose { player.removeListener(l) }
-        }
-        if (hdr) {
-            // SurfaceView görünüm ölçeğini (graphicsLayer) uygulamaz; boyut animasyonla verilir.
-            val dspec = tween<Dp>(durationMillis = 380, easing = FastOutSlowInEasing)
-            val tw by androidx.compose.animation.core.animateDpAsState(target.first, dspec, label = "hdrW")
-            val th by androidx.compose.animation.core.animateDpAsState(target.second, dspec, label = "hdrH")
-            key("hdr") {
-                AndroidView(
-                    factory = { ctx ->
-                        android.view.SurfaceView(ctx).also { player.setVideoSurfaceView(it) }
-                    },
-                    onRelease = { v -> player.clearVideoSurfaceView(v) },
-                    modifier = Modifier.requiredSize(tw, th)
-                )
-            }
-        } else {
-            key("sdr") {
-                AndroidView(
-                    factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
-                    onRelease = { v -> player.clearVideoTextureView(v) },
-                    modifier = Modifier
-                        .requiredSize(fit.first, fit.second)
-                        .graphicsLayer {
-                            scaleX = sx
-                            scaleY = sy
-                        }
-                )
-            }
-        }
+            },
+            update = { sv ->
+                player.setVideoSurfaceView(sv)
+            },
+            onRelease = { sv ->
+                player.clearVideoSurfaceView(sv)
+            },
+            modifier = Modifier.requiredSize(target.first, target.second)
+        )
     }
 }
 
-/** Video biçimi HDR mi? (PQ/ST2084 = HDR10/HDR10+/DV, HLG veya Dolby Vision codec'i) */
-private fun isHdrFormat(f: Format?): Boolean {
-    if (f == null) return false
-    val t = f.colorInfo?.colorTransfer
-    if (t == C.COLOR_TRANSFER_ST2084 || t == C.COLOR_TRANSFER_HLG) return true
-    if (f.sampleMimeType == androidx.media3.common.MimeTypes.VIDEO_DOLBY_VISION) return true
-    val codecs = f.codecs.orEmpty().lowercase()
-    return codecs.startsWith("dvh") || codecs.startsWith("dvav") || codecs.startsWith("dav1")
-}
-
-private fun tracksHaveHdr(tracks: Tracks): Boolean {
-    for (g in tracks.groups) {
-        if (g.type != C.TRACK_TYPE_VIDEO) continue
-        for (i in 0 until g.length) {
-            if (g.isTrackSelected(i) && isHdrFormat(g.getTrackFormat(i))) return true
-        }
-    }
-    return false
-}
-
-/** Tek satırlık seçenek "çipi" (ölçekleme / hız menülerinde yan yana dizilir). */
 @Composable
-private fun OptionChip(
+internal fun OptionChip(
     text: String,
     selected: Boolean,
     textColor: Color = TextPrimary,
@@ -1370,7 +1296,7 @@ private fun OptionChip(
             .clip(RoundedCornerShape(8.dp))
             .background(if (selected) Purple else bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
@@ -1383,23 +1309,22 @@ private fun OptionChip(
     }
 }
 
-/** Kısa süreli bilgi etiketi (dokununca değişen mod/hız gösterilir, soru sorulmaz). */
 @Composable
 private fun TransientLabel(text: String?, onDone: () -> Unit) {
     if (text == null) return
     LaunchedEffect(text) {
-        delay(1200)
+        delay(1000)
         onDone()
     }
-    androidx.compose.ui.window.Popup(
+    Popup(
         alignment = Alignment.TopCenter,
-        offset = androidx.compose.ui.unit.IntOffset(0, -140)
+        offset = IntOffset(0, -140)
     ) {
         KeepSystemBarsHidden()
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color.Black.copy(alpha = 0.75f))
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xD9000000))
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
             Text(text, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
@@ -1407,11 +1332,6 @@ private fun TransientLabel(text: String?, onDone: () -> Unit) {
     }
 }
 
-/**
- * Ölçekleme düğmesi:
- *  - DOKUN  -> soru sormadan sıradaki moda geçer (En uygun -> Kırp -> Yay -> Orijinal -> ...)
- *  - BASILI TUT -> tüm seçenekler düğmenin üstünde TEK SATIRDA açılır.
- */
 @Composable
 private fun ScaleButton(
     mode: ScaleMode,
@@ -1454,8 +1374,8 @@ private fun ScaleButton(
                 Column(
                     modifier = Modifier
                         .width(menuWidth)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xF2141418))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF141418))
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
                     Text("Ölçekleme", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
@@ -1474,14 +1394,8 @@ private fun ScaleButton(
     }
 }
 
-/** Dokununca açılan dikey listedeki hızlar (basılı tutunca ince ayar paneli açılır). */
 private val SPEED_LIST = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
 
-/**
- * Hız düğmesi:
- *  - DOKUN  -> düğmenin ÜSTÜNDE dikey hız listesi açılır (0.25X ... 2X), seçince uygulanır.
- *  - BASILI TUT -> ince ayar çubuğu + TÜM hazır hızlar, süre çubuğunun üstünde ortada açılır.
- */
 @Composable
 private fun SpeedButton(
     speed: Float,
@@ -1530,7 +1444,7 @@ private fun SpeedButton(
                         .width(124.dp)
                         .heightIn(max = (screenH * 0.6f).dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xF2161616))
+                        .background(Color(0xFF161616))
                         .verticalScroll(rememberScrollState())
                         .padding(vertical = 4.dp)
                 ) {
@@ -1553,7 +1467,6 @@ private fun SpeedButton(
     }
 }
 
-/** Basılı tutunca açılan ince ayar paneli (süre çubuğunun hemen üstünde, ortada). */
 @Composable
 private fun SpeedPanelPopup(
     speed: Float,
@@ -1572,8 +1485,8 @@ private fun SpeedPanelPopup(
         Column(
             modifier = Modifier
                 .width(panelWidth)
-                .clip(RoundedCornerShape(14.dp))
-                .background(Color(0xF2141418))
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF141418))
                 .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
             Text(
@@ -1609,7 +1522,6 @@ private fun SpeedPanelPopup(
                 ) { Icon(Icons.Filled.Add, "Hızlandır", tint = Color.White) }
             }
             Spacer(Modifier.height(16.dp))
-            // Tüm hazır hızlar TEK SATIRDA (sığmazsa yatay kaydırılır), aralıkları geniş
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
@@ -1648,7 +1560,6 @@ private fun FullscreenPlayerDialog(
     onExit: () -> Unit,
     overlayText: String? = null,
     showLoading: Boolean = false,
-    /** Bağımsız oynatıcı: sağ alttaki düğme uygulamadan ÇIKMAZ, tam ekran <-> pencere geçişi yapar. */
     immersive: Boolean = true,
     onToggleImmersive: (() -> Unit)? = null
 ) {
@@ -1657,14 +1568,12 @@ private fun FullscreenPlayerDialog(
     var interaction by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
 
-    // Ekran yönü SERBEST (cihaz dikey/yatay döndükçe video da döner); çıkınca eski yön geri gelir.
     DisposableEffect(Unit) {
         val activity = context.findActivity()
         val previous = activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         onDispose { activity?.requestedOrientation = previous }
     }
 
-    // Oynarken kontroller birkaç saniye sonra kendiliğinden gizlenir
     LaunchedEffect(controlsVisible, isPlaying, interaction, menuOpen) {
         if (controlsVisible && isPlaying && !menuOpen) {
             delay(3500)
@@ -1677,10 +1586,6 @@ private fun FullscreenPlayerDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
         val view = LocalView.current
-        // TELEFONDA DÖNDÜRME DÜZELTMESİ: Activity configChanges ile yeniden oluşturulmadığı
-        // için Dialog penceresi döndürmeden sonra eski (dikey) boyutunda kalıyor, video
-        // küçülüp kayboluyordu. Her yön/boyut değişiminde pencere tam ekrana yeniden
-        // yayılır; çentikli telefonlarda (tablette yok) çentik alanı da kullanılır.
         val config = LocalConfiguration.current
         val orientationKey = config.orientation
         val sizeKey = config.screenWidthDp * 10000 + config.screenHeightDp
@@ -1707,8 +1612,6 @@ private fun FullscreenPlayerDialog(
                 view.removeCallbacks(fix)
             }
         }
-        // Sistem çubukları: menü/panel açılınca ya da kontroller değişince TEKRAR gizlenir.
-        // (Eskiden açılan menü odağı çalıp çubukları geri getiriyor, alt kontroller aşağı gömülüyordu.)
         LaunchedEffect(view, immersive, menuOpen, controlsVisible) {
             val window = (view.parent as? DialogWindowProvider)?.window
             if (window != null) {
@@ -1728,7 +1631,6 @@ private fun FullscreenPlayerDialog(
                 }
             }
         }
-        // Çubuklar herhangi bir sebeple görünür olursa (menü açma/kapama) hemen tekrar gizle.
         @OptIn(ExperimentalLayoutApi::class)
         val barsVisible = WindowInsets.areSystemBarsVisible
         LaunchedEffect(barsVisible, immersive) {
@@ -1741,7 +1643,6 @@ private fun FullscreenPlayerDialog(
                 hideSystemBarsOf(view)
             }
         }
-        // EKRAN KAPANMA DÜZELTMESİ: oynatma sürerken ekran kararmaz / kapanmaz.
         DisposableEffect(view, isPlaying) {
             val dialogWindow = (view.parent as? DialogWindowProvider)?.window
             val activityWindow = context.findActivity()?.window
@@ -1772,7 +1673,6 @@ private fun FullscreenPlayerDialog(
                 VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
             }
 
-            // Dokunma katmanı: ekrana tıklayınca kontroller gizlenir / görünür
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1798,7 +1698,7 @@ private fun FullscreenPlayerDialog(
                     modifier = Modifier
                         .align(Alignment.Center)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color.Black.copy(alpha = 0.6f))
+                        .background(Color(0xB3000000))
                         .padding(horizontal = 14.dp, vertical = 8.dp)
                 )
             }
@@ -1814,7 +1714,7 @@ private fun FullscreenPlayerDialog(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.55f))
+                        .background(Color(0xCC0D0E12))
                         .then(if (immersive) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars))
                         .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
@@ -1865,137 +1765,4 @@ private fun FullscreenPlayerDialog(
             }
         }
     }
-}
-
-/**
- * Bağımsız video oynatıcı: dosya yöneticisi / Google Drive "Birlikte aç" veya bir
- * http(s) bağlantısı ile gelen videoyu doğrudan (indirmeden, akış olarak) oynatır.
- */
-@Composable
-fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
-    val context = LocalContext.current
-    val player = remember { buildFastPlayer(context) }
-    var isPlaying by remember { mutableStateOf(false) }
-    var positionMs by remember { mutableLongStateOf(0L) }
-    var durationMs by remember { mutableLongStateOf(0L) }
-    var aspect by remember { mutableFloatStateOf(16f / 9f) }
-    var videoWpx by remember { mutableIntStateOf(0) }
-    var videoHpx by remember { mutableIntStateOf(0) }
-    var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
-    var speed by remember { mutableFloatStateOf(1f) }
-    var tracks by remember { mutableStateOf(Tracks.EMPTY) }
-    var cueText by remember { mutableStateOf("") }
-    var buffering by remember { mutableStateOf(true) }
-    var errorText by remember { mutableStateOf<String?>(null) }
-    // Kısa tamponlamalarda halka hiç görünmez; yalnızca 400 ms'den uzun sürerse çıkar.
-    var showRing by remember { mutableStateOf(false) }
-    LaunchedEffect(buffering) {
-        if (buffering) { delay(400); showRing = true } else showRing = false
-    }
-
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                if (videoSize.width > 0 && videoSize.height > 0) {
-                    aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
-                    videoWpx = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
-                    videoHpx = videoSize.height
-                }
-            }
-            override fun onTracksChanged(t: Tracks) { tracks = t }
-            override fun onCues(cueGroup: CueGroup) {
-                cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
-            }
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                buffering = playbackState == Player.STATE_BUFFERING
-                if (playbackState == Player.STATE_READY) errorText = null
-            }
-            override fun onPlayerError(error: PlaybackException) {
-                errorText = "Oynatılamadı: " + (error.message ?: error.errorCodeName)
-            }
-        }
-        player.addListener(listener)
-        val owner = context.findActivity() as? LifecycleOwner
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) player.pause()
-        }
-        owner?.lifecycle?.addObserver(observer)
-        onDispose {
-            owner?.lifecycle?.removeObserver(observer)
-            player.removeListener(listener)
-            player.release()
-        }
-    }
-
-    LaunchedEffect(uri) {
-        errorText = null
-        // content:// (sistem seçicisi) URI'sini gerçek dosya yoluna çevir: dosyaya doğrudan
-        // erişilir, içerik sağlayıcı üzerinden yavaş okuma/arama yapılmaz.
-        // Bulut (Google Drive vb.) URI'leri yerel yola çevrilmeye çalışılmaz; doğrudan
-        // içerik sağlayıcıdan akış olarak okunur (cihaza kopyalama / indirme yapılmaz).
-        val cloud = uri.scheme == "content" && isCloudAuthority(uri.authority)
-        val playable = if (uri.scheme == "content" && !cloud) {
-            withContext(Dispatchers.IO) {
-                com.example.muxmaster.data.InputAccess.realPath(context, uri)
-            }?.let { Uri.fromFile(java.io.File(it)) } ?: uri
-        } else uri
-        player.setMediaItem(MediaItem.fromUri(playable))
-        player.prepare()
-        player.playWhenReady = true
-    }
-    LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
-
-    LaunchedEffect(player) {
-        while (true) {
-            val state = player.playbackState
-            isPlaying = player.playWhenReady && state != Player.STATE_ENDED && state != Player.STATE_IDLE
-            positionMs = player.currentPosition.coerceAtLeast(0L)
-            val d = player.duration
-            durationMs = if (d != C.TIME_UNSET && d > 0) d else 0L
-            delay(100)
-        }
-    }
-
-    val togglePlay: () -> Unit = {
-        if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
-            player.pause()
-        } else {
-            if (player.playbackState == Player.STATE_ENDED) player.seekTo(0L)
-            if (player.playbackState == Player.STATE_IDLE) player.prepare()
-            player.play()
-        }
-    }
-    val seekTo: (Long) -> Unit = { t ->
-        val target = if (durationMs > 0) t.coerceIn(0L, durationMs) else t.coerceAtLeast(0L)
-        player.seekTo(target)
-        positionMs = target
-    }
-
-    Box(Modifier.fillMaxSize().background(Color.Black))
-
-    FullscreenPlayerDialog(
-        player = player,
-        tracks = tracks,
-        cueText = cueText,
-        aspect = aspect,
-        videoWpx = videoWpx,
-        videoHpx = videoHpx,
-        scaleMode = scaleMode,
-        onScaleChange = { scaleMode = it },
-        speed = speed,
-        onSpeedChange = { speed = it },
-        isPlaying = isPlaying,
-        positionMs = positionMs,
-        startMs = 0L,
-        endMs = durationMs,
-        onTogglePlay = togglePlay,
-        onSeekBy = { delta -> seekTo(player.currentPosition + delta) },
-        onSeekTo = seekTo,
-        onExit = onExit,
-        overlayText = errorText,
-        showLoading = showRing,
-        immersive = true,
-        // Küçült/büyüt: durum çubuğunu GÖSTERMEDEN video sığdır <-> ekranı doldur
-        onToggleImmersive = { scaleMode = if (scaleMode == ScaleMode.CROP) ScaleMode.FIT else ScaleMode.CROP }
-    )
 }

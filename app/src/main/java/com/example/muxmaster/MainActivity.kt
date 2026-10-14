@@ -6,6 +6,11 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,37 +20,35 @@ import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.activity.compose.setContent
-import androidx.activity.compose.BackHandler
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
-import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.dp
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.ui.screens.ConverterScreen
 import com.example.muxmaster.ui.screens.MergeScreen
 import com.example.muxmaster.ui.screens.MuxScreen
-import com.example.muxmaster.ui.screens.SettingsScreen
-import com.example.muxmaster.ui.screens.TrimScreen
-import com.example.muxmaster.ui.screens.StreamPlayerScreen
 import com.example.muxmaster.ui.screens.PlayerHomeScreen
+import com.example.muxmaster.ui.screens.PlayerVideoSlot
+import com.example.muxmaster.ui.screens.SettingsScreen
+import com.example.muxmaster.ui.screens.StreamPlayerScreen
+import com.example.muxmaster.ui.screens.TrimScreen
 import com.example.muxmaster.ui.screens.prewarmVideoDecoders
-import androidx.compose.material.icons.filled.PlayCircle
 import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.ui.theme.ThemeMode
 import com.example.muxmaster.viewmodel.ConverterViewModel
@@ -61,17 +64,37 @@ class MainActivity : AppCompatActivity() {
     private val mergeViewModel: MergeViewModel by viewModels()
 
     private var screenState: MutableState<Int>? = null
-    /** Bağımsız oynatıcıda açılacak video (Birlikte aç / http akışı). */
-    private val playUri = mutableStateOf<Uri?>(null)
+
+    /** Çoklu video oynatıcıdaki aktif video yuvaları (en fazla 4 video aynı anda). */
+    private val playSlots = mutableStateListOf<PlayerVideoSlot>()
+    private var nextSlotId = 1L
+
+    /** Sistem seçicisinden yeni video ekleme mi yapılıyor, yoksa ilk video mu açılıyor? */
+    private var pickingToAddSlot = false
 
     /** "Birlikte aç" ile gelen video: kullanıcıya ne yapmak istediği sorulur. */
     private val pendingOpen = mutableStateOf<Pair<Uri, String>?>(null)
     /** Video başka bir uygulamadan (dosya yöneticisi vb.) mı açıldı? Öyleyse geri = o uygulamaya dön. */
     private val playFromExternal = mutableStateOf(false)
 
+    private fun openSingleInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean = false) {
+        playFromExternal.value = fromExternal
+        playSlots.clear()
+        playSlots.add(PlayerVideoSlot(nextSlotId++, uri, title))
+        screenState?.value = 5
+    }
+
+    private fun addSlotInPlayer(uri: Uri, title: String? = null) {
+        if (playSlots.size < 4) {
+            playSlots.add(PlayerVideoSlot(nextSlotId++, uri, title))
+        } else {
+            playSlots[playSlots.lastIndex] = PlayerVideoSlot(nextSlotId++, uri, title)
+        }
+        screenState?.value = 5
+    }
+
     /** Uygulama içinden "Video Oynatıcı" ile video seçme. */
     private val pickPlayVideoLauncher = registerForActivityResult(object : ActivityResultContracts.OpenDocument() {
-        // Seçici Google Drive yerine doğrudan dahili depolamada açılsın
         override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
             super.createIntent(context, input).apply {
                 putExtra(
@@ -80,12 +103,21 @@ class MainActivity : AppCompatActivity() {
                 )
             }
     }) { uri ->
+        val addMode = pickingToAddSlot
+        pickingToAddSlot = false
         if (uri != null) {
-            try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            catch (_: Exception) { }
-            playFromExternal.value = false
-            playUri.value = uri
-            screenState?.value = 5
+            // Google Drive SAF URI'lerinde openDocument/indirme tetiklenmemesi için
+            // yalnızca yerel sağlayıcılarda persistable izin alınır.
+            if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
+                try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                catch (_: Exception) { }
+            }
+            val name = queryDisplayName(uri)
+            if (addMode && playSlots.isNotEmpty()) {
+                addSlotInPlayer(uri, name)
+            } else {
+                openSingleInPlayer(uri, name, fromExternal = false)
+            }
         }
     }
 
@@ -93,13 +125,13 @@ class MainActivity : AppCompatActivity() {
     private fun exitPlayer() {
         val external = playFromExternal.value
         playFromExternal.value = false
-        playUri.value = null
-        // Uygulama içinden açıldıysa oynatıcı giriş ekranına dön
+        playSlots.clear()
         screenState?.value = if (external) 0 else 6
         if (external) {
             if (!moveTaskToBack(true)) finish()
         }
     }
+
     /** Depolama (Tüm dosyalara erişim) izni sorulsun mu? */
     private val askStorage = mutableStateOf(false)
 
@@ -172,7 +204,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* sonuç ne olursa olsun akış devam eder */ }
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val appPrefs by lazy { AppPreferences(applicationContext) }
 
@@ -186,16 +218,12 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Önceki oturumdan kalan geçici dosyaları temizle (çalışan bir işlem yoksa).
         if (savedInstanceState == null &&
             !muxViewModel.isMuxing && !trimViewModel.isTrimming &&
             !converterViewModel.isConverting && !mergeViewModel.isMerging
         ) {
             Thread { com.example.muxmaster.data.InputAccess.clearWorkCache(applicationContext) }.start()
         }
-        // Arka planda mux ilerleme bildirimi gösterilebilmesi için (Android 13+/API 33+
-        // bildirim izni ister); reddedilirse mux yine çalışır, sadece bildirim görünmez.
-        // Depolama izni: videolar önbelleğe KOPYALANMADAN doğrudan cihazdaki yoldan açılır.
         if (!com.example.muxmaster.data.InputAccess.hasStorageAccess(this)) {
             if (Build.VERSION.SDK_INT >= 30) askStorage.value = true
             else requestStorageAccess()
@@ -203,19 +231,14 @@ class MainActivity : AppCompatActivity() {
             notifAsked = true
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
-        // AV1/HEVC çözücü listesini önceden yükle: ilk video açılışındaki saniyelerce
-        // süren codec sorgusu bekleme yapmaz.
         Thread { prewarmVideoDecoders() }.start()
         setContent {
             var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
             MuxMasterTheme(themeMode = themeMode) {
-                // rememberSaveable: ekran döndürülünce / Activity yeniden oluşturulunca
-                // kullanıcı bulunduğu ekranda kalır (eskiden ana ekrana atıyordu).
                 val screenHolder = rememberSaveable { mutableStateOf(0) }
                 screenState = screenHolder
                 var screen by screenHolder
 
-                // Geri tuşu: alt ekrandaysan ana ekrana döner (uygulamadan çıkmaz).
                 BackHandler(enabled = screen != 0) {
                     if (screen == 5) exitPlayer() else screen = 0
                 }
@@ -245,7 +268,14 @@ class MainActivity : AppCompatActivity() {
                     OpenWithChooser(
                         fileName = name,
                         onDismiss = { pendingOpen.value = null },
-                        onPlay = { pendingOpen.value = null; playFromExternal.value = true; playUri.value = uri; screen = 5 },
+                        onPlay = {
+                            pendingOpen.value = null
+                            if (screen == 5 && playSlots.isNotEmpty() && playSlots.size < 4) {
+                                addSlotInPlayer(uri, name)
+                            } else {
+                                openSingleInPlayer(uri, name, fromExternal = true)
+                            }
+                        },
                         onMux = { pendingOpen.value = null; muxViewModel.onVideoSelected(uri, name); screen = 0 },
                         onTrim = { pendingOpen.value = null; trimViewModel.onVideoSelected(uri, name); screen = 2 },
                         onMerge = { pendingOpen.value = null; mergeViewModel.onVideosSelected(listOf(uri to name)); screen = 4 },
@@ -281,26 +311,50 @@ class MainActivity : AppCompatActivity() {
                         onNavigateBack = { screen = 0 }
                     )
                     5 -> {
-                        val u = playUri.value
-                        if (u == null) {
-                            LaunchedEffect(Unit) { screen = 0 }
+                        if (playSlots.isEmpty()) {
+                            LaunchedEffect(Unit) { screen = 6 }
                         } else {
-                            StreamPlayerScreen(uri = u, onExit = { exitPlayer() })
+                            StreamPlayerScreen(
+                                slots = playSlots,
+                                onAddVideo = { uri, title -> addSlotInPlayer(uri, title) },
+                                onRemoveSlot = { id ->
+                                    playSlots.removeAll { it.id == id }
+                                    if (playSlots.isEmpty()) exitPlayer()
+                                },
+                                onUpdateSlotUri = { id, newUri, newTitle ->
+                                    val idx = playSlots.indexOfFirst { it.id == id }
+                                    if (idx >= 0) {
+                                        playSlots[idx] = playSlots[idx].copy(
+                                            uri = newUri,
+                                            title = newTitle ?: playSlots[idx].title
+                                        )
+                                    }
+                                },
+                                onPickSystemFileForAdd = {
+                                    pickingToAddSlot = true
+                                    pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*"))
+                                },
+                                onNeedStorage = { requestStorageAccess() },
+                                hasStorage = { com.example.muxmaster.data.InputAccess.hasStorageAccess(this@MainActivity) },
+                                onExit = { exitPlayer() }
+                            )
                         }
                     }
                     6 -> PlayerHomeScreen(
                         onBack = { screen = 0 },
                         onOpenUrl = { text ->
                             val u = if (text.contains("://")) text else "https://$text"
-                            playFromExternal.value = false
-                            playUri.value = Uri.parse(u)
-                            screen = 5
+                            openSingleInPlayer(Uri.parse(u), fromExternal = false)
                         },
-                        onPickFile = { pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*")) },
+                        onPickFile = {
+                            pickingToAddSlot = false
+                            pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*"))
+                        },
                         onPlayFile = { f ->
-                            playFromExternal.value = false
-                            playUri.value = Uri.fromFile(f)
-                            screen = 5
+                            openSingleInPlayer(Uri.fromFile(f), f.name, fromExternal = false)
+                        },
+                        onOpenStreamUri = { streamUri ->
+                            openSingleInPlayer(streamUri, fromExternal = false)
                         },
                         onNeedStorage = { requestStorageAccess() },
                         hasStorage = { com.example.muxmaster.data.InputAccess.hasStorageAccess(this@MainActivity) }
@@ -340,18 +394,21 @@ class MainActivity : AppCompatActivity() {
             else -> null
         } ?: return
 
-        // İnternet bağlantısı (http/https): sormadan doğrudan oynatıcıda akış olarak aç
         val scheme = uri.scheme?.lowercase()
         if (scheme == "http" || scheme == "https") {
-            playFromExternal.value = true
-            playUri.value = uri
-            screenState?.value = 5
+            if (screenState?.value == 5 && playSlots.isNotEmpty() && playSlots.size < 4) {
+                addSlotInPlayer(uri)
+            } else {
+                openSingleInPlayer(uri, fromExternal = true)
+            }
             intent.action = null
             return
         }
 
-        try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        catch (_: Exception) { }
+        if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
+            try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            catch (_: Exception) { }
+        }
 
         val displayName = queryDisplayName(uri) ?: "file"
         val mimeType = intent.type ?: contentResolver.getType(uri).orEmpty()
@@ -359,7 +416,6 @@ class MainActivity : AppCompatActivity() {
         when {
             mimeType.startsWith("video/") || displayName.substringAfterLast('.', "").lowercase() in
                 setOf("mkv", "mp4", "avi", "mov", "webm", "ts", "m2ts", "m4v", "3gp", "flv", "wmv") -> {
-                // Doğrudan Mux'a atmak yerine kullanıcıya ne yapmak istediğini sor
                 pendingOpen.value = uri to displayName
             }
             mimeType.startsWith("audio/") -> {
@@ -373,7 +429,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // İzin ekranından dönünce: izin verildiyse bildirim iznini de iste (bir kez)
         if (!notifAsked && com.example.muxmaster.data.InputAccess.hasStorageAccess(this) && Build.VERSION.SDK_INT >= 33) {
             notifAsked = true
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=

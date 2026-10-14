@@ -1,5 +1,6 @@
 package com.example.muxmaster.ui.screens
 
+import android.net.Uri
 import android.os.Environment
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
@@ -19,6 +20,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Link
@@ -50,6 +52,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.muxmaster.data.DriveStreamResolver
+import com.example.muxmaster.data.GoogleDriveBrowserDialog
 import com.example.muxmaster.ui.theme.BgDark
 import com.example.muxmaster.ui.theme.PurpleLight
 import com.example.muxmaster.ui.theme.TextMuted
@@ -59,15 +63,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private val PLAYABLE_EXT = setOf(
+internal val PLAYABLE_EXT = setOf(
     "mkv", "mp4", "m4v", "webm", "avi", "mov", "ts", "m2ts", "mts", "3gp", "flv", "wmv", "mpg", "mpeg",
     "ogv", "mp3", "m4a", "aac", "flac", "opus", "ogg", "wav", "mka", "ac3", "eac3"
 )
-private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "opus", "ogg", "wav", "mka", "ac3", "eac3")
+internal val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "opus", "ogg", "wav", "mka", "ac3", "eac3")
 
 /**
- * mpvKt benzeri oynatıcı giriş ekranı: URL aç, sistem seçicisiyle dosya seç veya
- * uygulama içi dosya gezgini (yerel depolama, doğrudan dosya yolu -> anında açılış).
+ * Oynatıcı giriş ekranı:
+ * - URL veya Google Drive bağlantısı aç
+ * - Google Drive'dan doğrudan (cihaza indirmeden, akış olarak) video seç ve oynat
+ * - Sistem seçicisiyle dosya seç (Google Drive seçilse bile indirmeden akışa yönlendirir)
+ * - Uygulama içi yerel dosya gezgini
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -76,14 +83,35 @@ fun PlayerHomeScreen(
     onOpenUrl: (String) -> Unit,
     onPickFile: () -> Unit,
     onPlayFile: (File) -> Unit,
+    onOpenStreamUri: (Uri) -> Unit = { u -> onOpenUrl(u.toString()) },
     onNeedStorage: () -> Unit,
     hasStorage: () -> Boolean
 ) {
     var browsing by rememberSaveable { mutableStateOf(false) }
+    var showDriveBrowser by rememberSaveable { mutableStateOf(false) }
+    var driveInitialFileId by rememberSaveable { mutableStateOf<String?>(null) }
+
     if (browsing) {
         LocalFileBrowser(onClose = { browsing = false }, onPlayFile = onPlayFile)
         return
     }
+
+    if (showDriveBrowser) {
+        GoogleDriveBrowserDialog(
+            initialFileId = driveInitialFileId,
+            autoSearchFileName = null,
+            onDismiss = {
+                showDriveBrowser = false
+                driveInitialFileId = null
+            },
+            onStreamReady = { streamUri, _ ->
+                showDriveBrowser = false
+                driveInitialFileId = null
+                onOpenStreamUri(streamUri)
+            }
+        )
+    }
+
     var url by rememberSaveable { mutableStateOf("") }
     Scaffold(
         containerColor = BgDark,
@@ -111,11 +139,24 @@ fun PlayerHomeScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(24.dp).widthIn(max = 420.dp)
             ) {
-                val openUrl = { if (url.isNotBlank()) onOpenUrl(url.trim()) }
+                val openUrl = {
+                    val trimmed = url.trim()
+                    if (trimmed.isNotBlank()) {
+                        val driveId = if (DriveStreamResolver.isGoogleDriveUrl(trimmed)) {
+                            DriveStreamResolver.extractDriveFileId(trimmed)
+                        } else null
+                        if (driveId != null) {
+                            driveInitialFileId = driveId
+                            showDriveBrowser = true
+                        } else {
+                            onOpenUrl(trimmed)
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it },
-                    label = { Text("URL") },
+                    label = { Text("URL veya Google Drive Bağlantısı") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { openUrl() }),
@@ -125,6 +166,13 @@ fun PlayerHomeScreen(
                 Button(onClick = openUrl, enabled = url.isNotBlank()) {
                     Icon(Icons.Filled.Link, null, modifier = Modifier.padding(end = 8.dp))
                     Text("URL'yi aç")
+                }
+                OutlinedButton(onClick = {
+                    driveInitialFileId = null
+                    showDriveBrowser = true
+                }) {
+                    Icon(Icons.Filled.CloudQueue, null, modifier = Modifier.padding(end = 8.dp))
+                    Text("Google Drive'dan aç (İndirmeden)")
                 }
                 OutlinedButton(onClick = onPickFile) {
                     Icon(Icons.Filled.UploadFile, null, modifier = Modifier.padding(end = 8.dp))
@@ -141,7 +189,7 @@ fun PlayerHomeScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalFileBrowser(onClose: () -> Unit, onPlayFile: (File) -> Unit) {
+internal fun LocalFileBrowser(onClose: () -> Unit, onPlayFile: (File) -> Unit) {
     val root = remember { Environment.getExternalStorageDirectory() }
     var path by rememberSaveable { mutableStateOf(root.absolutePath) }
     var entries by remember { mutableStateOf<List<File>>(emptyList()) }
