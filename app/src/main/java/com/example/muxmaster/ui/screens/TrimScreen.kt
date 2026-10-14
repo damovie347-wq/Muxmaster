@@ -1206,6 +1206,13 @@ fun prewarmVideoDecoders() {
     }
 }
 
+/** Google Drive / bulut depolama sağlayıcısı mı? */
+private fun isCloudAuthority(a: String?): Boolean {
+    val x = a.orEmpty().lowercase()
+    return x.contains("com.google.android.apps.docs") || x.contains("drive") ||
+        x.contains("onedrive") || x.contains("dropbox") || x.contains("cloud")
+}
+
 /** Yerel dosyalarda hızlı açılış: oynatma için 2,5 sn yerine ~0,25 sn tampon yeterli. */
 private fun buildFastPlayer(context: Context): ExoPlayer {
     val loadControl = DefaultLoadControl.Builder()
@@ -1281,16 +1288,72 @@ private fun VideoSurface(
         val spec = tween<Float>(durationMillis = 380, easing = FastOutSlowInEasing)
         val sx by animateFloatAsState(target.first.value / fw, spec, label = "scaleX")
         val sy by animateFloatAsState(target.second.value / fh, spec, label = "scaleY")
-        AndroidView(
-            factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
-            modifier = Modifier
-                .requiredSize(fit.first, fit.second)
-                .graphicsLayer {
-                    scaleX = sx
-                    scaleY = sy
+        // HDR (HDR10 / HDR10+ / HLG / Dolby Vision) videolar TextureView'da GPU üzerinden
+        // SDR gibi çizildiği için simsiyah/karanlık görünür. HDR'de SurfaceView kullanılır:
+        // görüntü doğrudan ekran birleştiricisine gider (HDR ekranda gerçek HDR, SDR ekranda
+        // donanımsal ton eşleme) -> diğer oynatıcılarla aynı parlaklık.
+        var hdr by remember(player) { mutableStateOf(isHdrFormat(player.videoFormat)) }
+        DisposableEffect(player) {
+            val l = object : Player.Listener {
+                override fun onTracksChanged(tracks: Tracks) {
+                    hdr = isHdrFormat(player.videoFormat) || tracksHaveHdr(tracks)
                 }
-        )
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    hdr = isHdrFormat(player.videoFormat) || hdr
+                }
+            }
+            player.addListener(l)
+            onDispose { player.removeListener(l) }
+        }
+        if (hdr) {
+            // SurfaceView görünüm ölçeğini (graphicsLayer) uygulamaz; boyut animasyonla verilir.
+            val dspec = tween<Dp>(durationMillis = 380, easing = FastOutSlowInEasing)
+            val tw by androidx.compose.animation.core.animateDpAsState(target.first, dspec, label = "hdrW")
+            val th by androidx.compose.animation.core.animateDpAsState(target.second, dspec, label = "hdrH")
+            key("hdr") {
+                AndroidView(
+                    factory = { ctx ->
+                        android.view.SurfaceView(ctx).also { player.setVideoSurfaceView(it) }
+                    },
+                    onRelease = { v -> player.clearVideoSurfaceView(v) },
+                    modifier = Modifier.requiredSize(tw, th)
+                )
+            }
+        } else {
+            key("sdr") {
+                AndroidView(
+                    factory = { ctx -> TextureView(ctx).also { player.setVideoTextureView(it) } },
+                    onRelease = { v -> player.clearVideoTextureView(v) },
+                    modifier = Modifier
+                        .requiredSize(fit.first, fit.second)
+                        .graphicsLayer {
+                            scaleX = sx
+                            scaleY = sy
+                        }
+                )
+            }
+        }
     }
+}
+
+/** Video biçimi HDR mi? (PQ/ST2084 = HDR10/HDR10+/DV, HLG veya Dolby Vision codec'i) */
+private fun isHdrFormat(f: Format?): Boolean {
+    if (f == null) return false
+    val t = f.colorInfo?.colorTransfer
+    if (t == C.COLOR_TRANSFER_ST2084 || t == C.COLOR_TRANSFER_HLG) return true
+    if (f.sampleMimeType == androidx.media3.common.MimeTypes.VIDEO_DOLBY_VISION) return true
+    val codecs = f.codecs.orEmpty().lowercase()
+    return codecs.startsWith("dvh") || codecs.startsWith("dvav") || codecs.startsWith("dav1")
+}
+
+private fun tracksHaveHdr(tracks: Tracks): Boolean {
+    for (g in tracks.groups) {
+        if (g.type != C.TRACK_TYPE_VIDEO) continue
+        for (i in 0 until g.length) {
+            if (g.isTrackSelected(i) && isHdrFormat(g.getTrackFormat(i))) return true
+        }
+    }
+    return false
 }
 
 /** Tek satırlık seçenek "çipi" (ölçekleme / hız menülerinde yan yana dizilir). */
@@ -1868,15 +1931,14 @@ fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
         errorText = null
         // content:// (sistem seçicisi) URI'sini gerçek dosya yoluna çevir: dosyaya doğrudan
         // erişilir, içerik sağlayıcı üzerinden yavaş okuma/arama yapılmaz.
-        val playable = if (uri.scheme == "content") {
+        // Bulut (Google Drive vb.) URI'leri yerel yola çevrilmeye çalışılmaz; doğrudan
+        // içerik sağlayıcıdan akış olarak okunur (cihaza kopyalama / indirme yapılmaz).
+        val cloud = uri.scheme == "content" && isCloudAuthority(uri.authority)
+        val playable = if (uri.scheme == "content" && !cloud) {
             withContext(Dispatchers.IO) {
                 com.example.muxmaster.data.InputAccess.realPath(context, uri)
             }?.let { Uri.fromFile(java.io.File(it)) } ?: uri
         } else uri
-        if (playable.scheme == "content" && playable.authority.orEmpty().contains("com.google.android.apps.docs")) {
-            errorText = "Google Drive dosyası: önce Drive tarafından indirilmesi gerekiyor. " +
-                "Hızlı açılış için dosyayı cihaza indirip \"Dosya gezginini aç\" ile açın."
-        }
         player.setMediaItem(MediaItem.fromUri(playable))
         player.prepare()
         player.playWhenReady = true
