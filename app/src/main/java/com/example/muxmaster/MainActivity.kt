@@ -43,6 +43,8 @@ import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.screens.SettingsScreen
 import com.example.muxmaster.ui.screens.TrimScreen
 import com.example.muxmaster.ui.screens.StreamPlayerScreen
+import com.example.muxmaster.ui.screens.PlayerHomeScreen
+import com.example.muxmaster.ui.screens.prewarmVideoDecoders
 import androidx.compose.material.icons.filled.PlayCircle
 import com.example.muxmaster.ui.theme.MuxMasterTheme
 import com.example.muxmaster.ui.theme.ThemeMode
@@ -68,7 +70,16 @@ class MainActivity : AppCompatActivity() {
     private val playFromExternal = mutableStateOf(false)
 
     /** Uygulama içinden "Video Oynatıcı" ile video seçme. */
-    private val pickPlayVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickPlayVideoLauncher = registerForActivityResult(object : ActivityResultContracts.OpenDocument() {
+        // Seçici Google Drive yerine doğrudan dahili depolamada açılsın
+        override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
+            super.createIntent(context, input).apply {
+                putExtra(
+                    android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
+                )
+            }
+    }) { uri ->
         if (uri != null) {
             try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
             catch (_: Exception) { }
@@ -83,7 +94,8 @@ class MainActivity : AppCompatActivity() {
         val external = playFromExternal.value
         playFromExternal.value = false
         playUri.value = null
-        screenState?.value = 0
+        // Uygulama içinden açıldıysa oynatıcı giriş ekranına dön
+        screenState?.value = if (external) 0 else 6
         if (external) {
             if (!moveTaskToBack(true)) finish()
         }
@@ -191,6 +203,9 @@ class MainActivity : AppCompatActivity() {
             notifAsked = true
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
+        // AV1/HEVC çözücü listesini önceden yükle: ilk video açılışındaki saniyelerce
+        // süren codec sorgusu bekleme yapmaz.
+        Thread { prewarmVideoDecoders() }.start()
         setContent {
             var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
             MuxMasterTheme(themeMode = themeMode) {
@@ -250,7 +265,7 @@ class MainActivity : AppCompatActivity() {
                         onNavigateToTrim = { screen = 2 },
                         onNavigateToMerge = { screen = 4 },
                         onNavigateToSettings = { screen = 3 },
-                        onOpenPlayer = { pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*", "*/*")) }
+                        onOpenPlayer = { screen = 6 }
                     )
                     1 -> ConverterScreen(
                         viewModel = converterViewModel,
@@ -273,6 +288,23 @@ class MainActivity : AppCompatActivity() {
                             StreamPlayerScreen(uri = u, onExit = { exitPlayer() })
                         }
                     }
+                    6 -> PlayerHomeScreen(
+                        onBack = { screen = 0 },
+                        onOpenUrl = { text ->
+                            val u = if (text.contains("://")) text else "https://$text"
+                            playFromExternal.value = false
+                            playUri.value = Uri.parse(u)
+                            screen = 5
+                        },
+                        onPickFile = { pickPlayVideoLauncher.launch(arrayOf("video/*", "audio/*")) },
+                        onPlayFile = { f ->
+                            playFromExternal.value = false
+                            playUri.value = Uri.fromFile(f)
+                            screen = 5
+                        },
+                        onNeedStorage = { requestStorageAccess() },
+                        hasStorage = { com.example.muxmaster.data.InputAccess.hasStorageAccess(this@MainActivity) }
+                    )
                     4 -> MergeScreen(
                         viewModel = mergeViewModel,
                         onPickVideos = { pickMergeVideosLauncher.launch(arrayOf("video/*", "*/*")) },

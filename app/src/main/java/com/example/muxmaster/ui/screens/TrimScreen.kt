@@ -115,6 +115,8 @@ import com.example.muxmaster.ui.components.VideoCard
 import com.example.muxmaster.ui.theme.*
 import com.example.muxmaster.viewmodel.TrimViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
@@ -1188,13 +1190,32 @@ private fun KeepSystemBarsHidden() {
     }
 }
 
+/**
+ * Çözücü (MediaCodec) listesini uygulama açılışında arka planda sorgulayıp önbelleğe alır.
+ * Bu sorgu ilk oynatmada (özellikle AV1'de) saniyeler sürebiliyordu.
+ */
+fun prewarmVideoDecoders() {
+    for (mime in listOf(
+        androidx.media3.common.MimeTypes.VIDEO_AV1, androidx.media3.common.MimeTypes.VIDEO_H265,
+        androidx.media3.common.MimeTypes.VIDEO_H264, androidx.media3.common.MimeTypes.VIDEO_VP9,
+        androidx.media3.common.MimeTypes.AUDIO_AAC, androidx.media3.common.MimeTypes.AUDIO_E_AC3,
+        androidx.media3.common.MimeTypes.AUDIO_AC3, androidx.media3.common.MimeTypes.AUDIO_OPUS
+    )) {
+        try { androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getDecoderInfos(mime, false, false) }
+        catch (_: Throwable) { }
+    }
+}
+
 /** Yerel dosyalarda hızlı açılış: oynatma için 2,5 sn yerine ~0,25 sn tampon yeterli. */
 private fun buildFastPlayer(context: Context): ExoPlayer {
     val loadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(15_000, 50_000, 250, 1_000)
+        .setBufferDurationsMs(2_500, 30_000, 100, 500)
         .setPrioritizeTimeOverSizeThresholds(true)
         .build()
-    val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+    val renderers = DefaultRenderersFactory(context)
+        .setEnableDecoderFallback(true)
+        // Codec'leri MediaCodec asenkron kuyruk modunda çalıştır: AV1/HEVC ilk karesi daha hızlı gelir
+        .forceEnableMediaCodecAsynchronousQueueing()
     return ExoPlayer.Builder(context, renderers)
         .setLoadControl(loadControl)
         .build()
@@ -1845,7 +1866,18 @@ fun StreamPlayerScreen(uri: Uri, onExit: () -> Unit) {
 
     LaunchedEffect(uri) {
         errorText = null
-        player.setMediaItem(MediaItem.fromUri(uri))
+        // content:// (sistem seçicisi) URI'sini gerçek dosya yoluna çevir: dosyaya doğrudan
+        // erişilir, içerik sağlayıcı üzerinden yavaş okuma/arama yapılmaz.
+        val playable = if (uri.scheme == "content") {
+            withContext(Dispatchers.IO) {
+                com.example.muxmaster.data.InputAccess.realPath(context, uri)
+            }?.let { Uri.fromFile(java.io.File(it)) } ?: uri
+        } else uri
+        if (playable.scheme == "content" && playable.authority.orEmpty().contains("com.google.android.apps.docs")) {
+            errorText = "Google Drive dosyası: önce Drive tarafından indirilmesi gerekiyor. " +
+                "Hızlı açılış için dosyayı cihaza indirip \"Dosya gezginini aç\" ile açın."
+        }
+        player.setMediaItem(MediaItem.fromUri(playable))
         player.prepare()
         player.playWhenReady = true
     }
