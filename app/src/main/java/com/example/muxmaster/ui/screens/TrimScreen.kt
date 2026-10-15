@@ -121,6 +121,12 @@ import com.example.muxmaster.viewmodel.TrimViewModel
 import java.io.File
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -1064,6 +1070,7 @@ internal fun SmoothVideoSlider(
     var isDragging by remember { mutableStateOf(false) }
     var dragValueMs by remember { mutableLongStateOf(positionMs.coerceIn(startMs, safeEnd)) }
     var lastLiveSeekAt by remember { mutableLongStateOf(0L) }
+    var lastSentTarget by remember { mutableLongStateOf(-1L) }
 
     // Yalnızca sürüklenmiyorken dışarıdan gelen positionMs değerini takip et
     LaunchedEffect(positionMs, isDragging, startMs, safeEnd) {
@@ -1101,6 +1108,7 @@ internal fun SmoothVideoSlider(
                     val now = System.currentTimeMillis()
                     if (now - lastLiveSeekAt >= 320L) {
                         lastLiveSeekAt = now
+                        lastSentTarget = target
                         onSeekTo(target)
                     }
                 }
@@ -1108,7 +1116,9 @@ internal fun SmoothVideoSlider(
             onValueChangeFinished = {
                 if (enabled) {
                     val finalTarget = dragValueMs.coerceIn(startMs, safeEnd)
-                    onSeekTo(finalTarget)
+                    // Tek dokunuşta aynı hedefe ikinci kez seek atılmaz (dekoder iki kez sıfırlanmasın).
+                    if (finalTarget != lastSentTarget) onSeekTo(finalTarget)
+                    lastSentTarget = -1L
                 }
                 isDragging = false
                 onDragStateChange(false)
@@ -1350,7 +1360,7 @@ internal fun isCloudAuthority(a: String?): Boolean {
  * - setBackBuffer(25_000, true) ve 20ms başlangıç tamponu ile yerel videolarda ileri/geri sarma
  *   bekletmeden (<16ms) anında gerçekleşir.
  */
-internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): ExoPlayer {
+internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fastSeek: Boolean = false): ExoPlayer {
     val minBufferMs = if (isMultiView) 2_000 else 2_500
     val maxBufferMs = if (isMultiView) 12_000 else 25_000
     val targetBytes = if (isMultiView) 12 * 1024 * 1024 else 32 * 1024 * 1024
@@ -1362,7 +1372,16 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): Ex
         .setBackBuffer(if (isMultiView) 10_000 else 25_000, true)
         .build()
 
+    // Donanım (VPU) dekoderlerini her zaman yazılım (CPU) dekoderlerinin önüne al:
+    // c2.android.* / OMX.google.* yazılım dekoderleri CPU'yu yakar ve cihazı ısıtır.
+    val hwFirstSelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
+        val infos = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+        if (androidx.media3.common.MimeTypes.isVideo(mimeType) || androidx.media3.common.MimeTypes.isAudio(mimeType)) {
+            infos.sortedBy { if (it.hardwareAccelerated && !it.softwareOnly) 0 else 1 }
+        } else infos
+    }
     val renderers = DefaultRenderersFactory(context)
+        .setMediaCodecSelector(hwFirstSelector)
         .setEnableDecoderFallback(true)
 
     val extractorsFactory = DefaultExtractorsFactory()
@@ -1376,7 +1395,10 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false): Ex
     return ExoPlayer.Builder(context, renderers)
         .setMediaSourceFactory(mediaSourceFactory)
         .setLoadControl(loadControl)
-        .setSeekParameters(SeekParameters(350_000L, 350_000L))
+        // Oynatıcıda en yakın anahtar kareye (keyframe) atla: 15. dakikaya dokunulduğunda
+        // dekoder önceki keyframe'den hedefe kadar yüzlerce kareyi çözüp atmak zorunda kalmaz -> anında başlar.
+        // Kırpma ekranı (fastSeek = false) kare hassasiyetini korur.
+        .setSeekParameters(if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters(350_000L, 350_000L))
         .setVideoChangeFrameRateStrategy(
             if (isMultiView) C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF
             else C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS
@@ -1435,7 +1457,11 @@ internal fun VideoSurface(
     videoWpx: Int,
     videoHpx: Int,
     mode: ScaleMode,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    zoom: Float = 1f,
+    panX: Float = 0f,
+    panY: Float = 0f,
+    onPanLimits: ((Float, Float) -> Unit)? = null
 ) {
     val density = LocalDensity.current
     BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
@@ -1444,7 +1470,7 @@ internal fun VideoSurface(
         val a = aspect.coerceAtLeast(0.1f)
         val wider = (cw / ch.coerceAtLeast(1.dp)) > a
         val fit: Pair<Dp, Dp> = if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
-        val target: Pair<Dp, Dp> = when (mode) {
+        val baseTarget: Pair<Dp, Dp> = when (mode) {
             ScaleMode.FIT -> fit
             ScaleMode.CROP -> if (wider) Pair(cw, cw / a) else Pair(ch * a, ch)
             ScaleMode.STRETCH -> Pair(cw, ch)
@@ -1452,9 +1478,18 @@ internal fun VideoSurface(
                 with(density) { Pair(videoWpx.toDp(), videoHpx.toDp()) }
             } else fit
         }
+        // Parmakla yakınlaştırma / uzaklaştırma (%30 – %150)
+        val z = zoom.coerceIn(0.3f, 1.5f)
+        val target: Pair<Dp, Dp> = Pair(baseTarget.first * z, baseTarget.second * z)
 
-        val needsCroppedTexture = (mode == ScaleMode.CROP || mode == ScaleMode.ORIGINAL) &&
-            (target.first > cw + 1.dp || target.second > ch + 1.dp)
+        // Kaydırma sınırları (px): video hücreden ne kadar taşıyorsa o kadar kaydırılabilir
+        val maxPanX = with(density) { ((target.first - cw) / 2).coerceAtLeast(0.dp).toPx() }
+        val maxPanY = with(density) { ((target.second - ch) / 2).coerceAtLeast(0.dp).toPx() }
+        if (onPanLimits != null) SideEffect { onPanLimits(maxPanX, maxPanY) }
+
+        // Hücreye sığan her durumda donanım katmanı (SurfaceView / HWC overlay, GPU kopyası yok).
+        // Yalnızca taşan (kırpılması gereken) durumda TextureView kullanılır.
+        val needsCroppedTexture = (target.first > cw + 1.dp || target.second > ch + 1.dp)
 
         if (!needsCroppedTexture) {
             val safeW = target.first.coerceAtMost(cw)
@@ -1513,6 +1548,8 @@ internal fun VideoSurface(
                         .graphicsLayer {
                             scaleX = sx
                             scaleY = sy
+                            translationX = panX.coerceIn(-maxPanX, maxPanX)
+                            translationY = panY.coerceIn(-maxPanY, maxPanY)
                         }
                 )
             }
@@ -1986,7 +2023,7 @@ internal class SlotPlayerHolder(
     isMultiView: Boolean
 ) {
     val appContext: Context = context.applicationContext
-    val player: ExoPlayer = buildFastPlayer(appContext, isMultiView = isMultiView)
+    val player: ExoPlayer = buildFastPlayer(appContext, isMultiView = isMultiView, fastSeek = true)
 
     var loadedUri: Uri? by mutableStateOf(null)
     var isCloudStream: Boolean by mutableStateOf(false)
@@ -2003,6 +2040,37 @@ internal class SlotPlayerHolder(
     var cueText: String by mutableStateOf("")
     var buffering: Boolean by mutableStateOf(true)
     var errorText: String? by mutableStateOf(null)
+    /** Bulut (Google Drive) hazırlık / indirme durumu metni; yalnızca yüklenirken dolu. */
+    var cloudStatus: String? by mutableStateOf(null)
+
+    /** Parmakla yakınlaştırma: 0.3 (%30) – 1.5 (%150). */
+    var zoom: Float by mutableFloatStateOf(1f)
+    var panX: Float by mutableFloatStateOf(0f)
+    var panY: Float by mutableFloatStateOf(0f)
+    private var rawZoom: Float = 1f
+    var maxPanX: Float = 0f
+    var maxPanY: Float = 0f
+    @Volatile private var released = false
+
+    fun applyPinch(factor: Float, panDx: Float, panDy: Float) {
+        rawZoom = (rawZoom * factor).coerceIn(0.3f, 1.5f)
+        // %100 civarında hafif mıknatıs: tam boyuta kolayca dönülür
+        zoom = if (abs(rawZoom - 1f) < 0.04f) 1f else rawZoom
+        if (zoom > 1f) {
+            panX = (panX + panDx).coerceIn(-maxPanX, maxPanX)
+            panY = (panY + panDy).coerceIn(-maxPanY, maxPanY)
+        } else {
+            panX = 0f
+            panY = 0f
+        }
+    }
+
+    fun resetZoom() {
+        rawZoom = 1f
+        zoom = 1f
+        panX = 0f
+        panY = 0f
+    }
 
     private var pendingSeekTargetMs: Long = -1L
     private var pendingSeekTimestamp: Long = 0L
@@ -2018,6 +2086,7 @@ internal class SlotPlayerHolder(
         override fun onRenderedFirstFrame() {
             buffering = false
             errorText = null
+            cloudStatus = null
         }
         override fun onTracksChanged(t: Tracks) {
             tracks = t
@@ -2056,11 +2125,17 @@ internal class SlotPlayerHolder(
         player.addListener(listener)
     }
 
+    private var retryScope: CoroutineScope? = null
+
     fun loadIfNeeded(uri: Uri, scope: CoroutineScope) {
+        retryScope = scope
         if (loadedUri == uri) return
         loadedUri = uri
         errorText = null
         buffering = true
+
+        resetZoom()
+        cloudStatus = null
 
         scope.launch {
             val urlStr = uri.toString()
@@ -2069,13 +2144,48 @@ internal class SlotPlayerHolder(
             isCloudStream = isCloud || uri.scheme == "http" || uri.scheme == "https"
 
             if (isCloud) {
-                // Cihazda zaten açık olan Google Drive hesabından (content://com.google.android.apps.docs.storage/...)
-                // hiçbir WebView veya oturum ekranı açmadan doğrudan SafNativeDataSource ile akış başlat!
+                // Google Drive / bulut SAF: oturumu arka planda aç (Drive dosyayı hazırlarken UI donmaz),
+                // seek destekli mi yoksa sıralı pipe mı olduğunu öğren ve ona göre extractor seç.
+                cloudStatus = if (isDriveSaf) "Google Drive'dan hazırlanıyor…" else "Bulut dosyası hazırlanıyor…"
+                val progressJob = launch {
+                    while (!released && loadedUri == uri) {
+                        if (buffering && errorText == null) {
+                            val p = DriveStreamResolver.progressOf(uri)
+                            cloudStatus = when {
+                                p == null -> cloudStatus
+                                p.second > 0L -> "Drive'dan yükleniyor %" + ((p.first * 100L) / p.second).coerceIn(0L, 100L)
+                                else -> "Drive'dan yükleniyor " + (p.first / (1024L * 1024L)) + " MB"
+                            }
+                        } else {
+                            cloudStatus = null
+                        }
+                        delay(if (buffering) 500L else 1500L)
+                    }
+                }
+                val seekable = try {
+                    withContext(Dispatchers.IO) { DriveStreamResolver.prepareSession(appContext, uri) }
+                } catch (t: Throwable) {
+                    progressJob.cancel()
+                    if (loadedUri == uri) {
+                        buffering = false
+                        cloudStatus = null
+                        errorText = "Drive dosyası açılamadı. Dosyayı tekrar seçin. (" +
+                            (t.localizedMessage ?: t.javaClass.simpleName) + ")"
+                    }
+                    return@launch
+                }
+                if (released || loadedUri != uri) {
+                    progressJob.cancel()
+                    return@launch
+                }
                 val cloudExtractors = DefaultExtractorsFactory()
-                    .setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
                     .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
                     .setConstantBitrateSeekingEnabled(true)
-                    .setConstantBitrateSeekingAlwaysEnabled(true)
+                if (!seekable) {
+                    // Sıralı akışta MKV Cues için dosya sonuna atlanmaz; oynatma 0. bayttan hemen başlar.
+                    cloudExtractors.setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
+                    cloudExtractors.setConstantBitrateSeekingAlwaysEnabled(true)
+                }
                 val cloudSourceFactory = DefaultMediaSourceFactory(
                     DriveStreamResolver.buildDataSourceFactory(appContext),
                     cloudExtractors
@@ -2115,6 +2225,13 @@ internal class SlotPlayerHolder(
         val u = loadedUri ?: return
         errorText = null
         buffering = true
+        if (player.mediaItemCount == 0 && player.playbackState == Player.STATE_IDLE) {
+            // Bulut oturumu hiç açılamadıysa baştan yükle
+            DriveStreamResolver.releaseSession(u)
+            loadedUri = null
+            retryScope?.let { loadIfNeeded(u, it) }
+            return
+        }
         player.prepare()
         player.play()
     }
@@ -2133,11 +2250,13 @@ internal class SlotPlayerHolder(
         }
     }
 
-    fun seekTo(targetMs: Long) {
+    fun seekTo(targetMs: Long, params: SeekParameters = SeekParameters.CLOSEST_SYNC) {
         val safe = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
         pendingSeekTargetMs = safe
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = safe
+        // Anahtar kareye hizalı seek: dekoder hedefe kadar kare çözüp atmaz -> anında oynar, CPU harcamaz.
+        player.setSeekParameters(params)
         player.seekTo(safe)
     }
 
@@ -2147,7 +2266,8 @@ internal class SlotPlayerHolder(
         } else {
             player.currentPosition.coerceAtLeast(0L)
         }
-        seekTo(base + deltaMs)
+        // İleri sarmada sonraki, geri sarmada önceki anahtar kare: yön her zaman doğru, bekleme yok.
+        seekTo(base + deltaMs, if (deltaMs >= 0L) SeekParameters.NEXT_SYNC else SeekParameters.PREVIOUS_SYNC)
     }
 
     fun updateSpeed(newSpeed: Float) {
@@ -2175,6 +2295,8 @@ internal class SlotPlayerHolder(
     }
 
     fun release() {
+        released = true
+        cloudStatus = null
         player.removeListener(listener)
         player.release()
     }
@@ -2702,19 +2824,55 @@ private fun SingleOrFocusedPlayerContent(
                 videoWpx = holder.videoWpx,
                 videoHpx = holder.videoHpx,
                 mode = holder.scaleMode,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                zoom = holder.zoom,
+                panX = holder.panX,
+                panY = holder.panY,
+                onPanLimits = { mx, my ->
+                    holder.maxPanX = mx
+                    holder.maxPanY = my
+                }
             )
         }
 
+        // Dokun = kontrolleri aç/kapat, iki parmak = yakınlaştır/uzaklaştır (%30 – %150),
+        // yakınlaştırılmışken tek parmak = kaydır.
+        val toggleState = rememberUpdatedState(onToggleControls)
+        var zoomHint by remember { mutableStateOf<String?>(null) }
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onToggleControls
-                )
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { toggleState.value() })
+                }
+                .pointerInput(holder) {
+                    detectTransformGestures { _, pan, gestureZoom, _ ->
+                        holder.applyPinch(gestureZoom, pan.x, pan.y)
+                        if (gestureZoom != 1f) {
+                            zoomHint = "%" + (holder.zoom * 100f).roundToInt()
+                        }
+                    }
+                }
         )
+        val hint = zoomHint
+        if (hint != null) {
+            LaunchedEffect(hint) {
+                delay(900)
+                zoomHint = null
+            }
+            Text(
+                text = hint,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 28.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xCC000000))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            )
+        }
 
         SubtitleOverlay(
             text = holder.cueText,
@@ -2725,6 +2883,20 @@ private fun SingleOrFocusedPlayerContent(
 
         if (showRing && holder.errorText == null) {
             LoadingRing(Modifier.align(Alignment.Center))
+            val status = holder.cloudStatus
+            if (status != null) {
+                Text(
+                    text = status,
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(top = 84.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xAA000000))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+            }
         }
 
         if (holder.errorText != null) {

@@ -18,12 +18,9 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
-import java.io.BufferedInputStream
-import java.io.EOFException
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
-import java.io.InputStream
 import java.io.RandomAccessFile
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -202,31 +199,41 @@ object InputAccess {
 }
 
 /**
- * Cihazda zaten açık olan Google Drive hesaplarından (content://com.google.android.apps.docs.storage/...)
- * veya yerel SAF sağlayıcılarından seçilen videoları HİÇBİR WebView / "Oturum Açın" ekranına yönlendirmeden,
- * doğrudan Android ContentResolver ve ParcelFileDescriptor üzerinden oynatan yerel akış motoru.
+ * Google Drive (content://com.google.android.apps.docs.storage/...) ve diğer bulut SAF sağlayıcıları için
+ * paylaşımlı, akıllı akış oturumu yöneticisi.
  *
- * Neden Media3'ün varsayılan ContentDataSource'u Google Drive'da takılıyordu?
- * 1) Google Drive uygulaması önbellekte olmayan büyük videoları pipe (S_IFIFO) olarak akıtır.
- * 2) Android'de FileInputStream.skip() ve FileChannel.position() pipe üzerinde Os.lseek() çağırır ve
- *    "ErrnoException: lseek failed: ESPIPE (Illegal seek)" fırlatarak oynatmayı çökertir.
- * 3) Bu özel SafNativeDataSource:
- *    - Dosya tanımlayıcısı gerçek seek destekliyorsa (S_IFREG / FUSE ProxyFileDescriptor), Os.pread / Os.lseek
- *      ile 0 ms'de doğrudan okur.
- *    - Pipe (S_IFIFO) ise ASLA lseek veya FileInputStream.skip() çağırmaz; akışı kesmeden okur ve
- *      okunan baytları geçici bir RandomAccessFile önbelleğinde tutarak başlık geri dönüşlerini anında yanıtlar.
+ * Eski sürümdeki sorunlar:
+ *  - Drive pipe (S_IFIFO) döndürdüğünde, dosya sonundaki "moov" (MP4) veya ileri bir konuma atlama
+ *    isteği "cannot jump" hatası ile reddediliyordu -> ExoPlayer sürekli yeniden deniyor, sonsuz yükleme.
+ *  - Her DataSource kendi pipe'ını açtığı için ikinci açılışta indirme baştan başlıyordu.
+ *  - FUSE/proxy fd üzerinde küçük okumalar (her biri Drive'a bir tur) çok yavaştı.
+ *
+ * Yeni yapı:
+ *  - URI başına TEK oturum (tüm DataSource açılışları ortak kullanır, bağlantı asla baştan başlamaz).
+ *  - Seek destekli fd -> doğrudan pread + 1 MB'lık blok okuma (Drive'a çok az tur).
+ *  - Pipe -> arka planda tek bir indirme iş parçacığı, geçici dosyaya sırayla yazar. Okuyucu ileri bir
+ *    konum isterse (moov / ileri sarma) hata yerine o bayt gelene kadar bekler. İndirici, oynatma
+ *    konumunun en fazla [AHEAD_BYTES] ilerisine kadar çalışır, sonra uyur (boş yere CPU/disk/pil yok).
  */
 object DriveStreamResolver {
 
     const val DEFAULT_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    private val activeTempFiles = Collections.newSetFromMap(ConcurrentHashMap<File, Boolean>())
+    private val sessions = ConcurrentHashMap<String, CloudStreamSession>()
 
     fun isGoogleDriveSafUri(uri: Uri): Boolean {
         if (uri.scheme != "content") return false
         val auth = uri.authority.orEmpty().lowercase()
         return auth.contains("com.google.android.apps.docs") || auth.contains("google.drive")
+    }
+
+    /** Gerçek dosya yoluna çevrilemeyen bulut/SAF sağlayıcısı mı? */
+    fun isCloudSafUri(uri: Uri): Boolean {
+        if (uri.scheme != "content") return false
+        if (isGoogleDriveSafUri(uri)) return true
+        val a = uri.authority.orEmpty().lowercase()
+        return a.contains("drive") || a.contains("onedrive") || a.contains("dropbox") || a.contains("cloud")
     }
 
     fun isGoogleDriveUrl(url: String): Boolean {
@@ -247,25 +254,31 @@ object DriveStreamResolver {
         return null
     }
 
+    internal fun session(context: Context, uri: Uri): CloudStreamSession =
+        sessions.getOrPut(uri.toString()) { CloudStreamSession(context.applicationContext, uri) }
+
+    /**
+     * Oturumu arka planda (IO) açar. Dönen değer: true = rastgele erişim (seek) destekli,
+     * false = sıralı pipe akışı. Açılamazsa IOException fırlatır.
+     */
+    @Throws(IOException::class)
+    fun prepareSession(context: Context, uri: Uri): Boolean = session(context, uri).ensureOpen()
+
+    /** UI için indirme durumu: (indirilen bayt, toplam bayt veya -1). Pipe değilse null. */
+    fun progressOf(uri: Uri?): Pair<Long, Long>? {
+        val s = uri?.let { sessions[it.toString()] } ?: return null
+        return s.progress()
+    }
+
     fun releaseSession(uri: Uri?) {
-        // Temp files are cleaned up on player release or releaseAllSessions
+        if (uri == null) return
+        sessions.remove(uri.toString())?.release()
     }
 
     fun releaseAllSessions() {
-        val copy = activeTempFiles.toList()
-        activeTempFiles.clear()
-        for (f in copy) {
-            runCatching { f.delete() }
-        }
-    }
-
-    internal fun registerTempFile(f: File) {
-        activeTempFiles.add(f)
-    }
-
-    internal fun unregisterTempFile(f: File) {
-        activeTempFiles.remove(f)
-        runCatching { f.delete() }
+        val copy = sessions.values.toList()
+        sessions.clear()
+        copy.forEach { it.release() }
     }
 
     fun buildDataSourceFactory(context: Context): DataSource.Factory {
@@ -284,236 +297,303 @@ object DriveStreamResolver {
     }
 }
 
+/** URI başına paylaşılan bulut akış oturumu. Tüm metotlar iş parçacığı güvenlidir. */
+internal class CloudStreamSession(private val context: Context, val uri: Uri) {
+
+    companion object {
+        /** Pipe modunda oynatma konumunun ne kadar ilerisine kadar indirilsin (pil/IO dengesi). */
+        const val AHEAD_BYTES = 96L * 1024L * 1024L
+        private const val COPY_CHUNK = 256 * 1024
+    }
+
+    private val lock = Object()
+
+    @Volatile private var opened = false
+    @Volatile private var released = false
+    @Volatile var seekable = false
+        private set
+    @Volatile var totalLength: Long = C.LENGTH_UNSET.toLong()
+        private set
+
+    private var pfd: ParcelFileDescriptor? = null
+
+    // Pipe modu
+    private var cacheFile: File? = null
+    private var writeRaf: RandomAccessFile? = null
+    private var readRaf: RandomAccessFile? = null
+    @Volatile private var downloaded = 0L
+    @Volatile private var eof = false
+    @Volatile private var failure: IOException? = null
+    @Volatile private var wantedUpTo = AHEAD_BYTES
+    private var downloader: Thread? = null
+
+    @Throws(IOException::class)
+    fun ensureOpen(): Boolean {
+        if (opened) return seekable
+        synchronized(this) {
+            if (opened) return seekable
+            if (released) throw IOException("Oturum kapatıldı")
+            val fd = openPfd() ?: throw IOException("Dosya açılamadı (izin yok veya bağlantı yok): $uri")
+            pfd = fd
+            val canSeek = testSeekable(fd)
+            val statLen = runCatching { fd.statSize }.getOrDefault(-1L)
+            val queryLen = InputAccess.sizeOf(context, uri)
+            totalLength = when {
+                canSeek && statLen > 0L -> statLen
+                queryLen > 0L -> queryLen
+                statLen > 0L -> statLen
+                else -> C.LENGTH_UNSET.toLong()
+            }
+            seekable = canSeek
+            if (!canSeek) startDownloader(fd)
+            opened = true
+            return seekable
+        }
+    }
+
+    fun progress(): Pair<Long, Long>? = if (!opened || seekable) null else Pair(downloaded, totalLength)
+
+    private fun openPfd(): ParcelFileDescriptor? {
+        runCatching { context.contentResolver.openFileDescriptor(uri, "r")?.let { return it } }
+        runCatching { context.contentResolver.openAssetFileDescriptor(uri, "r")?.parcelFileDescriptor?.let { return it } }
+        return null
+    }
+
+    private fun testSeekable(fd: ParcelFileDescriptor): Boolean = try {
+        val st = Os.fstat(fd.fileDescriptor)
+        val mode = st.st_mode and OsConstants.S_IFMT
+        if (mode == OsConstants.S_IFIFO || mode == OsConstants.S_IFSOCK) false
+        else Os.lseek(fd.fileDescriptor, 0L, OsConstants.SEEK_CUR) >= 0L
+    } catch (_: Throwable) { false }
+
+    private fun startDownloader(fd: ParcelFileDescriptor) {
+        val dir = File(context.cacheDir, "drive_stream").apply { mkdirs() }
+        val f = File.createTempFile("gdrive_", ".tmp", dir)
+        cacheFile = f
+        writeRaf = RandomAccessFile(f, "rw")
+        readRaf = RandomAccessFile(f, "r")
+        val t = Thread({ downloadLoop(fd) }, "DriveStream")
+        t.priority = Thread.NORM_PRIORITY - 1
+        t.isDaemon = true
+        downloader = t
+        t.start()
+    }
+
+    private fun downloadLoop(fd: ParcelFileDescriptor) {
+        val buf = ByteArray(COPY_CHUNK)
+        try {
+            FileInputStream(fd.fileDescriptor).use { input ->
+                while (!released) {
+                    // Akıllı önbellek: oynatıcının ihtiyacından yeterince öndeysek uyu.
+                    synchronized(lock) {
+                        while (!released && downloaded >= wantedUpTo) lock.wait(1_000L)
+                    }
+                    if (released) break
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    val raf = writeRaf ?: break
+                    synchronized(raf) {
+                        raf.seek(downloaded)
+                        raf.write(buf, 0, n)
+                    }
+                    synchronized(lock) {
+                        downloaded += n
+                        lock.notifyAll()
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            if (!released) failure = if (e is IOException) e else IOException(e)
+        } finally {
+            synchronized(lock) {
+                eof = true
+                if (totalLength == C.LENGTH_UNSET.toLong() && failure == null) totalLength = downloaded
+                lock.notifyAll()
+            }
+        }
+    }
+
+    /** Konumsal okuma. Veri henüz gelmediyse (pipe) bekler; kesinti (seek/release) olursa InterruptedIOException. */
+    @Throws(IOException::class)
+    fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (released) throw IOException("Oturum kapatıldı")
+        if (seekable) {
+            val fd = pfd ?: throw IOException("fd kapalı")
+            return try {
+                val n = Os.pread(fd.fileDescriptor, buffer, offset, length, position)
+                if (n <= 0) C.RESULT_END_OF_INPUT else n
+            } catch (e: Throwable) {
+                throw if (e is IOException) e else IOException(e)
+            }
+        }
+        // Pipe modu: gerekirse indiriciyi ileriye çağır ve bekle.
+        synchronized(lock) {
+            val want = position + AHEAD_BYTES
+            if (want > wantedUpTo) {
+                wantedUpTo = want
+                lock.notifyAll()
+            }
+            while (downloaded <= position && !eof && failure == null && !released) {
+                try {
+                    lock.wait(200L)
+                } catch (ie: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw java.io.InterruptedIOException("Okuma iptal edildi")
+                }
+            }
+            if (downloaded <= position) {
+                failure?.let { throw it }
+                return C.RESULT_END_OF_INPUT
+            }
+        }
+        val avail = min((downloaded - position), length.toLong()).toInt()
+        val raf = readRaf ?: throw IOException("Önbellek kapalı")
+        synchronized(raf) {
+            raf.seek(position)
+            val n = raf.read(buffer, offset, avail)
+            return if (n <= 0) C.RESULT_END_OF_INPUT else n
+        }
+    }
+
+    /** Okuyucu ileri sardığında indiriciye yeni hedefi bildirir. */
+    fun hint(position: Long) {
+        if (seekable || !opened) return
+        synchronized(lock) {
+            val want = position + AHEAD_BYTES
+            if (want > wantedUpTo) {
+                wantedUpTo = want
+                lock.notifyAll()
+            }
+        }
+    }
+
+    fun release() {
+        released = true
+        synchronized(lock) { lock.notifyAll() }
+        runCatching { pfd?.close() }
+        pfd = null
+        downloader?.interrupt()
+        downloader = null
+        runCatching { writeRaf?.close() }
+        runCatching { readRaf?.close() }
+        writeRaf = null
+        readRaf = null
+        cacheFile?.let { f -> runCatching { f.delete() } }
+        cacheFile = null
+    }
+}
+
 /**
- * Her ExoPlayer örneği için bağımsız oluşturulan (4'lü oynatmada birbirini asla bloklamayan)
- * yüksek hızlı yerel dosya + Google Drive SAF Pipe/FUSE DataSource.
+ * Yerel dosya (gerçek yola çevrilerek, kopyasız) + bulut SAF (paylaşımlı oturum) DataSource.
+ * Bulut seekable fd'lerde 1 MB'lık blok önbelleği ile Drive'a giden tur sayısı en aza indirilir.
  */
 private class SafNativeDataSource(
     private val context: Context,
     private val fallbackDelegate: DataSource
-) : BaseDataSource(/* isNetwork = */ false) {
+) : BaseDataSource(/* isNetwork = */ true) {
+
+    companion object {
+        private const val BLOCK = 1 shl 20 // 1 MB
+        /** content:// -> gerçek yol çözümleri önbelleği (her seek'te ContentResolver sorgusu yapılmasın). */
+        private val realPathCache = ConcurrentHashMap<String, String>()
+        private val noRealPath = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    }
 
     private var currentUri: Uri? = null
-    private var usingDelegate: Boolean = false
+    private var usingDelegate = false
+    private var session: CloudStreamSession? = null
+    private var readPosition = 0L
+    private var bytesRemaining = C.LENGTH_UNSET.toLong()
+    private var opened = false
 
-    // Seekable regular file or FUSE proxy descriptor state
-    private var seekablePfd: ParcelFileDescriptor? = null
-    private var seekableTotalLength: Long = C.LENGTH_UNSET.toLong()
-    private var isSeekableFd: Boolean = false
-
-    // Sequential pipe stream + local random-access tee cache for non-seekable Google Drive pipes
-    private var pipePfd: ParcelFileDescriptor? = null
-    private var pipeStream: InputStream? = null
-    private var pipeCacheFile: File? = null
-    private var pipeCacheRaf: RandomAccessFile? = null
-    private var pipeDownloadedBytes: Long = 0L
-    private var pipeEofReached: Boolean = false
-    private val skipScratch = ByteArray(64 * 1024)
-
-    private var readPosition: Long = 0L
-    private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
-    private var opened: Boolean = false
+    // Seekable bulut için blok önbelleği
+    private val block = ByteArray(BLOCK)
+    private var blockStart = -1L
+    private var blockLen = 0
+    private var blockUri: Uri? = null
 
     override fun open(dataSpec: DataSpec): Long {
         val uri = dataSpec.uri
-        val scheme = uri.scheme?.lowercase()
-
-        // HTTP/HTTPS veya file:// doğrudan optimize edilmiş varsayılan kaynağa gider
-        if (scheme != "content") {
+        currentUri = uri
+        if (uri.scheme?.lowercase() != "content") {
             usingDelegate = true
-            currentUri = uri
             return fallbackDelegate.open(dataSpec)
         }
 
-        // Yerel depolamadaki bir content:// URI ise ve gerçek dosya yoluna çevrilebiliyorsa doğrudan File olarak aç
-        if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
-            val localPath = InputAccess.realPath(context, uri)
-            if (localPath != null) {
-                val fileSpec = dataSpec.buildUpon().setUri(Uri.fromFile(File(localPath))).build()
-                usingDelegate = true
-                currentUri = uri
-                return fallbackDelegate.open(fileSpec)
+        if (!DriveStreamResolver.isCloudSafUri(uri)) {
+            val key = uri.toString()
+            val local = realPathCache[key] ?: if (key in noRealPath) null else
+                InputAccess.realPath(context, uri).also { p ->
+                    if (p != null) realPathCache[key] = p else noRealPath.add(key)
+                }
+            usingDelegate = true
+            return if (local != null) {
+                fallbackDelegate.open(dataSpec.buildUpon().setUri(Uri.fromFile(File(local))).build())
+            } else {
+                fallbackDelegate.open(dataSpec)
             }
         }
 
         usingDelegate = false
         transferInitializing(dataSpec)
-
+        val s = DriveStreamResolver.session(context, uri)
         try {
-            // Farklı bir URI'ye geçildiyse önceki kaynakları temizle
-            if (currentUri != uri) {
-                releaseNativeResources()
-                currentUri = uri
-            }
-
-            // Henüz açılmamışsa ParcelFileDescriptor aç ve seekable olup olmadığını test et
-            if (seekablePfd == null && pipeStream == null) {
-                val pfd = openContentPfd(uri)
-                    ?: throw IOException("Dosya açılamadı: $uri")
-
-                val canSeek = testFdSeekable(pfd)
-                if (canSeek) {
-                    seekablePfd = pfd
-                    isSeekableFd = true
-                    val statLen = runCatching { pfd.statSize }.getOrDefault(-1L)
-                    val stLen = runCatching { Os.fstat(pfd.fileDescriptor).st_size }.getOrDefault(-1L)
-                    val queryLen = InputAccess.sizeOf(context, uri)
-                    seekableTotalLength = when {
-                        statLen > 0L -> statLen
-                        stLen > 0L -> stLen
-                        queryLen > 0L -> queryLen
-                        else -> C.LENGTH_UNSET.toLong()
-                    }
-                } else {
-                    // Pipe (S_IFIFO) veya seek desteklemeyen bulut akışı:
-                    // ASLA Os.lseek veya FileInputStream.skip() çağırma!
-                    isSeekableFd = false
-                    pipePfd = pfd
-                    pipeStream = BufferedInputStream(FileInputStream(pfd.fileDescriptor), 512 * 1024)
-                    val tmp = File.createTempFile("gdrive_stream_", ".tmp", context.cacheDir)
-                    DriveStreamResolver.registerTempFile(tmp)
-                    pipeCacheFile = tmp
-                    pipeCacheRaf = RandomAccessFile(tmp, "rw")
-                    pipeDownloadedBytes = 0L
-                    pipeEofReached = false
-                }
-            }
-
-            readPosition = dataSpec.position
-
-            if (isSeekableFd) {
-                val pfd = seekablePfd ?: throw IOException("Seekable PFD kayboldu")
-                if (seekableTotalLength != C.LENGTH_UNSET.toLong() && readPosition > seekableTotalLength) {
-                    throw EOFException("Position out of range: $readPosition > $seekableTotalLength")
-                }
-                bytesRemaining = when {
-                    dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
-                    seekableTotalLength != C.LENGTH_UNSET.toLong() -> (seekableTotalLength - readPosition).coerceAtLeast(0L)
-                    else -> C.LENGTH_UNSET.toLong()
-                }
-            } else {
-                // Pipe akışında eğer istenen pozisyon henüz indirilmemiş bir ileri noktaysa:
-                // Makul bir ileri atlama ise (<= 16 MB) pipe'dan okuyarak ilerle;
-                // çok uzaktaysa (ör. 1.1 GB dosyanın sonundaki Cues tablosu) EOF/LENGTH_UNSET döndür ki oynatıcı takılmasın!
-                val ahead = readPosition - pipeDownloadedBytes
-                if (ahead > 0L) {
-                    if (ahead <= 16L * 1024L * 1024L) {
-                        drainPipeUpTo(readPosition)
-                    } else {
-                        throw IOException("Sequential stream cannot jump ${ahead / (1024 * 1024)} MB ahead")
-                    }
-                }
-                bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
-                    dataSpec.length
-                } else {
-                    // C.LENGTH_UNSET döndürerek MatroskaExtractor ve Mp4Extractor'ın dosya sonuna
-                    // (1+ GB ilerisine) atlamasını engelliyoruz; 0. bayttan anında oynatır!
-                    C.LENGTH_UNSET.toLong()
-                }
-            }
-
-            opened = true
-            transferStarted(dataSpec)
-            return bytesRemaining
+            s.ensureOpen()
         } catch (e: IOException) {
             throw e
         } catch (t: Throwable) {
             throw IOException(t)
         }
+        session = s
+        if (blockUri != uri) { blockStart = -1L; blockLen = 0; blockUri = uri }
+        readPosition = dataSpec.position
+        val total = s.totalLength
+        if (total != C.LENGTH_UNSET.toLong() && readPosition > total) {
+            throw androidx.media3.datasource.DataSourceException(
+                androidx.media3.common.PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE
+            )
+        }
+        bytesRemaining = when {
+            dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
+            total != C.LENGTH_UNSET.toLong() -> (total - readPosition).coerceAtLeast(0L)
+            else -> C.LENGTH_UNSET.toLong()
+        }
+        s.hint(readPosition)
+        opened = true
+        transferStarted(dataSpec)
+        return bytesRemaining
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (usingDelegate) {
-            return fallbackDelegate.read(buffer, offset, length)
-        }
+        if (usingDelegate) return fallbackDelegate.read(buffer, offset, length)
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
+        val s = session ?: return C.RESULT_END_OF_INPUT
+        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) length
+        else min(bytesRemaining, length.toLong()).toInt()
 
-        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
-            length
-        } else {
-            min(bytesRemaining, length.toLong()).toInt()
-        }
-
-        try {
-            val bytesRead: Int = if (isSeekableFd) {
-                val pfd = seekablePfd ?: return C.RESULT_END_OF_INPUT
-                val n = try {
-                    Os.pread(pfd.fileDescriptor, buffer, offset, toRead, readPosition)
-                } catch (_: Throwable) {
-                    Os.lseek(pfd.fileDescriptor, readPosition, OsConstants.SEEK_SET)
-                    Os.read(pfd.fileDescriptor, buffer, offset, toRead)
-                }
-                if (n <= 0) C.RESULT_END_OF_INPUT else n
-            } else {
-                readFromPipeOrCache(buffer, offset, toRead)
-            }
-
-            if (bytesRead == C.RESULT_END_OF_INPUT) {
-                return C.RESULT_END_OF_INPUT
-            }
-
-            readPosition += bytesRead
-            if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-                bytesRemaining -= bytesRead
-            }
-            bytesTransferred(bytesRead)
-            return bytesRead
-        } catch (e: IOException) {
-            throw e
-        } catch (t: Throwable) {
-            throw IOException(t)
-        }
-    }
-
-    private fun readFromPipeOrCache(buffer: ByteArray, offset: Int, toRead: Int): Int {
-        val raf = pipeCacheRaf
-        val ins = pipeStream
-        if (raf == null || ins == null) return C.RESULT_END_OF_INPUT
-
-        // 1) İstenen pozisyon zaten önbelleğe alındıysa doğrudan yerel geçici dosyadan (0.01ms) oku
-        if (readPosition < pipeDownloadedBytes) {
-            val availableInCache = (pipeDownloadedBytes - readPosition).coerceAtMost(toRead.toLong()).toInt()
-            raf.seek(readPosition)
-            val n = raf.read(buffer, offset, availableInCache)
-            if (n > 0) return n
-        }
-
-        // 2) Eğer okuma pozisyonu önbelleğin biraz ilerisindeyse aradaki boşluğu pipe'dan doldur
-        if (readPosition > pipeDownloadedBytes && !pipeEofReached) {
-            drainPipeUpTo(readPosition)
-        }
-
-        if (pipeEofReached && readPosition >= pipeDownloadedBytes) {
-            return C.RESULT_END_OF_INPUT
-        }
-
-        // 3) Pipe'dan yeni veri oku ve aynı anda geçici dosyaya yaz
-        val n = ins.read(buffer, offset, toRead)
-        if (n <= 0) {
-            pipeEofReached = true
-            return C.RESULT_END_OF_INPUT
-        }
-        raf.seek(pipeDownloadedBytes)
-        raf.write(buffer, offset, n)
-        pipeDownloadedBytes += n
+        val n: Int = if (s.seekable) readBlocked(s, buffer, offset, toRead) else s.readAt(readPosition, buffer, offset, toRead)
+        if (n == C.RESULT_END_OF_INPUT) return C.RESULT_END_OF_INPUT
+        readPosition += n
+        if (bytesRemaining != C.LENGTH_UNSET.toLong()) bytesRemaining -= n
+        bytesTransferred(n)
         return n
     }
 
-    private fun drainPipeUpTo(targetPosition: Long) {
-        val raf = pipeCacheRaf ?: return
-        val ins = pipeStream ?: return
-        while (pipeDownloadedBytes < targetPosition && !pipeEofReached) {
-            val need = min((targetPosition - pipeDownloadedBytes), skipScratch.size.toLong()).toInt()
-            val n = ins.read(skipScratch, 0, need)
-            if (n <= 0) {
-                pipeEofReached = true
-                break
-            }
-            raf.seek(pipeDownloadedBytes)
-            raf.write(skipScratch, 0, n)
-            pipeDownloadedBytes += n
+    private fun readBlocked(s: CloudStreamSession, buffer: ByteArray, offset: Int, length: Int): Int {
+        val inBlock = blockStart >= 0 && readPosition >= blockStart && readPosition < blockStart + blockLen
+        if (!inBlock) {
+            // Büyük isteklerde blok önbelleğini atla (zaten verimli)
+            if (length >= BLOCK) return s.readAt(readPosition, buffer, offset, length)
+            val n = s.readAt(readPosition, block, 0, BLOCK)
+            if (n == C.RESULT_END_OF_INPUT) return n
+            blockStart = readPosition
+            blockLen = n
         }
+        val off = (readPosition - blockStart).toInt()
+        val c = min(length, blockLen - off)
+        System.arraycopy(block, off, buffer, offset, c)
+        return c
     }
 
     override fun getUri(): Uri? = if (usingDelegate) fallbackDelegate.uri else currentUri
@@ -528,52 +608,7 @@ private class SafNativeDataSource(
             opened = false
             transferEnded()
         }
-        // Not: seekablePfd ve pipeStream aynı URI üzerindeki ardışık open/close çağrıları
-        // (ör. başlık okuma sonrası veri okuma) arasında açık tutulur; böylece Google Drive
-        // bağlantısı kopmaz ve yeniden bağlanma gecikmesi yaşanmaz!
-    }
-
-    fun releaseNativeResources() {
-        runCatching { seekablePfd?.close() }
-        seekablePfd = null
-        runCatching { pipeStream?.close() }
-        pipeStream = null
-        runCatching { pipePfd?.close() }
-        pipePfd = null
-        runCatching { pipeCacheRaf?.close() }
-        pipeCacheRaf = null
-        pipeCacheFile?.let { DriveStreamResolver.unregisterTempFile(it) }
-        pipeCacheFile = null
-        pipeDownloadedBytes = 0L
-        pipeEofReached = false
-    }
-
-    protected fun finalize() {
-        releaseNativeResources()
-    }
-
-    private fun openContentPfd(uri: Uri): ParcelFileDescriptor? {
-        runCatching {
-            context.contentResolver.openFileDescriptor(uri, "r")?.let { return it }
-        }
-        runCatching {
-            context.contentResolver.openAssetFileDescriptor(uri, "r")?.parcelFileDescriptor?.let { return it }
-        }
-        return null
-    }
-
-    private fun testFdSeekable(pfd: ParcelFileDescriptor): Boolean {
-        return try {
-            val st = Os.fstat(pfd.fileDescriptor)
-            val mode = st.st_mode and OsConstants.S_IFMT
-            if (mode == OsConstants.S_IFIFO || mode == OsConstants.S_IFSOCK) {
-                false
-            } else {
-                val pos = Os.lseek(pfd.fileDescriptor, 0L, OsConstants.SEEK_CUR)
-                pos >= 0L
-            }
-        } catch (_: Throwable) {
-            false
-        }
+        // Oturum paylaşımlıdır; burada kapatılmaz (bağlantı/indirme baştan başlamasın).
+        session = null
     }
 }
