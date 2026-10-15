@@ -334,7 +334,7 @@ object DriveStreamResolver {
                     if (namePos > 0) {
                         val windowStart = (namePos - 600).coerceAtLeast(0)
                         val snippet = unescaped.substring(windowStart, namePos)
-                        val idMatches = Regex("""\"([a-zA-Z0-9_-]{25,44})\"""").findAll(snippet).toList()
+                        val idMatches = Regex("\"([a-zA-Z0-9_-]{25,44})\"").findAll(snippet).toList()
                         for (m in idMatches.asReversed()) {
                             val candidate = m.groupValues[1]
                             if (isValidDriveId(candidate)) {
@@ -441,7 +441,7 @@ object DriveStreamResolver {
         if (disposition.isBlank()) return null
         Regex("""filename\*=UTF-8''([^;]+)""", RegexOption.IGNORE_CASE).find(disposition)
             ?.groupValues?.getOrNull(1)?.let { return Uri.decode(it.trim('"')) }
-        Regex("""filename="([^"]+)"""", RegexOption.IGNORE_CASE).find(disposition)
+        Regex("filename=\"([^\"]+)\"", RegexOption.IGNORE_CASE).find(disposition)
             ?.groupValues?.getOrNull(1)?.let { return it }
         return null
     }
