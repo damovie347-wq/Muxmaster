@@ -13,7 +13,6 @@ import android.provider.OpenableColumns
 import android.system.Os
 import android.system.OsConstants
 import android.webkit.CookieManager
-import androidx.media3.common.C
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
@@ -23,13 +22,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.min
 
 /**
  * Girdi dosyalarına KOPYALAMADAN erişim.
@@ -203,14 +200,10 @@ object InputAccess {
     }
 }
 
-/**
- * Google Drive SAF (content://com.google.android.apps.docs.storage/...) ve bulut URI'lerini
- * tarayıcıya yönlendirmeden ve tüm dosyanın inmesini beklemeden doğrudan oynatan akış katmanı.
- */
 object DriveStreamResolver {
 
     const val DEFAULT_USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     data class ResolvedDriveStream(
         val streamUrl: String,
@@ -250,6 +243,35 @@ object DriveStreamResolver {
         return lower !in setOf("my-drive", "shared-with-me", "recent", "starred", "trash", "computers", "search", "folders")
     }
 
+    /**
+     * SAF (content://com.google.android.apps.docs.storage/...) URI'sinden
+     * openFileDescriptor ÇAĞIRMADAN tüm olası sütunları tarayarak varsa gerçek Drive fileId'sini bulur.
+     */
+    fun tryExtractFileIdFromSafUri(context: Context, uri: Uri): String? {
+        val rawUri = Uri.decode(uri.toString())
+        val afterDoc = rawUri.substringAfter("doc=", "").substringBefore(";")
+        if (afterDoc.length >= 22 && !afterDoc.startsWith("encoded=") && !afterDoc.all { it.isDigit() } && isValidDriveId(afterDoc)) {
+            return afterDoc
+        }
+        runCatching {
+            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    for (i in 0 until c.columnCount) {
+                        val v = runCatching { c.getString(i) }.getOrNull().orEmpty()
+                        if (v.length in 25..48 && v.matches(Regex("""^[a-zA-Z0-9_-]{25,48}$""")) && isValidDriveId(v)) {
+                            return v
+                        }
+                        val sub = v.substringAfter("doc=", "").substringBefore(";")
+                        if (sub.length in 25..48 && !sub.startsWith("encoded=") && sub.matches(Regex("""^[a-zA-Z0-9_-]{25,48}$""")) && isValidDriveId(sub)) {
+                            return sub
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     fun getCombinedCookiesForUrl(url: String): String {
         val cm = runCatching { CookieManager.getInstance() }.getOrNull() ?: return ""
         val cookies = linkedMapOf<String, String>()
@@ -270,6 +292,63 @@ object DriveStreamResolver {
         collectFrom("https://drive.usercontent.google.com")
         collectFrom(url)
         return cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
+
+    /**
+     * CookieManager'daki aktif oturumla masaüstü Drive araması yaparak dosya adından fileId bulur.
+     */
+    suspend fun searchDriveFileIdByName(fileName: String): String? = withContext(Dispatchers.IO) {
+        val cleanName = fileName.trim()
+        if (cleanName.isBlank()) return@withContext null
+        val cookie = getCombinedCookiesForUrl("https://drive.google.com")
+        if (cookie.isBlank()) return@withContext null
+
+        val stem = cleanName.substringBeforeLast('.')
+        val queryTerm = if (stem.length >= 6) stem.take(40) else cleanName
+        val encodedQ = URLEncoder.encode(queryTerm, "UTF-8")
+
+        for (accountIdx in 0..3) {
+            val searchUrl = "https://drive.google.com/drive/u/$accountIdx/search?q=$encodedQ"
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(searchUrl).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = true
+                    connectTimeout = 6_000
+                    readTimeout = 6_000
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
+                    setRequestProperty("Cookie", cookie)
+                }
+                val code = conn.responseCode
+                if (code == 200) {
+                    val html = conn.inputStream.bufferedReader().use { it.readText() }
+                    val unescaped = html
+                        .replace("\\x22", "\"")
+                        .replace("\\x5b", "[")
+                        .replace("\\x5d", "]")
+                        .replace("\\/", "/")
+                        .replace("\\\"", "\"")
+                    val namePos = unescaped.indexOf(cleanName, ignoreCase = true)
+                        .takeIf { it >= 0 }
+                        ?: unescaped.indexOf(stem, ignoreCase = true)
+                    if (namePos > 0) {
+                        val windowStart = (namePos - 600).coerceAtLeast(0)
+                        val snippet = unescaped.substring(windowStart, namePos)
+                        val idMatches = Regex("""\"([a-zA-Z0-9_-]{25,44})\"""").findAll(snippet).toList()
+                        for (m in idMatches.asReversed()) {
+                            val candidate = m.groupValues[1]
+                            if (isValidDriveId(candidate)) {
+                                return@withContext candidate
+                            }
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+            } finally {
+                runCatching { conn?.disconnect() }
+            }
+        }
+        null
     }
 
     suspend fun resolveDriveFileIdToStream(fileId: String): ResolvedDriveStream? = withContext(Dispatchers.IO) {
@@ -415,207 +494,52 @@ object DriveStreamResolver {
         return null
     }
 
+    fun releaseSession(uri: Uri?) { }
+    fun releaseAllSessions() { }
+
     /**
-     * SAF (Google Drive vb.) URI'leri için açık dosya tanımlayıcılarını (PFD) ve
-     * boru (pipe) akışlarının ilk 2 MB başlık önbelleğini korur; böylece ExoPlayer
-     * başlık okurken akışı kapatıp baştan indirme başlatmaz.
+     * Yerel dosyalarda CookieManager'ı HİÇ çağırmadan doğrudan FileDataSource/ContentDataSource kullanan,
+     * yalnızca http/https isteklerinde Cookie başlığı ekleyen hızlı DataSource.Factory.
      */
-    class SafStreamSession(
-        val uri: Uri,
-        val pfd: ParcelFileDescriptor,
-        val isRegularFile: Boolean,
-        val sizeBytes: Long
-    ) {
-        private val lock = Any()
-        private var pipeStream: InputStream? = if (!isRegularFile) FileInputStream(pfd.fileDescriptor) else null
-        private var pipeOffset: Long = 0L
-        private val headCache = if (!isRegularFile) ByteArray(2 * 1024 * 1024) else ByteArray(0)
-        private var headCacheValid: Int = 0
-
-        fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
-            if (length == 0) return 0
-            if (isRegularFile) {
-                return try {
-                    val n = Os.pread(pfd.fileDescriptor, buffer, offset, length, position)
-                    if (n <= 0) C.RESULT_END_OF_INPUT else n
-                } catch (_: Throwable) {
-                    C.RESULT_END_OF_INPUT
-                }
-            }
-            synchronized(lock) {
-                // 1) İlk 2 MB önbellekte varsa doğrudan RAM'den ver (akışı kapatmadan!)
-                if (position < headCacheValid) {
-                    val avail = (headCacheValid - position.toInt()).coerceAtMost(length)
-                    System.arraycopy(headCache, position.toInt(), buffer, offset, avail)
-                    return avail
-                }
-                val stream = pipeStream ?: return C.RESULT_END_OF_INPUT
-                // 2) Küçük ileri atlamalarda (<= 4 MB) akışı kapatmak yerine aradaki baytları oku
-                if (position > pipeOffset && (position - pipeOffset) <= 4L * 1024L * 1024L) {
-                    var toSkip = position - pipeOffset
-                    val skipBuf = ByteArray(16384)
-                    while (toSkip > 0) {
-                        val step = min(toSkip, skipBuf.size.toLong()).toInt()
-                        val got = stream.read(skipBuf, 0, step)
-                        if (got <= 0) return C.RESULT_END_OF_INPUT
-                        cacheIfInHead(pipeOffset, skipBuf, 0, got)
-                        pipeOffset += got
-                        toSkip -= got
-                    }
-                }
-                val n = stream.read(buffer, offset, length)
-                if (n <= 0) return C.RESULT_END_OF_INPUT
-                cacheIfInHead(pipeOffset, buffer, offset, n)
-                pipeOffset += n
-                return n
-            }
-        }
-
-        private fun cacheIfInHead(startPos: Long, buf: ByteArray, off: Int, count: Int) {
-            if (startPos >= headCache.size) return
-            val dstPos = startPos.toInt()
-            val copyLen = min(count, headCache.size - dstPos)
-            if (copyLen > 0) {
-                System.arraycopy(buf, off, headCache, dstPos, copyLen)
-                if (dstPos + copyLen > headCacheValid) {
-                    headCacheValid = dstPos + copyLen
-                }
-            }
-        }
-
-        fun closeSession() {
-            synchronized(lock) {
-                runCatching { pipeStream?.close() }
-                pipeStream = null
-                runCatching { pfd.close() }
-            }
-        }
-    }
-
-    private val activeSessions = ConcurrentHashMap<String, SafStreamSession>()
-
-    fun obtainSession(context: Context, uri: Uri): SafStreamSession? {
-        val key = uri.toString()
-        activeSessions[key]?.let { existing ->
-            if (runCatching { existing.pfd.fileDescriptor.valid() }.getOrDefault(false)) {
-                return existing
-            } else {
-                activeSessions.remove(key)?.closeSession()
-            }
-        }
-        return try {
-            val pfd = context.contentResolver.openFileDescriptor(uri, "r") ?: return null
-            val st = Os.fstat(pfd.fileDescriptor)
-            val isReg = (st.st_mode and OsConstants.S_IFMT) == OsConstants.S_IFREG
-            val statSize = if (isReg && st.st_size > 0) st.st_size else runCatching { pfd.statSize }.getOrDefault(-1L)
-            val totalSize = if (statSize > 0) statSize else InputAccess.sizeOf(context, uri)
-            val session = SafStreamSession(uri, pfd, isReg, totalSize)
-            activeSessions[key] = session
-            session
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    fun releaseSession(uri: Uri?) {
-        if (uri == null) return
-        activeSessions.remove(uri.toString())?.closeSession()
-    }
-
-    fun releaseAllSessions() {
-        val keys = activeSessions.keys.toList()
-        for (k in keys) {
-            activeSessions.remove(k)?.closeSession()
-        }
-    }
-
-    private class SmartMediaDataSource(
-        private val appContext: Context,
-        private val fallbackDataSource: DataSource
-    ) : DataSource {
-        private var currentUri: Uri? = null
-        private var activeSession: SafStreamSession? = null
-        private var readPosition: Long = 0L
-        private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
-        private var usingFallback: Boolean = false
-
-        override fun addTransferListener(transferListener: TransferListener) {
-            fallbackDataSource.addTransferListener(transferListener)
-        }
-
-        override fun open(dataSpec: DataSpec): Long {
-            val uri = dataSpec.uri
-            currentUri = uri
-            if (uri.scheme == "content") {
-                val session = obtainSession(appContext, uri)
-                if (session != null) {
-                    activeSession = session
-                    usingFallback = false
-                    readPosition = dataSpec.position
-                    bytesRemaining = when {
-                        dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
-                        session.sizeBytes > 0L -> (session.sizeBytes - dataSpec.position).coerceAtLeast(0L)
-                        else -> C.LENGTH_UNSET.toLong()
-                    }
-                    return bytesRemaining
-                }
-            }
-            usingFallback = true
-            activeSession = null
-            return fallbackDataSource.open(dataSpec)
-        }
-
-        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-            if (usingFallback) {
-                return fallbackDataSource.read(buffer, offset, length)
-            }
-            val session = activeSession ?: return C.RESULT_END_OF_INPUT
-            if (length == 0) return 0
-            if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
-            val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) length
-            else min(length.toLong(), bytesRemaining).toInt()
-            val n = session.readAt(readPosition, buffer, offset, toRead)
-            if (n == C.RESULT_END_OF_INPUT || n <= 0) return C.RESULT_END_OF_INPUT
-            readPosition += n
-            if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-                bytesRemaining = (bytesRemaining - n).coerceAtLeast(0L)
-            }
-            return n
-        }
-
-        override fun getUri(): Uri? = if (usingFallback) fallbackDataSource.uri else currentUri
-
-        override fun close() {
-            if (usingFallback) {
-                runCatching { fallbackDataSource.close() }
-                usingFallback = false
-            }
-            // Not: activeSession kapatılmaz; böylece ExoPlayer seek yaptığında Google Drive PFD'si kopmaz.
-            activeSession = null
-            currentUri = null
-        }
-    }
-
     fun buildDataSourceFactory(context: Context): DataSource.Factory {
         val appCtx = context.applicationContext
-        return DataSource.Factory {
-            val cookie = getCombinedCookiesForUrl("https://drive.google.com")
-            val headers = HashMap<String, String>()
-            if (cookie.isNotBlank()) {
-                headers["Cookie"] = cookie
-            }
-            headers["User-Agent"] = DEFAULT_USER_AGENT
-
-            val httpFactory = DefaultHttpDataSource.Factory()
+        val httpFactory = DataSource.Factory {
+            val httpDs = DefaultHttpDataSource.Factory()
                 .setUserAgent(DEFAULT_USER_AGENT)
                 .setAllowCrossProtocolRedirects(true)
                 .setKeepPostFor302Redirects(true)
                 .setConnectTimeoutMs(15_000)
                 .setReadTimeoutMs(20_000)
-                .setDefaultRequestProperties(headers)
+                .createDataSource()
 
-            val defaultDs = DefaultDataSource(appCtx, httpFactory.createDataSource())
-            SmartMediaDataSource(appCtx, defaultDs)
+            object : DataSource {
+                override fun addTransferListener(transferListener: TransferListener) {
+                    httpDs.addTransferListener(transferListener)
+                }
+
+                override fun open(dataSpec: DataSpec): Long {
+                    val u = dataSpec.uri.toString()
+                    if (isGoogleDriveUrl(u) || u.contains("googleusercontent.com")) {
+                        val cookie = getCombinedCookiesForUrl("https://drive.google.com")
+                        if (cookie.isNotBlank()) {
+                            httpDs.setRequestProperty("Cookie", cookie)
+                        }
+                    }
+                    return httpDs.open(dataSpec)
+                }
+
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                    httpDs.read(buffer, offset, length)
+
+                override fun getUri(): Uri? = httpDs.uri
+
+                override fun getResponseHeaders(): Map<String, List<String>> = httpDs.responseHeaders
+
+                override fun close() {
+                    httpDs.close()
+                }
+            }
         }
+        return DefaultDataSource.Factory(appCtx, httpFactory)
     }
 }
