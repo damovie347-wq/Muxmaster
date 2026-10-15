@@ -28,6 +28,16 @@
     <string name="output_filename_label">Çıktı dosya adı</string>
     <string name="muxing_progress">İşleniyor... %%%1$d</string>
     <string name="progress_percent">%%%1$d</string>
+
+    <!-- MuxForegroundService (arka plan bildirimi) -->
+    <string name="notif_channel_name">Mux İlerlemesi</string>
+    <string name="notif_channel_desc">Video muxlama işlemi arka planda devam ederken ilerleme durumunu gösterir</string>
+    <string name="notif_muxing_title">MuxMaster</string>
+    <string name="notif_muxing_progress">Muxlanıyor…</string>
+    <string name="notif_progress_text">Muxlanıyor… %%%1$d</string>
+    <string name="notif_saving_output">Çıktı kaydediliyor…</string>
+    <string name="notif_converting_progress">Dönüştürülüyor: %1$s (%%%2$d)</string>
+
     <string name="cancel_desc">İptal et</string>
     <string name="start_muxing_button">MUXLAMAYI BAŞLAT</string>
 
@@ -57,15 +67,23 @@
     <string name="pick_audio_multi">SES DOSYALARI SEÇ (çoklu seçilebilir)</string>
     <string name="add_more_files">DAHA FAZLA DOSYA EKLE</string>
     <string name="target_format_title">Hedef Format</string>
+    <string name="target_mode_title">Kodlama Modu</string>
+    <string name="target_mode_bitrate">Hedef Bitrate (kbps)</string>
+    <string name="target_mode_filesize">Hedef Dosya Boyutu (KB / MB)</string>
     <string name="target_bitrate_title">Hedef Bitrate (%1$s)</string>
+    <string name="target_filesize_title">Hedef Dosya Boyutu (%1$s)</string>
     <string name="custom_bitrate_label">Özel bitrate (kbps)</string>
+    <string name="custom_filesize_label">Özel hedef boyut (ör. 750 veya 1.5)</string>
     <string name="kbps_suffix">kbps</string>
     <string name="bitrate_invalid">⚠ Geçersiz (min. 6 kbps)</string>
-    <string name="bitrate_speech_only">Çok düşük — sadece konuşma için</string>
-    <string name="bitrate_low_music">Düşük kalite müzik</string>
+    <string name="bitrate_speech_only">Düşük bitrate — yüksek sıkıştırma</string>
+    <string name="bitrate_low_music">Ekonomik kalite müzik</string>
     <string name="bitrate_good">İyi kalite — önerilen</string>
     <string name="bitrate_high">Yüksek kalite</string>
     <string name="bitrate_too_high">Çok yüksek — dosya büyük olur</string>
+    <string name="filesize_invalid">⚠ Geçerli bir hedef boyut girin (en az 8 KB)</string>
+    <string name="filesize_auto_bitrate_preview">Otomatik bitrate: ~%1$d kbps (hedef boyut: %2$s)</string>
+    <string name="filesize_auto_bitrate_hint">Her ses dosyasının süresine göre bitrate otomatik ayarlanıp bu boyutta çıktı alınır.</string>
     <string name="output_folder_title">Çıktı Klasörü</string>
     <string name="output_folder_hint">Her dosya, orijinal adı + seçili formatın uzantısıyla bu klasöre kaydedilir.</string>
     <string name="converting_label">Dönüştürülüyor... %%%1$d</string>
@@ -73,6 +91,7 @@
     <string name="convert_button_single">DOSYAYI %1$s FORMATINA DÖNÜŞTÜR</string>
     <string name="convert_button_multi">%1$d DOSYAYI %2$s FORMATINA DÖNÜŞTÜR</string>
     <string name="done_label">Tamamlandı — %1$.1f MB</string>
+    <string name="done_label_text">Tamamlandı — %1$s</string>
     <string name="queue_item_subtitle">%1$s · %2$s · %3$.1f MB</string>
     <string name="channel_mono">Mono</string>
     <string name="channel_stereo">Stereo</string>
@@ -85,7 +104,9 @@
     <string name="err_no_pending_files">Kuyrukta dönüştürülecek dosya yok.</string>
     <string name="err_no_output_folder">Çıktı klasörü seçilmedi.</string>
     <string name="err_invalid_bitrate">Geçerli bir bitrate girin (6-512 kbps arası).</string>
+    <string name="err_invalid_target_size">Geçerli bir hedef dosya boyutu girin (ör. 750 KB veya 1 MB).</string>
     <string name="err_ffmpeg_code">FFmpeg hatası (kod: %1$s).</string>
+    <string name="err_heaac_failed">xHE-AAC / HE-AAC kodlama başarısız oldu.</string>
     <string name="err_save_failed">Hedef klasöre kaydedilemedi.</string>
     <string name="result_convert_success_all">✅ Tamamlandı! %1$d/%2$d dosya %3$s formatına dönüştürüldü.</string>
     <string name="result_convert_partial">⚠ %1$d/%2$d tamamlandı, %3$d dosyada hata oluştu.</string>
@@ -107,6 +128,7 @@
     <string name="export_success">✅ Dışa aktarıldı: %1$s</string>
     <string name="export_failed">Dışa aktarma başarısız oldu.</string>
     <string name="export_no_output_folder">Önce bir çıktı klasörü seçin (Ayarlar ya da aşağıdaki SEÇ butonu).</string>
+    <string name="err_mkvmerge_code">mkvmerge hatası (kod: %1$d).</string>
 
     <!-- SettingsScreen -->
     <string name="settings_title">Ayarlar</string>
@@ -115,7 +137,18 @@
     <string name="settings_language_tr">Türkçe</string>
     <string name="settings_language_en">English</string>
     <string name="settings_language_de">Deutsch</string>
+    <string name="settings_theme_title">Görünüm</string>
+    <string name="settings_theme_system">Sistem</string>
+    <string name="settings_theme_light">Açık</string>
+    <string name="settings_theme_dark">Koyu</string>
+    <string name="settings_theme_amoled">AMOLED (Tam Siyah)</string>
     <string name="settings_output_folder_title">Varsayılan Çıktı Klasörü</string>
     <string name="settings_output_folder_desc">Muxlanan dosyalar ve dışa aktarılan ses/altyazılar için varsayılan klasör.</string>
     <string name="settings_output_folder_none">Seçilmedi</string>
+    <string name="settings_battery_title">Arka Plan Performansı</string>
+    <string name="settings_battery_desc">Bazı telefonlarda pil tasarrufu, uygulama arka plandayken dönüştürme hızını düşürebilir. İstisna tanımlamak işlemi arka planda tam hızda tutar.</string>
+    <string name="settings_battery_status_ok">Pil optimizasyonu devre dışı</string>
+    <string name="settings_battery_status_restricted">Pil optimizasyonu aktif (yavaşlatabilir)</string>
+    <string name="settings_battery_action">Ayarla</string>
+    <string name="err_native_tools_missing">mkvmerge/mkvextract uygulamanın içinden çıkarılamadı. Uygulamayı kaldırıp yeniden kurmayı deneyin.</string>
 </resources>

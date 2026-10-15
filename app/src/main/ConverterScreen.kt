@@ -24,13 +24,33 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.muxmaster.R
+import com.example.muxmaster.ui.theme.*
+import com.example.muxmaster.viewmodel.ChannelMode
 import com.example.muxmaster.viewmodel.ConvertQueueItem
 import com.example.muxmaster.viewmodel.ConvertStatus
 import com.example.muxmaster.viewmodel.ConverterViewModel
+import com.example.muxmaster.viewmodel.FileSizeUnit
 import com.example.muxmaster.viewmodel.OutputFormat
-import com.example.muxmaster.ui.theme.*
+import com.example.muxmaster.viewmodel.TargetMode
+import java.util.Locale
+import kotlin.math.roundToInt
 
-private val BITRATE_PRESETS = listOf(32, 64, 96, 128, 192, 256, 320)
+private val MP3_BITRATE_PRESETS = listOf(32, 64, 96, 128, 192, 256, 320)
+private val OPUS_BITRATE_PRESETS = listOf(16, 24, 32, 64, 96, 128, 192)
+private val XHE_BITRATE_PRESETS = listOf(12, 16, 24, 32, 48, 64, 96)
+private val HE_BITRATE_PRESETS = listOf(16, 24, 32, 48, 64, 96, 128)
+
+private data class SizePreset(val label: String, val valueText: String, val unit: FileSizeUnit)
+
+private val FILE_SIZE_PRESETS = listOf(
+    SizePreset("250 KB", "250", FileSizeUnit.KB),
+    SizePreset("500 KB", "500", FileSizeUnit.KB),
+    SizePreset("750 KB", "750", FileSizeUnit.KB),
+    SizePreset("1 MB", "1", FileSizeUnit.MB),
+    SizePreset("1.5 MB", "1.5", FileSizeUnit.MB),
+    SizePreset("2 MB", "2", FileSizeUnit.MB),
+    SizePreset("5 MB", "5", FileSizeUnit.MB)
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,8 +110,12 @@ fun ConverterScreen(
                     } else {
                         viewModel.queue.forEachIndexed { index, item ->
                             if (index > 0) Divider(color = Outline, thickness = 0.5.dp)
+                            val autoKbps = if (viewModel.targetMode == TargetMode.FILE_SIZE) {
+                                viewModel.previewAutoBitrateKbps(item)
+                            } else null
                             QueueItemRow(
                                 item = item,
+                                autoBitrateKbps = autoKbps,
                                 onRemove = { viewModel.removeFromQueue(item.id) },
                                 removeEnabled = !viewModel.isConverting
                             )
@@ -123,72 +147,213 @@ fun ConverterScreen(
 
             // ── 2) HEDEF FORMAT ───────────────────────────────────────────────
             SectionTitle(stringResource(R.string.target_format_title))
+            OutputFormat.entries.chunked(3).forEach { rowFormats ->
+                Row(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowFormats.forEach { fmt ->
+                        val selected = viewModel.outputFormat == fmt
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.selectFormat(fmt) },
+                            enabled = !viewModel.isConverting,
+                            label = { Text(fmt.label, fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                                containerColor = SurfaceHigh, labelColor = TextSec
+                            )
+                        )
+                    }
+                    repeat(3 - rowFormats.size) {
+                        Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // ── 3) KODLAMA MODU: HEDEF BİTRATE vs HEDEF DOSYA BOYUTU ──────────
+            SectionTitle(stringResource(R.string.target_mode_title))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutputFormat.entries.forEach { fmt ->
-                    val selected = viewModel.outputFormat == fmt
-                    FilterChip(
-                        selected = selected,
-                        onClick = { viewModel.selectFormat(fmt) },
-                        enabled = !viewModel.isConverting,
-                        label = { Text(fmt.label, fontSize = 12.sp) },
-                        modifier = Modifier.weight(1f),
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Purple, selectedLabelColor = Color.White,
-                            containerColor = SurfaceHigh, labelColor = TextSec
-                        )
+                FilterChip(
+                    selected = viewModel.targetMode == TargetMode.BITRATE,
+                    onClick = { viewModel.selectTargetMode(TargetMode.BITRATE) },
+                    enabled = !viewModel.isConverting,
+                    label = { Text(stringResource(R.string.target_mode_bitrate), fontSize = 12.sp) },
+                    modifier = Modifier.weight(1f),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                        containerColor = SurfaceHigh, labelColor = TextSec
                     )
-                }
-            }
-
-            Spacer(Modifier.height(20.dp))
-
-            // ── 3) HEDEF BİTRATE ──────────────────────────────────────────────
-            SectionTitle(stringResource(R.string.target_bitrate_title, viewModel.outputFormat.label))
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                BITRATE_PRESETS.forEach { preset ->
-                    val selected = viewModel.bitrateKbpsText == preset.toString()
-                    FilterChip(
-                        selected = selected,
-                        onClick = { viewModel.updateBitrateText(preset.toString()) },
-                        enabled = !viewModel.isConverting,
-                        label = { Text("${preset}k", fontSize = 11.sp) },
-                        modifier = Modifier.weight(1f),
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = Purple, selectedLabelColor = Color.White,
-                            containerColor = SurfaceHigh, labelColor = TextSec
-                        )
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(10.dp))
-
-            OutlinedTextField(
-                value = viewModel.bitrateKbpsText,
-                onValueChange = viewModel::updateBitrateText,
-                label = { Text(stringResource(R.string.custom_bitrate_label), fontSize = 11.sp) },
-                singleLine = true,
-                enabled = !viewModel.isConverting,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                suffix = { Text(stringResource(R.string.kbps_suffix), fontSize = 12.sp, color = TextMuted) },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Purple, unfocusedBorderColor = Outline,
-                    focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
                 )
-            )
-
-            val parsedBr = viewModel.bitrateKbpsText.toIntOrNull()
-            val brHint = when {
-                parsedBr == null || parsedBr < 6 -> stringResource(R.string.bitrate_invalid)
-                parsedBr < 48  -> stringResource(R.string.bitrate_speech_only)
-                parsedBr < 96  -> stringResource(R.string.bitrate_low_music)
-                parsedBr <= 128 -> stringResource(R.string.bitrate_good)
-                parsedBr <= 192 -> stringResource(R.string.bitrate_high)
-                else -> stringResource(R.string.bitrate_too_high)
+                FilterChip(
+                    selected = viewModel.targetMode == TargetMode.FILE_SIZE,
+                    onClick = { viewModel.selectTargetMode(TargetMode.FILE_SIZE) },
+                    enabled = !viewModel.isConverting,
+                    label = { Text(stringResource(R.string.target_mode_filesize), fontSize = 12.sp) },
+                    modifier = Modifier.weight(1f),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                        containerColor = SurfaceHigh, labelColor = TextSec
+                    )
+                )
             }
-            Text(brHint, color = if (parsedBr != null && parsedBr >= 6) TextSec else Red, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+
+            Spacer(Modifier.height(14.dp))
+
+            if (viewModel.targetMode == TargetMode.BITRATE) {
+                SectionTitle(stringResource(R.string.target_bitrate_title, viewModel.outputFormat.label))
+
+                val presets = when (viewModel.outputFormat) {
+                    OutputFormat.OPUS -> OPUS_BITRATE_PRESETS
+                    OutputFormat.XHE_AAC -> XHE_BITRATE_PRESETS
+                    OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2 -> HE_BITRATE_PRESETS
+                    OutputFormat.MP3 -> MP3_BITRATE_PRESETS
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    presets.forEach { preset ->
+                        val selected = viewModel.bitrateKbpsText == preset.toString()
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.updateBitrateText(preset.toString()) },
+                            enabled = !viewModel.isConverting,
+                            label = { Text("${preset}k", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                                containerColor = SurfaceHigh, labelColor = TextSec
+                            )
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedTextField(
+                    value = viewModel.bitrateKbpsText,
+                    onValueChange = viewModel::updateBitrateText,
+                    label = { Text(stringResource(R.string.custom_bitrate_label), fontSize = 11.sp) },
+                    singleLine = true,
+                    enabled = !viewModel.isConverting,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    suffix = { Text(stringResource(R.string.kbps_suffix), fontSize = 12.sp, color = TextMuted) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Purple, unfocusedBorderColor = Outline,
+                        focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                    )
+                )
+
+                val parsedBr = viewModel.bitrateKbpsText.toIntOrNull()
+                val brHint = when {
+                    parsedBr == null || parsedBr < 6 -> stringResource(R.string.bitrate_invalid)
+                    parsedBr < 32  -> stringResource(R.string.bitrate_speech_only)
+                    parsedBr < 64  -> stringResource(R.string.bitrate_low_music)
+                    parsedBr <= 128 -> stringResource(R.string.bitrate_good)
+                    parsedBr <= 192 -> stringResource(R.string.bitrate_high)
+                    else -> stringResource(R.string.bitrate_too_high)
+                }
+                Text(brHint, color = if (parsedBr != null && parsedBr >= 6) TextSec else Red, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+            } else {
+                SectionTitle(stringResource(R.string.target_filesize_title, viewModel.outputFormat.label))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FILE_SIZE_PRESETS.forEach { preset ->
+                        val selected = viewModel.targetSizeText == preset.valueText && viewModel.targetSizeUnit == preset.unit
+                        FilterChip(
+                            selected = selected,
+                            onClick = { viewModel.applySizePreset(preset.valueText, preset.unit) },
+                            enabled = !viewModel.isConverting,
+                            label = { Text(preset.label, fontSize = 10.sp, maxLines = 1) },
+                            modifier = Modifier.weight(1f),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                                containerColor = SurfaceHigh, labelColor = TextSec
+                            )
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = viewModel.targetSizeText,
+                        onValueChange = viewModel::updateTargetSizeText,
+                        label = { Text(stringResource(R.string.custom_filesize_label), fontSize = 11.sp) },
+                        singleLine = true,
+                        enabled = !viewModel.isConverting,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        suffix = { Text(viewModel.targetSizeUnit.label, fontSize = 12.sp, color = TextMuted) },
+                        modifier = Modifier.weight(1f),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Purple, unfocusedBorderColor = Outline,
+                            focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                        )
+                    )
+                    FileSizeUnit.entries.forEach { unit ->
+                        FilterChip(
+                            selected = viewModel.targetSizeUnit == unit,
+                            onClick = { viewModel.selectTargetSizeUnit(unit) },
+                            enabled = !viewModel.isConverting,
+                            label = { Text(unit.label, fontWeight = FontWeight.SemiBold, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                                containerColor = SurfaceHigh, labelColor = TextSec
+                            )
+                        )
+                    }
+                }
+
+                val targetBytes = viewModel.parseTargetSizeBytes()
+                val firstItem = viewModel.queue.firstOrNull()
+                val firstAutoKbps = firstItem?.let { viewModel.previewAutoBitrateKbps(it) }
+                val sizeHint = when {
+                    targetBytes == null -> stringResource(R.string.filesize_invalid)
+                    firstAutoKbps != null -> stringResource(
+                        R.string.filesize_auto_bitrate_preview,
+                        firstAutoKbps,
+                        "${viewModel.targetSizeText} ${viewModel.targetSizeUnit.label}"
+                    )
+                    else -> stringResource(R.string.filesize_auto_bitrate_hint)
+                }
+                Text(
+                    sizeHint,
+                    color = if (targetBytes != null) TextSec else Red,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // ── KANAL (Otomatik / Mono / Stereo) ─────────────────────────────
+            SectionTitle("Kanal")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(
+                    ChannelMode.AUTO to "Otomatik",
+                    ChannelMode.MONO to stringResource(R.string.channel_mono),
+                    ChannelMode.STEREO to stringResource(R.string.channel_stereo)
+                ).forEach { (mode, label) ->
+                    FilterChip(
+                        selected = viewModel.channelMode == mode,
+                        onClick = { viewModel.selectChannelMode(mode) },
+                        enabled = !viewModel.isConverting,
+                        label = { Text(label, fontSize = 12.sp) },
+                        modifier = Modifier.weight(1f),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = Purple, selectedLabelColor = Color.White,
+                            containerColor = SurfaceHigh, labelColor = TextSec
+                        )
+                    )
+                }
+            }
+            if (viewModel.outputFormat == OutputFormat.HE_AAC_V2 && viewModel.channelMode == ChannelMode.MONO) {
+                Text("HE-AAC v2 yalnızca stereo destekler; Mono seçilince HE-AAC (v1) mono üretilir.", color = TextSec, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+            }
 
             Spacer(Modifier.height(20.dp))
 
@@ -285,7 +450,7 @@ fun ConverterScreen(
                 val pendingCount = viewModel.queue.count { it.status == ConvertStatus.PENDING || it.status == ConvertStatus.ERROR }
                 Button(
                     onClick = viewModel::startConvert,
-                    enabled = pendingCount > 0 && viewModel.outputFolderUri != null && (viewModel.bitrateKbpsText.toIntOrNull() ?: 0) >= 6,
+                    enabled = pendingCount > 0 && viewModel.outputFolderUri != null && viewModel.isTargetValid(),
                     modifier = Modifier.fillMaxWidth().height(50.dp),
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Purple, disabledContainerColor = SurfaceHigh)
@@ -307,7 +472,12 @@ fun ConverterScreen(
 }
 
 @Composable
-private fun QueueItemRow(item: ConvertQueueItem, onRemove: () -> Unit, removeEnabled: Boolean) {
+private fun QueueItemRow(
+    item: ConvertQueueItem,
+    autoBitrateKbps: Int?,
+    onRemove: () -> Unit,
+    removeEnabled: Boolean
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
@@ -327,9 +497,20 @@ private fun QueueItemRow(item: ConvertQueueItem, onRemove: () -> Unit, removeEna
         Column(Modifier.weight(1f)) {
             Text(item.displayName, color = TextPrimary, fontSize = 13.sp, maxLines = 1, fontWeight = FontWeight.Medium)
             val subtitle = when (item.status) {
-                ConvertStatus.PENDING -> stringResource(R.string.queue_item_subtitle, item.sourceCodec, channelLabel(item.sourceChannels), item.fileSizeMb)
+                ConvertStatus.PENDING -> {
+                    val base = stringResource(R.string.queue_item_subtitle, item.sourceCodec, channelLabel(item.sourceChannels), item.fileSizeMb)
+                    if (autoBitrateKbps != null) "$base · → ~${autoBitrateKbps} kbps" else base
+                }
                 ConvertStatus.CONVERTING -> stringResource(R.string.converting_label, item.progress)
-                ConvertStatus.DONE -> stringResource(R.string.done_label, item.outputSizeMb ?: 0f)
+                ConvertStatus.DONE -> {
+                    val outMb = item.outputSizeMb ?: 0f
+                    val formattedSize = if (outMb < 1.0f) {
+                        "${(outMb * 1024f).roundToInt()} KB"
+                    } else {
+                        String.format(Locale.US, "%.2f MB", outMb)
+                    }
+                    stringResource(R.string.done_label_text, formattedSize)
+                }
                 ConvertStatus.ERROR -> item.errorMessage ?: stringResource(R.string.err_ffmpeg_code, "?")
             }
             Text(subtitle, color = if (item.status == ConvertStatus.ERROR) Red else TextSec, fontSize = 11.sp, maxLines = 1)

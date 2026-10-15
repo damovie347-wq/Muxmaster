@@ -7,9 +7,8 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * Videonun içindeki GERÇEK track'leri ffprobe ile okur.
- * Hiçbir veri uydurulmaz; ffprobe çalışmazsa veya video bozuksa boş liste döner,
- * sahte/varsayılan track eklenmez.
+ * Videonun ve ses dosyalarının içindeki GERÇEK track'leri ffprobe ile okur.
+ * Hiçbir veri uydurulmaz; ffprobe çalışmazsa veya dosya bozuksa boş liste döner.
  */
 object TrackProber {
 
@@ -64,6 +63,8 @@ object TrackProber {
         }
 
         val streams = root.optJSONArray("streams") ?: return@withContext empty
+        val formatObj = root.optJSONObject("format")
+        val formatBitrateRaw = formatObj?.optString("bit_rate", "0")?.toLongOrNull() ?: 0L
 
         val audioList = mutableListOf<ExistingAudio>()
         val subList = mutableListOf<ExistingSubtitle>()
@@ -93,7 +94,7 @@ object TrackProber {
                         val h = stream.optInt("height", 0)
                         resolution = if (w > 0 && h > 0) "${w}x${h}" else "?x?"
                         val dur = stream.optString("duration", "0").toDoubleOrNull() ?: 0.0
-                        durationMs = (dur * 1000).toLong()
+                        if (dur > 0.0) durationMs = (dur * 1000).toLong()
                         videoStreamIndex = index
                         hasVideo = true
                         pixFmt = stream.optString("pix_fmt", "")
@@ -101,8 +102,15 @@ object TrackProber {
                 }
                 "audio" -> {
                     val channels = stream.optInt("channels", 2)
-                    val bitrateRaw = stream.optString("bit_rate", "0").toLongOrNull() ?: 0L
+                    var bitrateRaw = stream.optString("bit_rate", "0").toLongOrNull() ?: 0L
+                    if (bitrateRaw <= 0L && !hasVideo && formatBitrateRaw > 0L) {
+                        bitrateRaw = formatBitrateRaw
+                    }
                     val bitrateStr = if (bitrateRaw > 0) "${bitrateRaw / 1000} kbps" else "?"
+                    if (durationMs == 0L) {
+                        val aDur = stream.optString("duration", "0").toDoubleOrNull() ?: 0.0
+                        if (aDur > 0.0) durationMs = (aDur * 1000).toLong()
+                    }
                     audioList.add(
                         ExistingAudio(
                             streamIndex = index,
@@ -132,37 +140,53 @@ object TrackProber {
         }
 
         if (durationMs == 0L) {
-            val format = root.optJSONObject("format")
-            val dur = format?.optString("duration", "0")?.toDoubleOrNull() ?: 0.0
+            val dur = formatObj?.optString("duration", "0")?.toDoubleOrNull() ?: 0.0
             durationMs = (dur * 1000).toLong()
+        }
+
+        if (durationMs <= 0L && audioList.isNotEmpty()) {
+            durationMs = probeAudioDurationMsFallback(videoPath)
         }
 
         ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex, hasVideo, pixFmt)
     }
 
     /**
-     * "-c copy" (kalite kaybı olmadan) kesim sırasında çıktının geçerli/oynatılabilir
-     * bir video akışı olabilmesi için başlangıç noktası MUTLAKA bir video keyframe'ine
-     * denk gelmelidir. Bu fonksiyon, [fromSec] saniyesinden İTİBAREN (dahil) SONRAKİ
-     * ilk video keyframe'inin zamanını bulur.
-     *
-     * Bilerek paket düzeyindeki "K" (keyframe) bayrağını kullanır (`-show_entries
-     * packet=...`): bu bayrak demuxer/konteyner tarafından işaretlenir ve tüm
-     * codec'lerde tutarlıdır. Alternatif olan `-skip_frame nokey` ise DECODER
-     * düzeyinde çalışır ve bazı codec/versiyon kombinasyonlarında güvenilmez
-     * sonuçlar verebildiği bilinir; bu yüzden tercih edilmedi.
-     *
-     * Performans için arama [fromSec]'e yakın küçük bir zaman penceresiyle
-     * sınırlandırılır: ffprobe `-read_intervals` ile önce o noktaya "seek" eder,
-     * sonra ileri doğru okur (dosyanın tamamını taramaz). Pencere [endSec]'i
-     * (kullanıcının istediği bitiş noktasını) asla aşmaz; aksi halde bulunan
-     * "sonraki keyframe" kullanıcının istediği bitiş noktasından sonraya düşüp
-     * kesimi anlamsız hale getirebilirdi.
-     *
-     * @return keyframe zamanı (saniye), ya da [fromSec]-[endSec] aralığında
-     *   (arama penceresi içinde) hiç keyframe bulunamazsa `null`. `null` dönerse
-     *   çağıran taraf eski davranışa (düz `-ss fromSec`) geri dönmelidir.
+     * Konteyner üstbilgisinde süre yazmayan (ör. ham .aac veya bazı VBR akışları) ses
+     * dosyalarında son paket zaman damgasından gerçek süreyi (ms) hesaplar.
      */
+    suspend fun probeAudioDurationMsFallback(path: String): Long = withContext(Dispatchers.IO) {
+        try {
+            val args = arrayOf(
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "packet=pts_time,duration_time",
+                "-of", "csv=p=0",
+                path
+            )
+            val session = FFprobeKit.executeWithArguments(args)
+            val out = session.output ?: return@withContext 0L
+            var maxEndSec = 0.0
+            var totalDurSec = 0.0
+            for (line in out.lineSequence()) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+                val parts = trimmed.split(',')
+                val pts = parts.getOrNull(0)?.toDoubleOrNull()
+                val dur = parts.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+                if (dur > 0.0) totalDurSec += dur
+                if (pts != null && pts >= 0.0) {
+                    val end = pts + dur
+                    if (end > maxEndSec) maxEndSec = end
+                }
+            }
+            val bestSec = if (maxEndSec > 0.0) maxEndSec else totalDurSec
+            (bestSec * 1000.0).toLong().coerceAtLeast(0L)
+        } catch (_: Throwable) {
+            0L
+        }
+    }
+
     suspend fun findForwardKeyframeSec(
         videoPath: String,
         videoStreamIndex: Int,
@@ -172,8 +196,6 @@ object TrackProber {
     ): Double? = withContext(Dispatchers.IO) {
         if (endSec <= fromSec) return@withContext null
 
-        // Kayan nokta yuvarlamalarına karşı biraz geriden başla; tam fromSec
-        // üzerindeki bir keyframe'i kaçırmayalım.
         val searchStart = (fromSec - 0.5).coerceAtLeast(0.0)
         val windowEnd = minOf(fromSec + maxWindowSec, endSec)
         val windowLen = windowEnd - searchStart
@@ -204,8 +226,8 @@ object TrackProber {
             val flags = pkt.optString("flags", "")
             if (!flags.contains('K')) continue
             val pts = pkt.optString("pts_time", "N/A").toDoubleOrNull() ?: continue
-            if (pts < fromSec - 0.001) continue // arama payı için eklenen kısmı ele
-            if (pts > endSec) continue // istenen bitişi asla geçme
+            if (pts < fromSec - 0.001) continue
+            if (pts > endSec) continue
             if (best == null || pts < best!!) best = pts
         }
         best

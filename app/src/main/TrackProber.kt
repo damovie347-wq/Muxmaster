@@ -4,11 +4,11 @@ import com.arthenica.ffmpegkit.FFprobeKit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.Locale
 
 /**
- * Videonun içindeki GERÇEK track'leri ffprobe ile okur.
- * Hiçbir veri uydurulmaz; ffprobe çalışmazsa veya video bozuksa boş liste döner,
- * sahte/varsayılan track eklenmez.
+ * Videonun ve ses dosyalarının içindeki GERÇEK track'leri ffprobe ile okur.
+ * Hiçbir veri uydurulmaz; ffprobe çalışmazsa veya dosya bozuksa boş liste döner.
  */
 object TrackProber {
 
@@ -17,7 +17,10 @@ object TrackProber {
         val subtitleStreams: List<ExistingSubtitle>,
         val videoCodec: String,
         val resolution: String,
-        val durationMs: Long
+        val durationMs: Long,
+        val videoStreamIndex: Int = 0, // mkvmerge -d için: kaynaktaki gerçek video track id'si
+        val hasVideo: Boolean = true,
+        val pixFmt: String = ""
     )
 
     data class ExistingAudio(
@@ -50,7 +53,7 @@ object TrackProber {
         val session = FFprobeKit.executeWithArguments(args)
         val jsonOutput = session.output ?: ""
 
-        val empty = ProbeResult(emptyList(), emptyList(), "Unknown", "?x?", 0)
+        val empty = ProbeResult(emptyList(), emptyList(), "Unknown", "?x?", 0, 0)
         if (jsonOutput.isBlank()) return@withContext empty
 
         val root = try {
@@ -60,12 +63,17 @@ object TrackProber {
         }
 
         val streams = root.optJSONArray("streams") ?: return@withContext empty
+        val formatObj = root.optJSONObject("format")
+        val formatBitrateRaw = formatObj?.optString("bit_rate", "0")?.toLongOrNull() ?: 0L
 
         val audioList = mutableListOf<ExistingAudio>()
         val subList = mutableListOf<ExistingSubtitle>()
         var videoCodec = "Unknown"
         var resolution = "?x?"
         var durationMs = 0L
+        var videoStreamIndex = 0
+        var hasVideo = false
+        var pixFmt = ""
 
         for (i in 0 until streams.length()) {
             val stream = streams.getJSONObject(i)
@@ -86,13 +94,23 @@ object TrackProber {
                         val h = stream.optInt("height", 0)
                         resolution = if (w > 0 && h > 0) "${w}x${h}" else "?x?"
                         val dur = stream.optString("duration", "0").toDoubleOrNull() ?: 0.0
-                        durationMs = (dur * 1000).toLong()
+                        if (dur > 0.0) durationMs = (dur * 1000).toLong()
+                        videoStreamIndex = index
+                        hasVideo = true
+                        pixFmt = stream.optString("pix_fmt", "")
                     }
                 }
                 "audio" -> {
                     val channels = stream.optInt("channels", 2)
-                    val bitrateRaw = stream.optString("bit_rate", "0").toLongOrNull() ?: 0L
+                    var bitrateRaw = stream.optString("bit_rate", "0").toLongOrNull() ?: 0L
+                    if (bitrateRaw <= 0L && !hasVideo && formatBitrateRaw > 0L) {
+                        bitrateRaw = formatBitrateRaw
+                    }
                     val bitrateStr = if (bitrateRaw > 0) "${bitrateRaw / 1000} kbps" else "?"
+                    if (durationMs == 0L) {
+                        val aDur = stream.optString("duration", "0").toDoubleOrNull() ?: 0.0
+                        if (aDur > 0.0) durationMs = (aDur * 1000).toLong()
+                    }
                     audioList.add(
                         ExistingAudio(
                             streamIndex = index,
@@ -122,11 +140,96 @@ object TrackProber {
         }
 
         if (durationMs == 0L) {
-            val format = root.optJSONObject("format")
-            val dur = format?.optString("duration", "0")?.toDoubleOrNull() ?: 0.0
+            val dur = formatObj?.optString("duration", "0")?.toDoubleOrNull() ?: 0.0
             durationMs = (dur * 1000).toLong()
         }
 
-        ProbeResult(audioList, subList, videoCodec, resolution, durationMs)
+        if (durationMs <= 0L && audioList.isNotEmpty()) {
+            durationMs = probeAudioDurationMsFallback(videoPath)
+        }
+
+        ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex, hasVideo, pixFmt)
+    }
+
+    /**
+     * Konteyner üstbilgisinde süre yazmayan (ör. ham .aac veya bazı VBR akışları) ses
+     * dosyalarında son paket zaman damgasından gerçek süreyi (ms) hesaplar.
+     */
+    suspend fun probeAudioDurationMsFallback(path: String): Long = withContext(Dispatchers.IO) {
+        try {
+            val args = arrayOf(
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "packet=pts_time,duration_time",
+                "-of", "csv=p=0",
+                path
+            )
+            val session = FFprobeKit.executeWithArguments(args)
+            val out = session.output ?: return@withContext 0L
+            var maxEndSec = 0.0
+            var totalDurSec = 0.0
+            for (line in out.lineSequence()) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+                val parts = trimmed.split(',')
+                val pts = parts.getOrNull(0)?.toDoubleOrNull()
+                val dur = parts.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+                if (dur > 0.0) totalDurSec += dur
+                if (pts != null && pts >= 0.0) {
+                    val end = pts + dur
+                    if (end > maxEndSec) maxEndSec = end
+                }
+            }
+            val bestSec = if (maxEndSec > 0.0) maxEndSec else totalDurSec
+            (bestSec * 1000.0).toLong().coerceAtLeast(0L)
+        } catch (_: Throwable) {
+            0L
+        }
+    }
+
+    suspend fun findForwardKeyframeSec(
+        videoPath: String,
+        videoStreamIndex: Int,
+        fromSec: Double,
+        endSec: Double,
+        maxWindowSec: Double = 90.0
+    ): Double? = withContext(Dispatchers.IO) {
+        if (endSec <= fromSec) return@withContext null
+
+        val searchStart = (fromSec - 0.5).coerceAtLeast(0.0)
+        val windowEnd = minOf(fromSec + maxWindowSec, endSec)
+        val windowLen = windowEnd - searchStart
+        if (windowLen <= 0.0) return@withContext null
+
+        val args = arrayOf(
+            "-v", "error",
+            "-select_streams", videoStreamIndex.toString(),
+            "-read_intervals", String.format(Locale.US, "%.3f%%+%.3f", searchStart, windowLen),
+            "-show_entries", "packet=pts_time,flags",
+            "-print_format", "json",
+            videoPath
+        )
+
+        val session = FFprobeKit.executeWithArguments(args)
+        val jsonOutput = session.output ?: return@withContext null
+
+        val root = try {
+            JSONObject(jsonOutput)
+        } catch (e: Exception) {
+            return@withContext null
+        }
+        val packets = root.optJSONArray("packets") ?: return@withContext null
+
+        var best: Double? = null
+        for (i in 0 until packets.length()) {
+            val pkt = packets.getJSONObject(i)
+            val flags = pkt.optString("flags", "")
+            if (!flags.contains('K')) continue
+            val pts = pkt.optString("pts_time", "N/A").toDoubleOrNull() ?: continue
+            if (pts < fromSec - 0.001) continue
+            if (pts > endSec) continue
+            if (best == null || pts < best!!) best = pts
+        }
+        best
     }
 }
