@@ -12,21 +12,22 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.system.Os
 import android.system.OsConstants
-import android.webkit.CookieManager
+import androidx.media3.common.C
+import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.datasource.TransferListener
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.EOFException
 import java.io.File
 import java.io.FileInputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.net.URLEncoder
+import java.io.IOException
+import java.io.InputStream
+import java.io.RandomAccessFile
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.min
 
 /**
  * Girdi dosyalarına KOPYALAMADAN erişim.
@@ -200,15 +201,27 @@ object InputAccess {
     }
 }
 
+/**
+ * Cihazda zaten açık olan Google Drive hesaplarından (content://com.google.android.apps.docs.storage/...)
+ * veya yerel SAF sağlayıcılarından seçilen videoları HİÇBİR WebView / "Oturum Açın" ekranına yönlendirmeden,
+ * doğrudan Android ContentResolver ve ParcelFileDescriptor üzerinden oynatan yerel akış motoru.
+ *
+ * Neden Media3'ün varsayılan ContentDataSource'u Google Drive'da takılıyordu?
+ * 1) Google Drive uygulaması önbellekte olmayan büyük videoları pipe (S_IFIFO) olarak akıtır.
+ * 2) Android'de FileInputStream.skip() ve FileChannel.position() pipe üzerinde Os.lseek() çağırır ve
+ *    "ErrnoException: lseek failed: ESPIPE (Illegal seek)" fırlatarak oynatmayı çökertir.
+ * 3) Bu özel SafNativeDataSource:
+ *    - Dosya tanımlayıcısı gerçek seek destekliyorsa (S_IFREG / FUSE ProxyFileDescriptor), Os.pread / Os.lseek
+ *      ile 0 ms'de doğrudan okur.
+ *    - Pipe (S_IFIFO) ise ASLA lseek veya FileInputStream.skip() çağırmaz; akışı kesmeden okur ve
+ *      okunan baytları geçici bir RandomAccessFile önbelleğinde tutarak başlık geri dönüşlerini anında yanıtlar.
+ */
 object DriveStreamResolver {
 
     const val DEFAULT_USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    data class ResolvedDriveStream(
-        val streamUrl: String,
-        val title: String? = null
-    )
+    private val activeTempFiles = Collections.newSetFromMap(ConcurrentHashMap<File, Boolean>())
 
     fun isGoogleDriveSafUri(uri: Uri): Boolean {
         if (uri.scheme != "content") return false
@@ -226,320 +239,341 @@ object DriveStreamResolver {
     fun extractDriveFileId(input: String): String? {
         val s = Uri.decode(input).trim()
         Regex("""/(?:file/)?d/([a-zA-Z0-9_-]{18,64})""").find(s)?.groupValues?.getOrNull(1)?.let { id ->
-            if (isValidDriveId(id)) return id
+            if (id.length >= 18) return id
         }
         Regex("""[?&]id=([a-zA-Z0-9_-]{18,64})""").find(s)?.groupValues?.getOrNull(1)?.let { id ->
-            if (isValidDriveId(id)) return id
-        }
-        if (s.matches(Regex("""^[a-zA-Z0-9_-]{25,50}$""")) && isValidDriveId(s)) {
-            return s
+            if (id.length >= 18) return id
         }
         return null
     }
 
-    private fun isValidDriveId(id: String): Boolean {
-        if (id.length < 18) return false
-        val lower = id.lowercase()
-        return lower !in setOf("my-drive", "shared-with-me", "recent", "starred", "trash", "computers", "search", "folders")
+    fun releaseSession(uri: Uri?) {
+        // Temp files are cleaned up on player release or releaseAllSessions
     }
 
-    /**
-     * SAF (content://com.google.android.apps.docs.storage/...) URI'sinden
-     * openFileDescriptor ÇAĞIRMADAN tüm olası sütunları tarayarak varsa gerçek Drive fileId'sini bulur.
-     */
-    fun tryExtractFileIdFromSafUri(context: Context, uri: Uri): String? {
-        val rawUri = Uri.decode(uri.toString())
-        val afterDoc = rawUri.substringAfter("doc=", "").substringBefore(";")
-        if (afterDoc.length >= 22 && !afterDoc.startsWith("encoded=") && !afterDoc.all { it.isDigit() } && isValidDriveId(afterDoc)) {
-            return afterDoc
+    fun releaseAllSessions() {
+        val copy = activeTempFiles.toList()
+        activeTempFiles.clear()
+        for (f in copy) {
+            runCatching { f.delete() }
         }
-        runCatching {
-            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                if (c.moveToFirst()) {
-                    for (i in 0 until c.columnCount) {
-                        val v = runCatching { c.getString(i) }.getOrNull().orEmpty()
-                        if (v.length in 25..48 && v.matches(Regex("""^[a-zA-Z0-9_-]{25,48}$""")) && isValidDriveId(v)) {
-                            return v
-                        }
-                        val sub = v.substringAfter("doc=", "").substringBefore(";")
-                        if (sub.length in 25..48 && !sub.startsWith("encoded=") && sub.matches(Regex("""^[a-zA-Z0-9_-]{25,48}$""")) && isValidDriveId(sub)) {
-                            return sub
-                        }
-                    }
-                }
-            }
-        }
-        return null
     }
 
-    fun getCombinedCookiesForUrl(url: String): String {
-        val cm = runCatching { CookieManager.getInstance() }.getOrNull() ?: return ""
-        val cookies = linkedMapOf<String, String>()
-        fun collectFrom(domainUrl: String) {
-            val raw = runCatching { cm.getCookie(domainUrl) }.getOrNull().orEmpty()
-            for (part in raw.split(";")) {
-                val trimmed = part.trim()
-                val eq = trimmed.indexOf('=')
-                if (eq > 0) {
-                    val k = trimmed.substring(0, eq).trim()
-                    val v = trimmed.substring(eq + 1).trim()
-                    if (k.isNotEmpty()) cookies[k] = v
-                }
-            }
-        }
-        collectFrom("https://www.google.com")
-        collectFrom("https://drive.google.com")
-        collectFrom("https://drive.usercontent.google.com")
-        collectFrom(url)
-        return cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    internal fun registerTempFile(f: File) {
+        activeTempFiles.add(f)
     }
 
-    /**
-     * CookieManager'daki aktif oturumla masaüstü Drive araması yaparak dosya adından fileId bulur.
-     */
-    suspend fun searchDriveFileIdByName(fileName: String): String? = withContext(Dispatchers.IO) {
-        val cleanName = fileName.trim()
-        if (cleanName.isBlank()) return@withContext null
-        val cookie = getCombinedCookiesForUrl("https://drive.google.com")
-        if (cookie.isBlank()) return@withContext null
-
-        val stem = cleanName.substringBeforeLast('.')
-        val queryTerm = if (stem.length >= 6) stem.take(40) else cleanName
-        val encodedQ = URLEncoder.encode(queryTerm, "UTF-8")
-
-        for (accountIdx in 0..3) {
-            val searchUrl = "https://drive.google.com/drive/u/$accountIdx/search?q=$encodedQ"
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(searchUrl).openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = true
-                    connectTimeout = 6_000
-                    readTimeout = 6_000
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
-                    setRequestProperty("Cookie", cookie)
-                }
-                val code = conn.responseCode
-                if (code == 200) {
-                    val html = conn.inputStream.bufferedReader().use { it.readText() }
-                    val unescaped = html
-                        .replace("\\x22", "\"")
-                        .replace("\\x5b", "[")
-                        .replace("\\x5d", "]")
-                        .replace("\\/", "/")
-                        .replace("\\\"", "\"")
-                    val namePos = unescaped.indexOf(cleanName, ignoreCase = true)
-                        .takeIf { it >= 0 }
-                        ?: unescaped.indexOf(stem, ignoreCase = true)
-                    if (namePos > 0) {
-                        val windowStart = (namePos - 600).coerceAtLeast(0)
-                        val snippet = unescaped.substring(windowStart, namePos)
-                        val idMatches = Regex("\"([a-zA-Z0-9_-]{25,44})\"").findAll(snippet).toList()
-                        for (m in idMatches.asReversed()) {
-                            val candidate = m.groupValues[1]
-                            if (isValidDriveId(candidate)) {
-                                return@withContext candidate
-                            }
-                        }
-                    }
-                }
-            } catch (_: Throwable) {
-            } finally {
-                runCatching { conn?.disconnect() }
-            }
-        }
-        null
+    internal fun unregisterTempFile(f: File) {
+        activeTempFiles.remove(f)
+        runCatching { f.delete() }
     }
 
-    suspend fun resolveDriveFileIdToStream(fileId: String): ResolvedDriveStream? = withContext(Dispatchers.IO) {
-        val candidates = listOf(
-            "https://drive.usercontent.google.com/download?id=$fileId&export=download&confirm=t",
-            "https://drive.google.com/uc?id=$fileId&export=download&confirm=t"
-        )
-        for (startUrl in candidates) {
-            probeAndResolveStreamUrl(startUrl, fileId)?.let { return@withContext it }
-        }
-        null
-    }
-
-    private fun probeAndResolveStreamUrl(startUrl: String, fileId: String): ResolvedDriveStream? {
-        val cm = runCatching { CookieManager.getInstance() }.getOrNull()
-        var currentUrl = startUrl
-        var hops = 0
-
-        while (hops < 8) {
-            hops++
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                    instanceFollowRedirects = false
-                    connectTimeout = 8_000
-                    readTimeout = 8_000
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
-                    setRequestProperty("Range", "bytes=0-1")
-                    val cookie = getCombinedCookiesForUrl(currentUrl)
-                    if (cookie.isNotBlank()) setRequestProperty("Cookie", cookie)
-                }
-                conn.connect()
-
-                conn.headerFields?.forEach { (key, values) ->
-                    if (key != null && key.equals("Set-Cookie", ignoreCase = true)) {
-                        values?.forEach { cVal ->
-                            runCatching { cm?.setCookie(currentUrl, cVal) }
-                        }
-                    }
-                }
-                runCatching { cm?.flush() }
-
-                val code = conn.responseCode
-                if (code in listOf(301, 302, 303, 307, 308)) {
-                    val loc = conn.getHeaderField("Location") ?: return null
-                    val nextUrl = URL(URL(currentUrl), loc).toString()
-                    if (nextUrl.contains("accounts.google.com") || nextUrl.contains("ServiceLogin")) {
-                        return null
-                    }
-                    currentUrl = nextUrl
-                    continue
-                }
-
-                val contentType = conn.contentType.orEmpty().lowercase()
-                val disposition = conn.getHeaderField("Content-Disposition").orEmpty()
-                val title = parseFilenameFromDisposition(disposition)
-
-                if ((code == 200 || code == 206) && !contentType.startsWith("text/html")) {
-                    return ResolvedDriveStream(streamUrl = currentUrl, title = title)
-                }
-
-                if (code == 200 && contentType.startsWith("text/html")) {
-                    val html = conn.inputStream.bufferedReader().use { r ->
-                        val buf = CharArray(65536)
-                        val n = r.read(buf)
-                        if (n > 0) String(buf, 0, n) else ""
-                    }
-                    if (html.contains("ServiceLogin") || html.contains("accounts.google.com")) {
-                        return null
-                    }
-                    val confirmedUrl = parseDriveConfirmHtml(html, currentUrl, fileId)
-                    if (confirmedUrl != null && confirmedUrl != currentUrl) {
-                        currentUrl = confirmedUrl
-                        continue
-                    }
-                    return null
-                }
-                return null
-            } catch (_: Throwable) {
-                return null
-            } finally {
-                runCatching { conn?.disconnect() }
-            }
-        }
-        return null
-    }
-
-    private fun parseFilenameFromDisposition(disposition: String): String? {
-        if (disposition.isBlank()) return null
-        Regex("""filename\*=UTF-8''([^;]+)""", RegexOption.IGNORE_CASE).find(disposition)
-            ?.groupValues?.getOrNull(1)?.let { return Uri.decode(it.trim('"')) }
-        Regex("filename=\"([^\"]+)\"", RegexOption.IGNORE_CASE).find(disposition)
-            ?.groupValues?.getOrNull(1)?.let { return it }
-        return null
-    }
-
-    private fun parseDriveConfirmHtml(html: String, baseUrl: String, fileId: String): String? {
-        val actionMatch = Regex("""<form[^>]*id=["']download-form["'][^>]*action=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            .find(html)
-            ?: Regex("""<form[^>]*action=["'](https://drive\.usercontent\.google\.com/download[^"']*)["']""", RegexOption.IGNORE_CASE)
-                .find(html)
-
-        if (actionMatch != null) {
-            val actionUrl = actionMatch.groupValues[1].replace("&amp;", "&")
-            val params = linkedMapOf<String, String>()
-            val inputRegex = Regex("""<input[^>]*type=["']hidden["'][^>]*>""", RegexOption.IGNORE_CASE)
-            val nameRegex = Regex("""name=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            val valRegex = Regex("""value=["']([^"']*)["']""", RegexOption.IGNORE_CASE)
-
-            for (m in inputRegex.findAll(html)) {
-                val tag = m.value
-                val k = nameRegex.find(tag)?.groupValues?.getOrNull(1)
-                val v = valRegex.find(tag)?.groupValues?.getOrNull(1)
-                if (!k.isNullOrBlank() && v != null) {
-                    params[k] = v
-                }
-            }
-            if (!params.containsKey("id")) params["id"] = fileId
-            if (!params.containsKey("export")) params["export"] = "download"
-            if (!params.containsKey("confirm")) params["confirm"] = "t"
-
-            val query = params.entries.joinToString("&") {
-                "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
-            }
-            val sep = if (actionUrl.contains("?")) "&" else "?"
-            return "$actionUrl$sep$query"
-        }
-
-        Regex("""href=["']([^"']*confirm=[^"']+)["']""", RegexOption.IGNORE_CASE).find(html)
-            ?.groupValues?.getOrNull(1)?.let { href ->
-                val clean = href.replace("&amp;", "&")
-                return runCatching { URL(URL(baseUrl), clean).toString() }.getOrNull()
-            }
-
-        val uuid = Regex("""name=["']uuid["']\s+value=["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)
-        val at = Regex("""name=["']at["']\s+value=["']([^"']+)["']""").find(html)?.groupValues?.getOrNull(1)
-        if (uuid != null) {
-            val sb = StringBuilder("https://drive.usercontent.google.com/download?id=$fileId&export=download&confirm=t&uuid=$uuid")
-            if (at != null) sb.append("&at=").append(URLEncoder.encode(at, "UTF-8"))
-            return sb.toString()
-        }
-        return null
-    }
-
-    fun releaseSession(uri: Uri?) { }
-    fun releaseAllSessions() { }
-
-    /**
-     * Yerel dosyalarda CookieManager'ı HİÇ çağırmadan doğrudan FileDataSource/ContentDataSource kullanan,
-     * yalnızca http/https isteklerinde Cookie başlığı ekleyen hızlı DataSource.Factory.
-     */
     fun buildDataSourceFactory(context: Context): DataSource.Factory {
         val appCtx = context.applicationContext
-        val httpFactory = DataSource.Factory {
-            val httpDs = DefaultHttpDataSource.Factory()
-                .setUserAgent(DEFAULT_USER_AGENT)
-                .setAllowCrossProtocolRedirects(true)
-                .setKeepPostFor302Redirects(true)
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(20_000)
-                .createDataSource()
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(DEFAULT_USER_AGENT)
+            .setAllowCrossProtocolRedirects(true)
+            .setKeepPostFor302Redirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(25_000)
+        val defaultFactory = DefaultDataSource.Factory(appCtx, httpFactory)
 
-            object : DataSource {
-                override fun addTransferListener(transferListener: TransferListener) {
-                    httpDs.addTransferListener(transferListener)
-                }
+        return DataSource.Factory {
+            SafNativeDataSource(appCtx, defaultFactory.createDataSource())
+        }
+    }
+}
 
-                override fun open(dataSpec: DataSpec): Long {
-                    val u = dataSpec.uri.toString()
-                    if (isGoogleDriveUrl(u) || u.contains("googleusercontent.com")) {
-                        val cookie = getCombinedCookiesForUrl("https://drive.google.com")
-                        if (cookie.isNotBlank()) {
-                            httpDs.setRequestProperty("Cookie", cookie)
-                        }
-                    }
-                    return httpDs.open(dataSpec)
-                }
+/**
+ * Her ExoPlayer örneği için bağımsız oluşturulan (4'lü oynatmada birbirini asla bloklamayan)
+ * yüksek hızlı yerel dosya + Google Drive SAF Pipe/FUSE DataSource.
+ */
+private class SafNativeDataSource(
+    private val context: Context,
+    private val fallbackDelegate: DataSource
+) : BaseDataSource(/* isNetwork = */ false) {
 
-                override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
-                    httpDs.read(buffer, offset, length)
+    private var currentUri: Uri? = null
+    private var usingDelegate: Boolean = false
 
-                override fun getUri(): Uri? = httpDs.uri
+    // Seekable regular file or FUSE proxy descriptor state
+    private var seekablePfd: ParcelFileDescriptor? = null
+    private var seekableTotalLength: Long = C.LENGTH_UNSET.toLong()
+    private var isSeekableFd: Boolean = false
 
-                override fun getResponseHeaders(): Map<String, List<String>> = httpDs.responseHeaders
+    // Sequential pipe stream + local random-access tee cache for non-seekable Google Drive pipes
+    private var pipePfd: ParcelFileDescriptor? = null
+    private var pipeStream: InputStream? = null
+    private var pipeCacheFile: File? = null
+    private var pipeCacheRaf: RandomAccessFile? = null
+    private var pipeDownloadedBytes: Long = 0L
+    private var pipeEofReached: Boolean = false
+    private val skipScratch = ByteArray(64 * 1024)
 
-                override fun close() {
-                    httpDs.close()
-                }
+    private var readPosition: Long = 0L
+    private var bytesRemaining: Long = C.LENGTH_UNSET.toLong()
+    private var opened: Boolean = false
+
+    override fun open(dataSpec: DataSpec): Long {
+        val uri = dataSpec.uri
+        val scheme = uri.scheme?.lowercase()
+
+        // HTTP/HTTPS veya file:// doğrudan optimize edilmiş varsayılan kaynağa gider
+        if (scheme != "content") {
+            usingDelegate = true
+            currentUri = uri
+            return fallbackDelegate.open(dataSpec)
+        }
+
+        // Yerel depolamadaki bir content:// URI ise ve gerçek dosya yoluna çevrilebiliyorsa doğrudan File olarak aç
+        if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
+            val localPath = InputAccess.realPath(context, uri)
+            if (localPath != null) {
+                val fileSpec = dataSpec.buildUpon().setUri(Uri.fromFile(File(localPath))).build()
+                usingDelegate = true
+                currentUri = uri
+                return fallbackDelegate.open(fileSpec)
             }
         }
-        return DefaultDataSource.Factory(appCtx, httpFactory)
+
+        usingDelegate = false
+        transferInitializing(dataSpec)
+
+        try {
+            // Farklı bir URI'ye geçildiyse önceki kaynakları temizle
+            if (currentUri != uri) {
+                releaseNativeResources()
+                currentUri = uri
+            }
+
+            // Henüz açılmamışsa ParcelFileDescriptor aç ve seekable olup olmadığını test et
+            if (seekablePfd == null && pipeStream == null) {
+                val pfd = openContentPfd(uri)
+                    ?: throw IOException("Dosya açılamadı: $uri")
+
+                val canSeek = testFdSeekable(pfd)
+                if (canSeek) {
+                    seekablePfd = pfd
+                    isSeekableFd = true
+                    val statLen = runCatching { pfd.statSize }.getOrDefault(-1L)
+                    val stLen = runCatching { Os.fstat(pfd.fileDescriptor).st_size }.getOrDefault(-1L)
+                    val queryLen = InputAccess.sizeOf(context, uri)
+                    seekableTotalLength = when {
+                        statLen > 0L -> statLen
+                        stLen > 0L -> stLen
+                        queryLen > 0L -> queryLen
+                        else -> C.LENGTH_UNSET.toLong()
+                    }
+                } else {
+                    // Pipe (S_IFIFO) veya seek desteklemeyen bulut akışı:
+                    // ASLA Os.lseek veya FileInputStream.skip() çağırma!
+                    isSeekableFd = false
+                    pipePfd = pfd
+                    pipeStream = BufferedInputStream(FileInputStream(pfd.fileDescriptor), 512 * 1024)
+                    val tmp = File.createTempFile("gdrive_stream_", ".tmp", context.cacheDir)
+                    DriveStreamResolver.registerTempFile(tmp)
+                    pipeCacheFile = tmp
+                    pipeCacheRaf = RandomAccessFile(tmp, "rw")
+                    pipeDownloadedBytes = 0L
+                    pipeEofReached = false
+                }
+            }
+
+            readPosition = dataSpec.position
+
+            if (isSeekableFd) {
+                val pfd = seekablePfd ?: throw IOException("Seekable PFD kayboldu")
+                if (seekableTotalLength != C.LENGTH_UNSET.toLong() && readPosition > seekableTotalLength) {
+                    throw EOFException("Position out of range: $readPosition > $seekableTotalLength")
+                }
+                bytesRemaining = when {
+                    dataSpec.length != C.LENGTH_UNSET.toLong() -> dataSpec.length
+                    seekableTotalLength != C.LENGTH_UNSET.toLong() -> (seekableTotalLength - readPosition).coerceAtLeast(0L)
+                    else -> C.LENGTH_UNSET.toLong()
+                }
+            } else {
+                // Pipe akışında eğer istenen pozisyon henüz indirilmemiş bir ileri noktaysa:
+                // Makul bir ileri atlama ise (<= 16 MB) pipe'dan okuyarak ilerle;
+                // çok uzaktaysa (ör. 1.1 GB dosyanın sonundaki Cues tablosu) EOF/LENGTH_UNSET döndür ki oynatıcı takılmasın!
+                val ahead = readPosition - pipeDownloadedBytes
+                if (ahead > 0L) {
+                    if (ahead <= 16L * 1024L * 1024L) {
+                        drainPipeUpTo(readPosition)
+                    } else {
+                        throw IOException("Sequential stream cannot jump ${ahead / (1024 * 1024)} MB ahead")
+                    }
+                }
+                bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
+                    dataSpec.length
+                } else {
+                    // C.LENGTH_UNSET döndürerek MatroskaExtractor ve Mp4Extractor'ın dosya sonuna
+                    // (1+ GB ilerisine) atlamasını engelliyoruz; 0. bayttan anında oynatır!
+                    C.LENGTH_UNSET.toLong()
+                }
+            }
+
+            opened = true
+            transferStarted(dataSpec)
+            return bytesRemaining
+        } catch (e: IOException) {
+            throw e
+        } catch (t: Throwable) {
+            throw IOException(t)
+        }
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (usingDelegate) {
+            return fallbackDelegate.read(buffer, offset, length)
+        }
+        if (length == 0) return 0
+        if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
+
+        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) {
+            length
+        } else {
+            min(bytesRemaining, length.toLong()).toInt()
+        }
+
+        try {
+            val bytesRead: Int = if (isSeekableFd) {
+                val pfd = seekablePfd ?: return C.RESULT_END_OF_INPUT
+                val n = try {
+                    Os.pread(pfd.fileDescriptor, buffer, offset, toRead, readPosition)
+                } catch (_: Throwable) {
+                    Os.lseek(pfd.fileDescriptor, readPosition, OsConstants.SEEK_SET)
+                    Os.read(pfd.fileDescriptor, buffer, offset, toRead)
+                }
+                if (n <= 0) C.RESULT_END_OF_INPUT else n
+            } else {
+                readFromPipeOrCache(buffer, offset, toRead)
+            }
+
+            if (bytesRead == C.RESULT_END_OF_INPUT) {
+                return C.RESULT_END_OF_INPUT
+            }
+
+            readPosition += bytesRead
+            if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
+                bytesRemaining -= bytesRead
+            }
+            bytesTransferred(bytesRead)
+            return bytesRead
+        } catch (e: IOException) {
+            throw e
+        } catch (t: Throwable) {
+            throw IOException(t)
+        }
+    }
+
+    private fun readFromPipeOrCache(buffer: ByteArray, offset: Int, toRead: Int): Int {
+        val raf = pipeCacheRaf
+        val ins = pipeStream
+        if (raf == null || ins == null) return C.RESULT_END_OF_INPUT
+
+        // 1) İstenen pozisyon zaten önbelleğe alındıysa doğrudan yerel geçici dosyadan (0.01ms) oku
+        if (readPosition < pipeDownloadedBytes) {
+            val availableInCache = (pipeDownloadedBytes - readPosition).coerceAtMost(toRead.toLong()).toInt()
+            raf.seek(readPosition)
+            val n = raf.read(buffer, offset, availableInCache)
+            if (n > 0) return n
+        }
+
+        // 2) Eğer okuma pozisyonu önbelleğin biraz ilerisindeyse aradaki boşluğu pipe'dan doldur
+        if (readPosition > pipeDownloadedBytes && !pipeEofReached) {
+            drainPipeUpTo(readPosition)
+        }
+
+        if (pipeEofReached && readPosition >= pipeDownloadedBytes) {
+            return C.RESULT_END_OF_INPUT
+        }
+
+        // 3) Pipe'dan yeni veri oku ve aynı anda geçici dosyaya yaz
+        val n = ins.read(buffer, offset, toRead)
+        if (n <= 0) {
+            pipeEofReached = true
+            return C.RESULT_END_OF_INPUT
+        }
+        raf.seek(pipeDownloadedBytes)
+        raf.write(buffer, offset, n)
+        pipeDownloadedBytes += n
+        return n
+    }
+
+    private fun drainPipeUpTo(targetPosition: Long) {
+        val raf = pipeCacheRaf ?: return
+        val ins = pipeStream ?: return
+        while (pipeDownloadedBytes < targetPosition && !pipeEofReached) {
+            val need = min((targetPosition - pipeDownloadedBytes), skipScratch.size.toLong()).toInt()
+            val n = ins.read(skipScratch, 0, need)
+            if (n <= 0) {
+                pipeEofReached = true
+                break
+            }
+            raf.seek(pipeDownloadedBytes)
+            raf.write(skipScratch, 0, n)
+            pipeDownloadedBytes += n
+        }
+    }
+
+    override fun getUri(): Uri? = if (usingDelegate) fallbackDelegate.uri else currentUri
+
+    override fun close() {
+        if (usingDelegate) {
+            usingDelegate = false
+            fallbackDelegate.close()
+            return
+        }
+        if (opened) {
+            opened = false
+            transferEnded()
+        }
+        // Not: seekablePfd ve pipeStream aynı URI üzerindeki ardışık open/close çağrıları
+        // (ör. başlık okuma sonrası veri okuma) arasında açık tutulur; böylece Google Drive
+        // bağlantısı kopmaz ve yeniden bağlanma gecikmesi yaşanmaz!
+    }
+
+    fun releaseNativeResources() {
+        runCatching { seekablePfd?.close() }
+        seekablePfd = null
+        runCatching { pipeStream?.close() }
+        pipeStream = null
+        runCatching { pipePfd?.close() }
+        pipePfd = null
+        runCatching { pipeCacheRaf?.close() }
+        pipeCacheRaf = null
+        pipeCacheFile?.let { DriveStreamResolver.unregisterTempFile(it) }
+        pipeCacheFile = null
+        pipeDownloadedBytes = 0L
+        pipeEofReached = false
+    }
+
+    protected fun finalize() {
+        releaseNativeResources()
+    }
+
+    private fun openContentPfd(uri: Uri): ParcelFileDescriptor? {
+        runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.let { return it }
+        }
+        runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.parcelFileDescriptor?.let { return it }
+        }
+        return null
+    }
+
+    private fun testFdSeekable(pfd: ParcelFileDescriptor): Boolean {
+        return try {
+            val st = Os.fstat(pfd.fileDescriptor)
+            val mode = st.st_mode and OsConstants.S_IFMT
+            if (mode == OsConstants.S_IFIFO || mode == OsConstants.S_IFSOCK) {
+                false
+            } else {
+                val pos = Os.lseek(pfd.fileDescriptor, 0L, OsConstants.SEEK_CUR)
+                pos >= 0L
+            }
+        } catch (_: Throwable) {
+            false
+        }
     }
 }
