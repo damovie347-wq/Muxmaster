@@ -1,29 +1,9 @@
 #!/usr/bin/env python3
 """
-mkvmerge/mkvextract icin TUM calisma-zamani (runtime) bagimliliklarini,
-tahmine dayanmadan, gercek ELF NEEDED kayitlarini okuyarak ve Termux apt
-deposunun resmi "Contents" indeksinden hangi paketin hangi .so dosyasini
-sagladigini bularak, ozyinemeli (recursive) sekilde indirir.
-
-ONCEKI YAKLASIMIN HATASI: sadece "mkvtoolnix" paketinin kendi usr/lib
-klasoru + elle secilmis "zlib" kopyalaniyordu. mkvmerge ise ayri paketler
-halinde dagitilan libebml/libmatroska/boost/pugixml/fmt/libc++_shared vb.
-kutuphanelere de ihtiyac duyuyor. Bunlardan biri eksik olunca linker
-"library X.so not found: needed by main executable" hatasiyla CRASH
-oluyordu (cikti 0 byte).
-
-YENI YAKLASIM:
-  1) mkvmerge/mkvextract binary'leri kopyalanir.
-  2) Her dosya icin `readelf -d` ile NEEDED (ihtiyac duyulan .so) listesi okunur.
-  3) Her ihtiyac icin: zaten kopyalandi mi? / Android'in kendi sistem
-     kutuphanesi mi (SKIP_SONAMES)? degilse -> apt Contents-aarch64.gz
-     indeksinden o dosyayi hangi paketin sagladigi bulunur, o paket indirilip
-     acilir, tam dosya kopyalanir ve KENDI bagimliliklari icin de kuyruga eklenir.
-  4) Kuyruk bitene kadar (sabit noktaya ulasana kadar) tekrar edilir.
-  5) Sonunda TUM .so/binary dosyalarina rpath=$ORIGIN yazilir (savunma amacli;
-     NativeTools.kt zaten LD_LIBRARY_PATH da ayarliyor).
-  6) Son bir dogrulama gecisiyle hicbir eksik bagimlilik kalmadigi teyit edilir;
-     eksik varsa build ACIKCA basarisiz olur (sessiz/yaniltici basari YOK).
+mkvmerge/mkvextract + exhale (gercek ISO/IEC 23003-3 USAC / xHE-AAC mp4a-40-42 encoder)
++ libopusenc (Termux resmi libopus tabanli temiz Ogg/Opus encoder) icin TUM calisma-zamani
+(runtime) bagimliliklarini gercek ELF NEEDED kayitlarini okuyarak indirir, derler ve
+ffmpeg-kit ile cakismamasi icin izole eder.
 """
 
 import glob
@@ -48,10 +28,220 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
                         "app", "src", "main", "jniLibs", "arm64-v8a")
 WORK = tempfile.mkdtemp(prefix="mkvtoolnix_fetch_")
 
-# Bunlar Android isletim sisteminin KENDISI tarafindan her zaman saglanir;
-# Termux paketlerinden kopyalanmaya CALISILMAMALI (versiyon/ABI uyumsuzlugu
-# riski + zaten linker bunlari sistemden bulur).
 SKIP_SONAMES = {"libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so"}
+
+EXHALE_TARBALLS = [
+    "https://gitlab.com/ecodis/exhale/-/archive/v1.2.2/exhale-v1.2.2.tar.gz",
+    "https://gitlab.com/ecodis/exhale/-/archive/v1.2.1/exhale-v1.2.1.tar.gz",
+    "https://gitlab.com/ecodis/exhale/-/archive/master/exhale-master.tar.gz",
+    "https://github.com/dtseto/exhale/archive/refs/heads/main.tar.gz",
+    "https://github.com/MoSal/exhale/archive/refs/heads/mosal_mod.tar.gz",
+]
+
+EXHALE_GIT_REPOS = [
+    "https://gitlab.com/ecodis/exhale.git",
+    "https://github.com/dtseto/exhale.git",
+    "https://github.com/MoSal/exhale.git",
+]
+
+OPUS_WAV_ENC_CPP = r'''
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+#include <algorithm>
+
+extern "C" {
+    struct OpusEncoder;
+    OpusEncoder* opus_encoder_create(int32_t Fs, int channels, int application, int *error);
+    int opus_encoder_ctl(OpusEncoder *st, int request, ...);
+    int32_t opus_encode(OpusEncoder *st, const int16_t *pcm, int frame_size, unsigned char *data, int32_t max_data_bytes);
+    void opus_encoder_destroy(OpusEncoder *st);
+}
+
+#define OPUS_APPLICATION_VOIP 2048
+#define OPUS_APPLICATION_AUDIO 2049
+#define OPUS_APPLICATION_RESTRICTED_LOWDELAY 2051
+#define OPUS_SET_BITRATE_REQUEST 4002
+#define OPUS_SET_VBR_REQUEST 4006
+#define OPUS_SET_VBR_CONSTRAINT_REQUEST 4020
+#define OPUS_SET_COMPLEXITY_REQUEST 4010
+#define OPUS_SET_SIGNAL_REQUEST 4024
+#define OPUS_SIGNAL_MUSIC 3002
+#define OPUS_GET_LOOKAHEAD_REQUEST 4027
+
+static uint32_t ogg_crc_table[256];
+static void init_ogg_crc() {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t r = i << 24;
+        for (int j = 0; j < 8; j++) {
+            r = (r & 0x80000000U) ? ((r << 1) ^ 0x04c11db7U) : (r << 1);
+        }
+        ogg_crc_table[i] = r;
+    }
+}
+
+static uint32_t compute_ogg_crc(const uint8_t* data, size_t len) {
+    uint32_t crc = 0;
+    for (size_t i = 0; i < len; i++) {
+        crc = (crc << 8) ^ ogg_crc_table[((crc >> 24) & 0xFF) ^ data[i]];
+    }
+    return crc;
+}
+
+static bool write_ogg_page(
+    FILE* f,
+    uint8_t header_type,
+    uint64_t granule_pos,
+    uint32_t serial_no,
+    uint32_t& seq_no,
+    const std::vector<std::vector<uint8_t>>& packets
+) {
+    std::vector<uint8_t> seg_table;
+    size_t body_size = 0;
+    for (const auto& pkt : packets) {
+        size_t rem = pkt.size();
+        body_size += rem;
+        while (rem >= 255) {
+            seg_table.push_back(255);
+            rem -= 255;
+        }
+        seg_table.push_back(static_cast<uint8_t>(rem));
+    }
+    if (seg_table.size() > 255) return false;
+
+    std::vector<uint8_t> page(27 + seg_table.size() + body_size, 0);
+    memcpy(&page[0], "OggS", 4);
+    page[4] = 0;
+    page[5] = header_type;
+    for (int i = 0; i < 8; i++) page[6 + i] = static_cast<uint8_t>((granule_pos >> (8 * i)) & 0xFF);
+    for (int i = 0; i < 4; i++) page[14 + i] = static_cast<uint8_t>((serial_no >> (8 * i)) & 0xFF);
+    for (int i = 0; i < 4; i++) page[18 + i] = static_cast<uint8_t>((seq_no >> (8 * i)) & 0xFF);
+    seq_no++;
+    page[26] = static_cast<uint8_t>(seg_table.size());
+    memcpy(&page[27], seg_table.data(), seg_table.size());
+    size_t offset = 27 + seg_table.size();
+    for (const auto& pkt : packets) {
+        memcpy(&page[offset], pkt.data(), pkt.size());
+        offset += pkt.size();
+    }
+    uint32_t crc = compute_ogg_crc(page.data(), page.size());
+    for (int i = 0; i < 4; i++) page[22 + i] = static_cast<uint8_t>((crc >> (8 * i)) & 0xFF);
+
+    return fwrite(page.data(), 1, page.size(), f) == page.size();
+}
+
+// Usage: libopusenc.so <raw_s16le_48k_path> <out_opus_path> <channels> <bitrate_bps>
+int main(int argc, char** argv) {
+    if (argc < 5) return 2;
+    const char* in_path = argv[1];
+    const char* out_path = argv[2];
+    int channels = atoi(argv[3]);
+    int bitrate_bps = atoi(argv[4]);
+    if (channels < 1 || channels > 2) channels = 1;
+    if (bitrate_bps < 6000) bitrate_bps = 6000;
+    if (bitrate_bps > 510000) bitrate_bps = 510000;
+
+    init_ogg_crc();
+
+    int err = 0;
+    OpusEncoder* enc = opus_encoder_create(48000, channels, OPUS_APPLICATION_AUDIO, &err);
+    if (!enc || err != 0) return 3;
+
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, bitrate_bps);
+    opus_encoder_ctl(enc, OPUS_SET_VBR_REQUEST, 1);
+    opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT_REQUEST, 1);
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY_REQUEST, 6);
+    opus_encoder_ctl(enc, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC);
+
+    int32_t lookahead = 312;
+    opus_encoder_ctl(enc, OPUS_GET_LOOKAHEAD_REQUEST, &lookahead);
+
+    FILE* fin = fopen(in_path, "rb");
+    if (!fin) { opus_encoder_destroy(enc); return 4; }
+    fseek(fin, 0, SEEK_END);
+    long total_bytes = ftell(fin);
+    fseek(fin, 0, SEEK_SET);
+    if (total_bytes <= 0) total_bytes = 1;
+
+    FILE* fout = fopen(out_path, "wb");
+    if (!fout) { fclose(fin); opus_encoder_destroy(enc); return 5; }
+
+    uint32_t serial_no = 0x4D55584D;
+    uint32_t seq_no = 0;
+
+    std::vector<uint8_t> head(19, 0);
+    memcpy(&head[0], "OpusHead", 8);
+    head[8] = 1;
+    head[9] = static_cast<uint8_t>(channels);
+    uint16_t preskip = static_cast<uint16_t>(lookahead);
+    head[10] = static_cast<uint8_t>(preskip & 0xFF);
+    head[11] = static_cast<uint8_t>((preskip >> 8) & 0xFF);
+    uint32_t sr = 48000;
+    for (int i = 0; i < 4; i++) head[12 + i] = static_cast<uint8_t>((sr >> (8 * i)) & 0xFF);
+    write_ogg_page(fout, 0x02, 0, serial_no, seq_no, {head});
+
+    const char* vendor = "MuxMaster";
+    uint32_t vlen = static_cast<uint32_t>(strlen(vendor));
+    std::vector<uint8_t> tags(8 + 4 + vlen + 4, 0);
+    memcpy(&tags[0], "OpusTags", 8);
+    for (int i = 0; i < 4; i++) tags[8 + i] = static_cast<uint8_t>((vlen >> (8 * i)) & 0xFF);
+    memcpy(&tags[12], vendor, vlen);
+    write_ogg_page(fout, 0x00, 0, serial_no, seq_no, {tags});
+
+    const int frame_size = 960; // 20ms at 48kHz (50 frames/sec)
+    const int avg_frame_bytes = std::max(10, bitrate_bps / (50 * 8));
+    const int max_frame_bytes = std::min(1275, std::max(24, (avg_frame_bytes * 15) / 10));
+
+    std::vector<int16_t> pcm_buf(frame_size * channels, 0);
+    unsigned char pkt_buf[1500];
+    std::vector<std::vector<uint8_t>> page_pkts;
+    uint64_t granule_pos = preskip;
+    long read_bytes_total = 0;
+    int last_pct = -1;
+
+    while (true) {
+        size_t want_samples = frame_size * channels;
+        size_t got = fread(pcm_buf.data(), sizeof(int16_t), want_samples, fin);
+        if (got == 0) break;
+        read_bytes_total += got * sizeof(int16_t);
+        bool is_eof = (got < want_samples);
+        if (is_eof) {
+            memset(pcm_buf.data() + got, 0, (want_samples - got) * sizeof(int16_t));
+        }
+        int32_t nb = opus_encode(enc, pcm_buf.data(), frame_size, pkt_buf, max_frame_bytes);
+        if (nb < 0) { fclose(fin); fclose(fout); opus_encoder_destroy(enc); return 6; }
+
+        granule_pos += (got / channels);
+        page_pkts.emplace_back(pkt_buf, pkt_buf + nb);
+
+        if (is_eof || page_pkts.size() >= 25) {
+            int c = fgetc(fin);
+            if (c == EOF) is_eof = true;
+            else ungetc(c, fin);
+            write_ogg_page(fout, is_eof ? 0x04 : 0x00, granule_pos, serial_no, seq_no, page_pkts);
+            page_pkts.clear();
+            if (is_eof) break;
+        }
+
+        int pct = static_cast<int>((read_bytes_total * 100LL) / total_bytes);
+        if (pct != last_pct) {
+            last_pct = pct;
+            printf("progress %d%%\n", pct);
+            fflush(stdout);
+        }
+    }
+    if (!page_pkts.empty()) {
+        write_ogg_page(fout, 0x04, granule_pos, serial_no, seq_no, page_pkts);
+    }
+
+    fclose(fin);
+    fclose(fout);
+    opus_encoder_destroy(enc);
+    return 0;
+}
+'''
 
 
 def log(*a):
@@ -119,7 +309,6 @@ def load_all_packages():
 
 
 def load_contents_map():
-    """dosya-adi (basename) -> paket-adi haritasi ('.so' iceren yollarla sinirli)."""
     mapping = {}
     for bases, dist in REPOS:
         try:
@@ -201,12 +390,6 @@ def find_all_files(root, filename):
 
 
 def is_arm64_elf(path):
-    """Dosyanin gercekten ELF64 + AArch64 olup olmadigini dogrular.
-    Bazi paketler ayni dosya adini (ornegin libc++_shared.so) birden fazla
-    mimari icin farkli alt klasorlerde barindirabiliyor (NDK sysroot'unda
-    her ABI kendi klasorunde ayni isimle bulunur). os.walk sirasi garanti
-    olmadigindan, isme gore ilk eslesmeyi almak yanlislikla 32-bit (arm/i686)
-    bir kopyayi secip "is 32-bit instead of 64-bit" CRASH'ine yol acabilir."""
     try:
         out = subprocess.run(["readelf", "-h", path], capture_output=True, text=True, check=True).stdout
     except Exception:
@@ -220,7 +403,7 @@ def find_file(root, filename):
         if is_arm64_elf(c):
             return c
     if candidates:
-        log(f"UYARI: '{filename}' bulundu ({len(candidates)} aday) ama hicbiri ELF64/AArch64 degil (mimari uyumsuz).")
+        log(f"UYARI: '{filename}' bulundu ({len(candidates)} aday) ama hicbiri ELF64/AArch64 degil.")
     return None
 
 
@@ -229,7 +412,6 @@ def real_copy(src, dst):
 
 
 def get_needed(elf_path):
-    """`readelf -d` cikisindan NEEDED (Shared library) SONAME listesini doner."""
     try:
         out = subprocess.run(["readelf", "-d", elf_path], capture_output=True, text=True, check=True).stdout
     except Exception as e:
@@ -250,14 +432,44 @@ def set_rpath_origin(path):
         log(f"UYARI: patchelf rpath basarisiz ({path}): {e}")
 
 
-# --- BOYUT OPTIMIZASYONU: debug sembollerini temizleme -----------------------
-# Termux'tan gelen bazi kutuphaneler (ozellikle libc++_shared.so ~9.4 MB) "with
-# debug_info, not stripped" halde geliyor. Debug bilgisi calisma zamaninda HIC
-# kullanilmaz; sadece APK'yi ve cihazdaki kurulum boyutunu sisirir. Burada
-# sadece ".debug_*" bolumleri silinir (--strip-debug). Dinamik sembol tablosu,
-# NEEDED/SONAME kayitlari ve kod AYNEN kalir; yani islevsel hicbir fark olmaz.
-# Guvenlik: strip edilen kopya, NEEDED listesi birebir ayni cikmazsa KULLANILMAZ
-# (orijinal dosya korunur). Strip araci bulunamazsa adim sessizce atlanir.
+def find_ndk_cxx():
+    ndk_roots = []
+    for env in ("ANDROID_NDK_LATEST_HOME", "ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "ANDROID_NDK"):
+        v = os.environ.get(env)
+        if v and os.path.isdir(v):
+            ndk_roots.append(v)
+    for env in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        v = os.environ.get(env)
+        if v and os.path.isdir(v):
+            for d in sorted(glob.glob(os.path.join(v, "ndk", "*")), reverse=True):
+                if os.path.isdir(d):
+                    ndk_roots.append(d)
+            nb = os.path.join(v, "ndk-bundle")
+            if os.path.isdir(nb):
+                ndk_roots.append(nb)
+    for fallback_sdk in ("/usr/local/lib/android/sdk", "/opt/android-sdk"):
+        if os.path.isdir(fallback_sdk):
+            for d in sorted(glob.glob(os.path.join(fallback_sdk, "ndk", "*")), reverse=True):
+                if os.path.isdir(d):
+                    ndk_roots.append(d)
+
+    for root in ndk_roots:
+        bin_dir = os.path.join(root, "toolchains", "llvm", "prebuilt", "linux-x86_64", "bin")
+        if not os.path.isdir(bin_dir):
+            continue
+        for api in (26, 24, 27, 28, 29, 30, 31, 33, 34, 35, 21):
+            cand = os.path.join(bin_dir, f"aarch64-linux-android{api}-clang++")
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+        for cand in sorted(glob.glob(os.path.join(bin_dir, "aarch64-linux-android*-clang++"))):
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+    w = shutil.which("aarch64-linux-gnu-g++")
+    if w:
+        return w
+    return None
+
+
 def find_strip_tool():
     cands = []
     for env in ("ANDROID_NDK_LATEST_HOME", "ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "ANDROID_NDK"):
@@ -291,7 +503,7 @@ def has_debug_sections(path):
 def strip_debug_all(out_dir):
     tool = find_strip_tool()
     if not tool:
-        log("UYARI: strip araci bulunamadi; debug sembol temizligi atlandi (islevsel sorun yok).")
+        log("UYARI: strip araci bulunamadi; debug sembol temizligi atlandi.")
         return
     log(f"== Debug semboller temizleniyor ({tool}) ==")
     saved = 0
@@ -303,10 +515,8 @@ def strip_debug_all(out_dir):
         try:
             r = subprocess.run([tool, "--strip-debug", "-o", tmp, path], capture_output=True, text=True)
             if r.returncode != 0 or not os.path.isfile(tmp):
-                log(f"  UYARI: {fn} strip edilemedi, orijinal korunuyor.")
                 continue
             if get_needed(tmp) != get_needed(path):
-                log(f"  UYARI: {fn} strip sonrasi NEEDED degisti, orijinal korunuyor.")
                 continue
             before = os.path.getsize(path)
             after = os.path.getsize(tmp)
@@ -317,8 +527,8 @@ def strip_debug_all(out_dir):
             os.chmod(path, mode)
             saved += before - after
             log(f"  {fn}: {before} -> {after} bytes")
-        except Exception as e:
-            log(f"  UYARI: {fn} strip hatasi ({e}), orijinal korunuyor.")
+        except Exception:
+            pass
         finally:
             if os.path.exists(tmp):
                 try:
@@ -326,6 +536,91 @@ def strip_debug_all(out_dir):
                 except Exception:
                     pass
     log(f"  Toplam kazanc: {saved / (1024*1024):.1f} MB")
+
+
+def download_exhale_source(dest_root):
+    os.makedirs(dest_root, exist_ok=True)
+    for url in EXHALE_TARBALLS:
+        try:
+            log(f"  exhale kaynak arsivi indiriliyor: {url}")
+            data = fetch(url)
+            tar_path = os.path.join(WORK, "exhale_src.tar.gz")
+            with open(tar_path, "wb") as f:
+                f.write(data)
+            with tarfile.open(tar_path, mode="r:*") as t:
+                t.extractall(dest_root)
+            for dirpath, dirnames, _ in os.walk(dest_root):
+                if "src" in dirnames and "include" in dirnames:
+                    return dirpath
+        except Exception as e:
+            log(f"  UYARI: {url} indirilemedi ({e})")
+
+    for git_url in EXHALE_GIT_REPOS:
+        try:
+            log(f"  exhale git klonlaniyor: {git_url}")
+            clone_dir = os.path.join(dest_root, "git_exhale")
+            if os.path.exists(clone_dir):
+                shutil.rmtree(clone_dir)
+            r = subprocess.run(["git", "clone", "--depth", "1", git_url, clone_dir], capture_output=True, text=True)
+            if r.returncode == 0 and os.path.isdir(os.path.join(clone_dir, "src")):
+                return clone_dir
+        except Exception as e:
+            log(f"  UYARI: git clone {git_url} basarisiz ({e})")
+    return None
+
+
+def build_exhale_binary(cxx, out_path):
+    log("== Gercek xHE-AAC (USAC / mp4a-40-42) encoder (libexhale.so) derleniyor ==")
+    src_root = download_exhale_source(os.path.join(WORK, "exhale_src"))
+    if not src_root:
+        raise RuntimeError("exhale kaynak kodu indirilemedi!")
+
+    inc_dir = os.path.join(src_root, "include")
+    lib_dir = os.path.join(src_root, "src", "lib")
+    app_dir = os.path.join(src_root, "src", "app")
+    cpp_files = sorted(glob.glob(os.path.join(lib_dir, "*.cpp")) + glob.glob(os.path.join(app_dir, "*.cpp")))
+    if not cpp_files:
+        raise RuntimeError(f"exhale icinde .cpp dosyalari bulunamadi: {src_root}")
+
+    flag_sets = [
+        ["-std=c++11", "-O3", "-ffast-math", "-funroll-loops", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG", "-DBA_MORE_CBR=1"],
+        ["-std=c++11", "-O3", "-ffast-math", "-funroll-loops", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG"],
+        ["-std=c++11", "-O2", "-fPIE", "-pie", "-DNDEBUG"],
+    ]
+    last_err = ""
+    for flags in flag_sets:
+        cmd = [cxx] + flags + [f"-I{inc_dir}", f"-I{lib_dir}", f"-I{app_dir}"] + cpp_files + ["-lm", "-o", out_path]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.isfile(out_path) and is_arm64_elf(out_path):
+            os.chmod(out_path, 0o755)
+            log(f"  libexhale.so basariyla derlendi ({os.path.getsize(out_path)} bytes).")
+            return
+        last_err = r.stderr
+    raise RuntimeError(f"libexhale.so derlenemedi: {last_err}")
+
+
+def build_opusenc_binary(cxx, libopus_so_path, out_path):
+    log("== Temiz Ogg/Opus encoder (libopusenc.so) derleniyor ==")
+    cpp_path = os.path.join(WORK, "opus_wav_enc.cpp")
+    with open(cpp_path, "w", encoding="utf-8") as f:
+        f.write(OPUS_WAV_ENC_CPP)
+
+    lib_dir = os.path.dirname(libopus_so_path)
+    lib_name = os.path.basename(libopus_so_path)
+    flag_sets = [
+        ["-std=c++11", "-O2", "-fno-fast-math", "-fPIE", "-pie", "-static-libstdc++"],
+        ["-std=c++11", "-O2", "-fno-fast-math", "-fPIE", "-pie"],
+    ]
+    last_err = ""
+    for flags in flag_sets:
+        cmd = [cxx] + flags + [cpp_path, f"-L{lib_dir}", f"-l:{lib_name}", "-lm", "-o", out_path]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.isfile(out_path) and is_arm64_elf(out_path):
+            os.chmod(out_path, 0o755)
+            log(f"  libopusenc.so basariyla derlendi ({os.path.getsize(out_path)} bytes).")
+            return
+        last_err = r.stderr
+    raise RuntimeError(f"libopusenc.so derlenemedi: {last_err}")
 
 
 def main():
@@ -368,13 +663,7 @@ def main():
     os.chmod(os.path.join(OUT_DIR, "libmkvextract.so"), 0o755)
     log("  libmkvmerge.so / libmkvextract.so kopyalandi.")
 
-    # --- Ozyinemeli bagimlilik cozumlemesi ---
-    log("== Calisma-zamani bagimliliklari ozyinemeli olarak cozumleniyor ==")
     extracted_pkg_cache = {"mkvtoolnix": extracted}
-    resolved_sonames = {"libmkvmerge.so", "libmkvextract.so"}
-    unresolved_sonames = set()
-    queue = [os.path.join(OUT_DIR, "libmkvmerge.so"), os.path.join(OUT_DIR, "libmkvextract.so")]
-    processed_files = set()
 
     def ensure_package_extracted(pkg_name):
         if pkg_name in extracted_pkg_cache:
@@ -390,6 +679,42 @@ def main():
             dest = None
         extracted_pkg_cache[pkg_name] = dest
         return dest
+
+    # --- Android NDK C++ derleyicisini bul ---
+    cxx = find_ndk_cxx()
+    if not cxx:
+        log("HATA: Android NDK aarch64 clang++ derleyicisi bulunamadi!")
+        sys.exit(1)
+    log(f"== AArch64 C++ derleyici bulundu: {cxx} ==")
+
+    # --- 1) libexhale.so (Gercek xHE-AAC mp4a-40-42 encoder) derle ---
+    exhale_dst = os.path.join(OUT_DIR, "libexhale.so")
+    build_exhale_binary(cxx, exhale_dst)
+
+    # --- 2) Termux resmi libopus.so'yu indir ve libopusenc.so'yu derle ---
+    opus_pkg = contents_map.get("libopus.so", "libopus")
+    opus_root = ensure_package_extracted(opus_pkg)
+    if not opus_root:
+        log(f"HATA: '{opus_pkg}' paketi indirilemedi.")
+        sys.exit(1)
+    opus_so_src = find_file(opus_root, "libopus.so")
+    if not opus_so_src:
+        log("HATA: libopus.so pakette bulunamadi.")
+        sys.exit(1)
+    opus_so_dst = os.path.join(OUT_DIR, "libopus.so")
+    real_copy(opus_so_src, opus_so_dst)
+    log(f"  + libopus.so (paket: {opus_pkg})")
+
+    opusenc_dst = os.path.join(OUT_DIR, "libopusenc.so")
+    build_opusenc_binary(cxx, opus_so_dst, opusenc_dst)
+
+    # --- Ozyinemeli bagimlilik cozumlemesi ---
+    log("== Calisma-zamani bagimliliklari ozyinemeli olarak cozumleniyor ==")
+    ENTRY_POINTS = {"libmkvmerge.so", "libmkvextract.so", "libexhale.so", "libopusenc.so"}
+    resolved_sonames = set(ENTRY_POINTS) | {"libopus.so"}
+    unresolved_sonames = set()
+    queue = [os.path.join(OUT_DIR, fn) for fn in resolved_sonames]
+    processed_files = set()
 
     while queue:
         current = queue.pop()
@@ -427,7 +752,7 @@ def main():
             unresolved_sonames.discard(soname)
             queue.append(dst)
 
-    # --- Ilk dogrulama: ozyinemeli cozumleme gercekten tamamlandi mi? ---
+    # --- Ilk dogrulama ---
     log("== Ilk dogrulama: tum bagimliliklar karsilaniyor mu? ==")
     present = set(os.listdir(OUT_DIR))
     still_missing = set()
@@ -443,38 +768,14 @@ def main():
         log("HATA: asagidaki paylasimli kutuphaneler cozumlenemedi:")
         for s in sorted(all_missing):
             log(f"    - {s}")
-        log("APK bu haliyle derlense bile mkvmerge/mkvextract calisma zamaninda CRASH olur.")
         sys.exit(1)
 
-    # --- Boyut optimizasyonu: debug sembolleri (patchelf'ten ONCE) ---
     strip_debug_all(OUT_DIR)
 
-    # --- IZOLASYON: projede ffmpeg-kit (com.moizhassan.ffmpeg:ffmpeg-kit-16kb) da
-    # kendi native .so dosyalarini AYNI jniLibs/arm64-v8a klasorune koyuyor, ve
-    # build.gradle.kts'teki `pickFirsts += "**/*.so"` ayari YUZUNDEN, eger iki
-    # ayri kutuphane (Termux'tan gelen mkvmerge bagimliligi ile ffmpeg-kit'in
-    # kendi bagimliligi) AYNI DOSYA ADINA sahipse, Gradle bunlardan birini
-    # SESSIZCE atar. Bu; ffmpeg-kit'in kendi kutuphanesinin bizim (farkli
-    # derlenmis) surumumuzle degismesine ve video secilir secilmez FFprobeKit
-    # cagrisinda CRASH'e yol acabilir.
-    #
-    # KALICI COZUM: giris noktalari (libmkvmerge.so / libmkvextract.so) HARIC
-    # tum bagimliliklari benzersiz bir onekle yeniden adlandirip, bunlara
-    # referans veren NEEDED kayitlarini patchelf --replace-needed ile
-    # guncelliyoruz. Boylece hicbir ortak isim ffmpeg-kit'in (ya da baska bir
-    # kutuphanenin) dosyalariyla ASLA cakismaz.
     log("== ffmpeg-kit ile isim cakismasini onlemek icin bagimliliklar izole ediliyor ==")
     PREFIX = "muxtn_"
-    ENTRY_POINTS = {"libmkvmerge.so", "libmkvextract.so"}
 
     def strip_so_version(fn):
-        # ONEMLI: "libz.so.1", "libmatroska.so.90", "libboost_x.so.1.83.0" gibi
-        # Linux/glibc tarzi VERSIYONLU soname'ler Android'de GECERSIZDIR.
-        # Android'in paket yoneticisi, APK icindeki lib/<abi>/ klasorunden SADECE
-        # tam olarak ".so" ile biten dosyalari nativeLibraryDir'e cikarir; ".so.1"
-        # gibi ekstra son eki olan dosyalar APK'nin icinde fiziksel olarak var
-        # olsa bile cihaza HIC COPYALANMAZ ve linker "not found" hatasi verir.
-        # Bu yuzden her dosya adini ilk ".so" ile bitecek sekilde kesiyoruz.
         idx = fn.find(".so")
         if idx == -1:
             return fn
@@ -521,19 +822,15 @@ def main():
     for old_name, new_name in sorted(rename_map.items()):
         log(f"  {old_name}  ->  {new_name}")
 
-    # Guvenlik agi: OUT_DIR'de artik ".so" ile bitmeyen HICBIR dosya kalmamali
-    # (giris noktalari zaten "libmkvmerge.so"/"libmkvextract.so" ile bitiyor).
     for fn in os.listdir(OUT_DIR):
         if not fn.endswith(".so"):
-            log(f"HATA: '{fn}' hala '.so' ile bitmiyor; Android bu dosyayi cihaza cikarmayacaktir.")
+            log(f"HATA: '{fn}' hala '.so' ile bitmiyor.")
             sys.exit(1)
 
-    # --- Tum dosyalara rpath=$ORIGIN (savunma amacli, LD_LIBRARY_PATH'e ek olarak) ---
     log("== rpath=$ORIGIN tum .so dosyalarina yaziliyor ==")
     for fn in os.listdir(OUT_DIR):
         set_rpath_origin(os.path.join(OUT_DIR, fn))
 
-    # --- Son dogrulama: yeniden adlandirma sonrasi hala her sey tutarli mi? ---
     log("== Son dogrulama: yeniden adlandirma sonrasi butunluk kontrolu ==")
     present_final = set(os.listdir(OUT_DIR))
     final_missing = set()

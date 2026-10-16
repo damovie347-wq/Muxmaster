@@ -11,17 +11,10 @@ import java.io.File
 import java.io.InputStreamReader
 import kotlin.coroutines.coroutineContext
 
-// mkvmerge / mkvextract MKVToolNix ikilileri APK icine "native library" olarak
-// gomuludur (app/src/main/jniLibs/arm64-v8a/ - CI derleme sirasinda
-// scripts/fetch_mkvtoolnix_assets.py tarafindan yerlestirilir, libmkvmerge.so
-// ve libmkvextract.so adlariyla).
-//
-// ONEMLI: Android 10+ (API 29+), uygulamanin KENDI YAZDIGI (assets'ten kopyalayip
-// chmod +x yaptigi) dosyalari calistirmasini guvenlik geregi ENGELLER (W^X kurali,
-// "Permission denied" / error=13 ile sonuclanir). Bu kisitlama SADECE APK kurulurken
-// sistemin kendisinin cikardigi native library dizinini (nativeLibraryDir) muaf
-// tutar. Bu yuzden dosyalar assets yerine jniLibs ile gomulur; ekstra kopyalama/
-// chmod adimina hic gerek yoktur, Android bunu kurulumda otomatik yapar.
+// mkvmerge / mkvextract (MKVToolNix), exhale (gerçek ISO/IEC 23003-3 USAC / xHE-AAC mp4a-40-42
+// kodlayıcı) ve opusenc (Termux resmi libopus tabanlı temiz Ogg/Opus kodlayıcı) ikilileri
+// APK içine "native library" olarak gömülüdür (app/src/main/jniLibs/arm64-v8a/ - CI derleme
+// sırasında scripts/fetch_mkvtoolnix_assets.py tarafından yerleştirilir).
 object NativeTools {
 
     data class ExecResult(val exitCode: Int, val output: String)
@@ -41,6 +34,22 @@ object NativeTools {
 
     fun mkvextractPath(context: Context): String {
         return File(libDir(context), "libmkvextract.so").absolutePath
+    }
+
+    fun exhalePath(context: Context): String {
+        return File(libDir(context), "libexhale.so").absolutePath
+    }
+
+    fun hasExhale(context: Context): Boolean {
+        return File(libDir(context), "libexhale.so").canExecute()
+    }
+
+    fun opusencPath(context: Context): String {
+        return File(libDir(context), "libopusenc.so").absolutePath
+    }
+
+    fun hasOpusenc(context: Context): Boolean {
+        return File(libDir(context), "libopusenc.so").canExecute()
     }
 
     suspend fun run(
@@ -67,16 +76,6 @@ object NativeTools {
             pb.environment().put("LD_LIBRARY_PATH", dir.absolutePath)
             pb.redirectErrorStream(true)
 
-            // KOK NEDEN (arka planda hala yavas kalabiliyordu): mkvmerge/mkvextract
-            // ayri bir OS prosesi olarak fork+exec ile baslatiliyor ve nice (oncelik)
-            // degerini baslatan thread'den miras alir. Uygulama arka plana alindiginda
-            // varsayilan nice degeriyle baslayan bu processler, ayni cgroup icindeki
-            // diger islerle CPU paylasiminda geride kalabiliyordu. Baslatmadan hemen
-            // once bu thread'i izin verilen en yuksek oncelige (THREAD_PRIORITY_URGENT_AUDIO,
-            // root gerektirmeyen en dusuk/en yuksek oncelikli nice degeri) cekiyoruz;
-            // yeni process bu onceligi devralarak ayni cgroup icinde daha fazla CPU
-            // zamani alir. Islem baslar baslamaz thread onceligini eski haline donduruyoruz
-            // ki IO thread pool'daki bu thread baska islerde etkilenmesin.
             val callerTid = AndroidProcess.myTid()
             val previousPriority = runCatching { AndroidProcess.getThreadPriority(callerTid) }.getOrDefault(AndroidProcess.THREAD_PRIORITY_DEFAULT)
             runCatching { AndroidProcess.setThreadPriority(callerTid, AndroidProcess.THREAD_PRIORITY_URGENT_AUDIO) }

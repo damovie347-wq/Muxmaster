@@ -64,14 +64,14 @@ jobs:
         with:
           gradle-version: 8.5
 
-      - name: mkvmerge/mkvextract (MKVToolNix) binary'lerini indir ve jniLibs'e göm
+      - name: Native binary'leri (mkvmerge, mkvextract, exhale xHE-AAC, opusenc) hazırla ve jniLibs'e göm
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y binutils zstd xz-utils patchelf
-          sudo apt-get install -y binutils-aarch64-linux-gnu || echo "Uyari: aarch64 strip kurulamadi; NDK llvm-strip kullanilacak."
+          sudo apt-get install -y binutils zstd xz-utils patchelf git
+          sudo apt-get install -y binutils-aarch64-linux-gnu g++-aarch64-linux-gnu || echo "Uyari: aarch64 cross-toolchain kurulamadi; NDK llvm kullanilacak."
           python3 scripts/fetch_mkvtoolnix_assets.py
 
-      - name: Release APK derle (minify açık, ffmpeg-kit + mkvtoolnix native dosyaları dahil)
+      - name: Release APK derle (minify açık, ffmpeg-kit + mkvtoolnix + exhale + opusenc native dosyaları dahil)
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: APK'yı indirilebilir artifact olarak yükle
