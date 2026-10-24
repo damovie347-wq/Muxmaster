@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.os.Process as AndroidProcess
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.system.Os
 import androidx.compose.runtime.Immutable
@@ -23,6 +25,7 @@ import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -32,6 +35,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
+import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
 
@@ -75,6 +79,595 @@ data class ConvertQueueItem(
 
 /** Ses çıkışı kanal seçimi. */
 enum class ChannelMode { AUTO, MONO, STEREO }
+
+/**
+ * Hem Ses Dönüştürücü ekranı (`ConverterViewModel`) hem de Mux ekranındaki yerinde
+ * "Sesi Dönüştür" özelliği (`MuxViewModel`) tarafından ortak kullanılan yüksek hızlı
+ * ses dönüştürme motoru.
+ */
+object AudioConversionEngine {
+
+    data class ConversionOutcome(
+        val ok: Boolean,
+        val effectiveKbps: Int,
+        val outputChannels: Int,
+        val returnCode: Int? = 0
+    )
+
+    private data class ExhaleConfig(val preset: String, val sampleRate: Int, val channels: Int)
+
+    fun calculateBpsForFileSize(durationMs: Long, targetBytes: Long, format: OutputFormat): Int {
+        val durationSec = (durationMs / 1000.0).coerceAtLeast(1.0)
+        val overheadBytes = when (format) {
+            OutputFormat.OPUS -> 1024L + (132.0 * durationSec).toLong()
+            OutputFormat.MP3 -> 512L + (18.0 * durationSec).toLong()
+            OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2, OutputFormat.XHE_AAC -> 1536L + (95.0 * durationSec).toLong()
+        }
+        val minBps = when (format) {
+            OutputFormat.OPUS -> 6_000
+            OutputFormat.XHE_AAC -> 12_000
+            OutputFormat.MP3 -> 8_000
+            OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2 -> 12_000
+        }
+        val maxBps = when (format) {
+            OutputFormat.OPUS -> 510_000
+            OutputFormat.MP3 -> 320_000
+            OutputFormat.XHE_AAC -> 192_000
+            OutputFormat.HE_AAC -> 160_000
+            OutputFormat.HE_AAC_V2 -> 64_000
+        }
+        val usableBytes = (targetBytes - overheadBytes).coerceAtLeast((durationSec * minBps / 8.0).toLong())
+        val rawBps = ((usableBytes * 8.0) / durationSec).roundToInt()
+        return rawBps.coerceIn(minBps, maxBps)
+    }
+
+    fun resolveOutputChannels(
+        format: OutputFormat,
+        targetBps: Int,
+        channelMode: ChannelMode,
+        sourceChannels: Int
+    ): Int {
+        val kbps = (targetBps / 1000.0).roundToInt()
+        val isV2 = format == OutputFormat.HE_AAC_V2 && channelMode != ChannelMode.MONO
+        return when {
+            format == OutputFormat.OPUS && targetBps < 24_000 -> 1
+            format == OutputFormat.MP3 && targetBps < 32_000 -> 1
+            channelMode == ChannelMode.MONO -> 1
+            channelMode == ChannelMode.STEREO -> 2
+            isV2 -> 2
+            format == OutputFormat.XHE_AAC && kbps <= 24 -> 1
+            format == OutputFormat.OPUS && targetBps < 32_000 -> 1
+            format == OutputFormat.MP3 && targetBps < 40_000 -> 1
+            format.isHeAac && targetBps < 24_000 -> 1
+            sourceChannels <= 1 -> 1
+            else -> 2
+        }
+    }
+
+    suspend fun convertAudioStream(
+        app: Application,
+        scope: CoroutineScope,
+        inputPath: String,
+        streamSelector: String = "0:a:0",
+        sourceChannels: Int,
+        durationMs: Long,
+        format: OutputFormat,
+        targetMode: TargetMode,
+        targetBps: Int,
+        targetBytes: Long?,
+        channelMode: ChannelMode,
+        tempOutput: File,
+        onProgress: (Int) -> Unit
+    ): ConversionOutcome {
+        MuxForegroundService.boostAllProcessThreads()
+        val outCh = resolveOutputChannels(format, targetBps, channelMode, sourceChannels)
+        var returnCodeVal: Int? = 0
+        val ok: Boolean = when (format) {
+            OutputFormat.XHE_AAC -> {
+                convertXheAac(
+                    app = app,
+                    scope = scope,
+                    inputPath = inputPath,
+                    streamSelector = streamSelector,
+                    sourceChannels = sourceChannels,
+                    channelMode = channelMode,
+                    targetBps = targetBps,
+                    durationMs = durationMs,
+                    tempOutput = tempOutput,
+                    onProgress = onProgress
+                )
+            }
+            OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2 -> {
+                convertHeAac(
+                    app = app,
+                    scope = scope,
+                    inputPath = inputPath,
+                    streamSelector = streamSelector,
+                    sourceChannels = sourceChannels,
+                    format = format,
+                    channelMode = channelMode,
+                    targetBps = targetBps,
+                    durationMs = durationMs,
+                    tempOutput = tempOutput,
+                    onProgress = onProgress
+                )
+            }
+            OutputFormat.OPUS -> {
+                convertOpus(
+                    app = app,
+                    scope = scope,
+                    inputPath = inputPath,
+                    streamSelector = streamSelector,
+                    sourceChannels = sourceChannels,
+                    channelMode = channelMode,
+                    targetMode = targetMode,
+                    targetBps = targetBps,
+                    targetBytes = targetBytes,
+                    durationMs = durationMs,
+                    tempOutput = tempOutput,
+                    onProgress = onProgress
+                )
+            }
+            OutputFormat.MP3 -> {
+                val args = buildMp3FfmpegArgs(
+                    inputPath = inputPath,
+                    streamSelector = streamSelector,
+                    sourceChannels = sourceChannels,
+                    channelMode = channelMode,
+                    targetBps = targetBps,
+                    outputPath = tempOutput.absolutePath
+                )
+                returnCodeVal = runFfmpegAsync(scope, args, durationMs, onProgress)
+                returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
+            }
+        }
+        val realDurSec = (durationMs / 1000.0).coerceAtLeast(1.0)
+        val actualKbps = if (ok && tempOutput.exists() && durationMs > 0L) {
+            ((tempOutput.length() * 8.0) / realDurSec / 1000.0).roundToInt().coerceAtLeast(6)
+        } else {
+            (targetBps / 1000.0).roundToInt().coerceAtLeast(6)
+        }
+        return ConversionOutcome(
+            ok = ok,
+            effectiveKbps = actualKbps,
+            outputChannels = outCh,
+            returnCode = returnCodeVal
+        )
+    }
+
+    private fun exhaleConfigsFor(targetBps: Int, mode: ChannelMode, sourceChannels: Int): List<ExhaleConfig> {
+        val kbps = (targetBps / 1000.0).roundToInt().coerceIn(10, 256)
+        val useMono = when (mode) {
+            ChannelMode.MONO -> true
+            ChannelMode.STEREO -> false
+            ChannelMode.AUTO -> kbps <= 24 || sourceChannels <= 1
+        }
+        val list = mutableListOf<ExhaleConfig>()
+        fun addCfg(preset: String, sr: Int, ch: Int) {
+            val c = ExhaleConfig(preset, sr, ch)
+            if (c !in list) list.add(c)
+        }
+
+        if (useMono) {
+            when {
+                kbps <= 13 -> {
+                    addCfg("a", 22050, 1)
+                    addCfg("0", 24000, 1)
+                    addCfg("a", 32000, 1)
+                }
+                kbps <= 17 -> {
+                    addCfg("0", 32000, 1)
+                    addCfg("a", 32000, 1)
+                    addCfg("a", 22050, 1)
+                }
+                kbps <= 21 -> {
+                    addCfg("a", 44100, 1)
+                    addCfg("b", 32000, 1)
+                    addCfg("a", 32000, 1)
+                }
+                kbps <= 26 -> {
+                    addCfg("b", 44100, 1)
+                    addCfg("c", 32000, 1)
+                    addCfg("1", 32000, 1)
+                }
+                kbps <= 30 -> {
+                    addCfg("c", 44100, 1)
+                    addCfg("1", 32000, 1)
+                }
+                kbps <= 35 -> {
+                    addCfg("1", 44100, 1)
+                    addCfg("d", 44100, 1)
+                }
+                kbps <= 44 -> addCfg("2", 44100, 1)
+                kbps <= 52 -> addCfg("3", 48000, 1)
+                kbps <= 60 -> addCfg("4", 48000, 1)
+                kbps <= 68 -> addCfg("5", 48000, 1)
+                kbps <= 76 -> addCfg("6", 48000, 1)
+                kbps <= 84 -> addCfg("7", 48000, 1)
+                kbps <= 92 -> addCfg("8", 48000, 1)
+                else -> addCfg("9", 48000, 1)
+            }
+            addCfg("a", 32000, 1)
+            addCfg("1", 32000, 1)
+        } else {
+            when {
+                kbps <= 26 -> {
+                    addCfg("a", 22050, 2)
+                    addCfg("0", 24000, 2)
+                    addCfg("a", 32000, 2)
+                }
+                kbps <= 34 -> {
+                    addCfg("a", 32000, 2)
+                    addCfg("0", 32000, 2)
+                    addCfg("a", 44100, 2)
+                }
+                kbps <= 43 -> {
+                    addCfg("a", 44100, 2)
+                    addCfg("b", 32000, 2)
+                    addCfg("1", 32000, 2)
+                }
+                kbps <= 52 -> {
+                    addCfg("b", 44100, 2)
+                    addCfg("1", 32000, 2)
+                }
+                kbps <= 59 -> {
+                    addCfg("c", 44100, 2)
+                    addCfg("1", 44100, 2)
+                }
+                kbps <= 68 -> {
+                    addCfg("1", 44100, 2)
+                    addCfg("d", 44100, 2)
+                }
+                kbps <= 75 -> {
+                    addCfg("e", 44100, 2)
+                    addCfg("2", 44100, 2)
+                }
+                kbps <= 88 -> {
+                    addCfg("2", 44100, 2)
+                    addCfg("f", 44100, 2)
+                }
+                kbps <= 104 -> {
+                    addCfg("3", 48000, 2)
+                    addCfg("g", 48000, 2)
+                }
+                kbps <= 120 -> addCfg("4", 48000, 2)
+                kbps <= 136 -> addCfg("5", 48000, 2)
+                kbps <= 152 -> addCfg("6", 48000, 2)
+                kbps <= 168 -> addCfg("7", 48000, 2)
+                kbps <= 184 -> addCfg("8", 48000, 2)
+                else -> addCfg("9", 48000, 2)
+            }
+            addCfg("a", 32000, 2)
+            addCfg("1", 44100, 2)
+        }
+        return list
+    }
+
+    private suspend fun convertXheAac(
+        app: Application,
+        scope: CoroutineScope,
+        inputPath: String,
+        streamSelector: String,
+        sourceChannels: Int,
+        channelMode: ChannelMode,
+        targetBps: Int,
+        durationMs: Long,
+        tempOutput: File,
+        onProgress: (Int) -> Unit
+    ): Boolean {
+        if (!NativeTools.hasExhale(app)) return false
+
+        val configs = exhaleConfigsFor(targetBps, channelMode, sourceChannels)
+        var lastWavKey = ""
+        val wavFile = File(tempOutput.parentFile, "xhe_in_${System.currentTimeMillis()}.wav")
+
+        try {
+            for (cfg in configs) {
+                val wavKey = "${cfg.sampleRate}_${cfg.channels}"
+                if (wavKey != lastWavKey || !wavFile.exists() || wavFile.length() <= 44L) {
+                    wavFile.delete()
+                    val wavArgs = arrayOf(
+                        "-y",
+                        "-err_detect", "ignore_err",
+                        "-i", inputPath,
+                        "-vn", "-sn", "-dn",
+                        "-map_metadata", "-1",
+                        "-map_chapters", "-1",
+                        "-map", streamSelector,
+                        "-ar", cfg.sampleRate.toString(),
+                        "-ac", cfg.channels.toString(),
+                        "-bitexact",
+                        "-c:a", "pcm_s16le",
+                        "-f", "wav",
+                        "-threads", "0",
+                        wavFile.absolutePath
+                    )
+                    val rc = runFfmpegAsync(scope, wavArgs, durationMs) { pct -> onProgress((pct * 35) / 100) }
+                    if (rc != 0 || !wavFile.exists() || wavFile.length() <= 44L) continue
+                    lastWavKey = wavKey
+                }
+
+                tempOutput.delete()
+                val realDurSec = ((wavFile.length() - 44L).toDouble() / (cfg.sampleRate * cfg.channels * 2.0)).coerceAtLeast(1.0)
+                val estOutBytes = ((targetBps / 8.0) * realDurSec).toLong().coerceAtLeast(8_192L)
+
+                val watcherJob = scope.launch(Dispatchers.IO) {
+                    var lastReported = -1
+                    while (isActive) {
+                        delay(200L)
+                        val cur = if (tempOutput.exists()) tempOutput.length() else 0L
+                        if (cur > 0L) {
+                            val pct = ((cur * 100L) / estOutBytes).toInt().coerceIn(1, 95)
+                            val mapped = 35 + (pct * 63) / 100
+                            if (mapped != lastReported) {
+                                lastReported = mapped
+                                scope.launch(Dispatchers.Main) { onProgress(mapped) }
+                            }
+                        }
+                    }
+                }
+
+                val res = try {
+                    NativeTools.run(
+                        app,
+                        NativeTools.exhalePath(app),
+                        listOf(cfg.preset, wavFile.absolutePath, tempOutput.absolutePath)
+                    )
+                } finally {
+                    watcherJob.cancel()
+                }
+
+                if (res.exitCode == 0 && tempOutput.exists() && tempOutput.length() > 256L) {
+                    onProgress(100)
+                    return true
+                }
+            }
+            return false
+        } finally {
+            runCatching { wavFile.delete() }
+        }
+    }
+
+    private suspend fun convertOpus(
+        app: Application,
+        scope: CoroutineScope,
+        inputPath: String,
+        streamSelector: String,
+        sourceChannels: Int,
+        channelMode: ChannelMode,
+        targetMode: TargetMode,
+        targetBps: Int,
+        targetBytes: Long?,
+        durationMs: Long,
+        tempOutput: File,
+        onProgress: (Int) -> Unit
+    ): Boolean {
+        val channels = when {
+            targetBps < 24_000 -> 1
+            channelMode == ChannelMode.MONO -> 1
+            channelMode == ChannelMode.STEREO -> 2
+            targetBps < 32_000 -> 1
+            sourceChannels <= 1 -> 1
+            else -> 2
+        }
+
+        val pcm = File(tempOutput.parentFile, "opus_pcm_${System.currentTimeMillis()}.raw")
+        try {
+            val pcmArgs = arrayOf(
+                "-y",
+                "-err_detect", "ignore_err",
+                "-i", inputPath,
+                "-vn", "-sn", "-dn",
+                "-map_metadata", "-1",
+                "-map_chapters", "-1",
+                "-map", streamSelector,
+                "-ar", "48000",
+                "-ac", channels.toString(),
+                "-c:a", "pcm_s16le",
+                "-f", "s16le",
+                "-threads", "0",
+                pcm.absolutePath
+            )
+            val rc = runFfmpegAsync(scope, pcmArgs, durationMs) { pct -> onProgress((pct * 35) / 100) }
+            if (rc != 0 || !pcm.exists() || pcm.length() <= 0L) return false
+
+            val realDurationMs = ((pcm.length().toDouble() / (48000.0 * channels * 2.0)) * 1000.0).toLong().coerceAtLeast(1000L)
+            val effectiveBps = if (targetMode == TargetMode.FILE_SIZE && targetBytes != null) {
+                calculateBpsForFileSize(realDurationMs, targetBytes, OutputFormat.OPUS)
+            } else {
+                targetBps.coerceIn(6_000, 510_000)
+            }
+
+            val expectedRawBytes = ((realDurationMs / 1000.0) * (effectiveBps / 8.0)).toLong().coerceAtLeast(4096L)
+            val maxAllowedBytes = (expectedRawBytes * 2L) + 65_536L
+
+            if (NativeTools.hasOpusenc(app)) {
+                tempOutput.delete()
+                val res = NativeTools.run(
+                    app,
+                    NativeTools.opusencPath(app),
+                    listOf(pcm.absolutePath, tempOutput.absolutePath, channels.toString(), effectiveBps.toString())
+                ) { pct ->
+                    scope.launch(Dispatchers.Main) { onProgress(35 + (pct * 65) / 100) }
+                }
+                if (res.exitCode == 0 && tempOutput.exists() && tempOutput.length() in 64L..maxAllowedBytes) {
+                    onProgress(100)
+                    return true
+                }
+            }
+
+            tempOutput.delete()
+            val fallbackArgs = arrayOf(
+                "-y",
+                "-f", "s16le",
+                "-ar", "48000",
+                "-ac", channels.toString(),
+                "-i", pcm.absolutePath,
+                "-c:a", "libopus",
+                "-application", "lowdelay",
+                "-vbr", "constrained",
+                "-frame_duration", "20",
+                "-compression_level", "6",
+                "-b:a", effectiveBps.toString(),
+                "-threads", "0",
+                tempOutput.absolutePath
+            )
+            val fbRc = runFfmpegAsync(scope, fallbackArgs, realDurationMs) { pct -> onProgress(35 + (pct * 65) / 100) }
+            return fbRc == 0 && tempOutput.exists() && tempOutput.length() in 64L..maxAllowedBytes
+        } finally {
+            runCatching { pcm.delete() }
+        }
+    }
+
+    private suspend fun convertHeAac(
+        app: Application,
+        scope: CoroutineScope,
+        inputPath: String,
+        streamSelector: String,
+        sourceChannels: Int,
+        format: OutputFormat,
+        channelMode: ChannelMode,
+        targetBps: Int,
+        durationMs: Long,
+        tempOutput: File,
+        onProgress: (Int) -> Unit
+    ): Boolean {
+        val isV2 = format == OutputFormat.HE_AAC_V2 && channelMode != ChannelMode.MONO
+        val channels = when (channelMode) {
+            ChannelMode.MONO -> 1
+            ChannelMode.STEREO -> 2
+            ChannelMode.AUTO -> when {
+                isV2 -> 2
+                targetBps < 24_000 -> 1
+                sourceChannels <= 1 -> 1
+                else -> 2
+            }
+        }
+        val sampleRate = if (targetBps < 24_000) 32000 else 44100
+        val loBps = if (isV2) 14_000 else if (channels == 1) 12_000 else 20_000
+        val hiBps = if (isV2) 64_000 else if (channels == 1) 96_000 else 160_000
+        val effectiveBps = targetBps.coerceIn(loBps, hiBps)
+
+        val pcm = File(tempOutput.parentFile, "pcm_${System.currentTimeMillis()}.raw")
+        try {
+            val args = arrayOf(
+                "-y",
+                "-err_detect", "ignore_err",
+                "-i", inputPath,
+                "-vn", "-sn", "-dn",
+                "-map_metadata", "-1",
+                "-map_chapters", "-1",
+                "-map", streamSelector,
+                "-ar", sampleRate.toString(),
+                "-ac", channels.toString(),
+                "-c:a", "pcm_s16le",
+                "-f", "s16le",
+                "-threads", "0",
+                pcm.absolutePath
+            )
+            val rc = runFfmpegAsync(scope, args, durationMs) { pct -> onProgress((pct * 35) / 100) }
+            if (rc != 0 || !pcm.exists() || pcm.length() <= 0L) return false
+
+            val profile = if (isV2) HeAacEncoder.PROFILE_HE_V2 else HeAacEncoder.PROFILE_HE
+            val callerJob = coroutineContext[Job]
+            return withContext(Dispatchers.Default) {
+                MuxForegroundService.boostAllProcessThreads()
+                HeAacEncoder.encodeBps(
+                    pcmFile = pcm,
+                    outFile = tempOutput,
+                    sampleRate = sampleRate,
+                    channels = channels,
+                    bitrateBps = effectiveBps,
+                    profile = profile,
+                    onProgress = { pct -> scope.launch(Dispatchers.Main) { onProgress(35 + (pct * 65) / 100) } },
+                    isCancelled = { callerJob?.isActive == false }
+                ) && tempOutput.exists() && tempOutput.length() > 0L
+            }
+        } finally {
+            runCatching { pcm.delete() }
+        }
+    }
+
+    private fun buildMp3FfmpegArgs(
+        inputPath: String,
+        streamSelector: String,
+        sourceChannels: Int,
+        channelMode: ChannelMode,
+        targetBps: Int,
+        outputPath: String
+    ): Array<String> {
+        val clampedBps = targetBps.coerceIn(8_000, 320_000)
+        val acValue: String = when {
+            clampedBps < 32_000 -> "1"
+            channelMode == ChannelMode.MONO -> "1"
+            channelMode == ChannelMode.STEREO -> "2"
+            clampedBps < 40_000 -> "1"
+            sourceChannels <= 1 -> "1"
+            else -> "2"
+        }
+        val sampleRate: String = when {
+            clampedBps < 16_000 -> "16000"
+            clampedBps < 32_000 -> "24000"
+            clampedBps < 48_000 -> "32000"
+            else -> "44100"
+        }
+        return arrayOf(
+            "-y",
+            "-err_detect", "ignore_err",
+            "-i", inputPath,
+            "-vn", "-sn", "-dn",
+            "-map_metadata", "-1",
+            "-map_chapters", "-1",
+            "-map", streamSelector,
+            "-ar", sampleRate,
+            "-ac", acValue,
+            "-c:a", "libmp3lame",
+            "-write_xing", "1",
+            "-b:a", clampedBps.toString(),
+            "-threads", "0",
+            outputPath
+        )
+    }
+
+    suspend fun runFfmpegAsync(
+        scope: CoroutineScope,
+        args: Array<String>,
+        durationMs: Long,
+        onProgress: (Int) -> Unit
+    ): Int? = suspendCancellableCoroutine { cont ->
+        val callerTid = AndroidProcess.myTid()
+        runCatching { AndroidProcess.setThreadPriority(callerTid, AndroidProcess.THREAD_PRIORITY_URGENT_AUDIO) }
+        MuxForegroundService.boostAllProcessThreads()
+
+        var lastPct = -1
+        var lastEmitMs = 0L
+        var boostedWorkers = false
+
+        val session = FFmpegKit.executeWithArgumentsAsync(
+            args,
+            { completedSession ->
+                val rc = completedSession.returnCode?.value
+                if (cont.isActive) cont.resume(rc)
+            },
+            null
+        ) { stats ->
+            if (!boostedWorkers) {
+                boostedWorkers = true
+                MuxForegroundService.boostAllProcessThreads()
+            }
+            if (durationMs > 0) {
+                val pct = ((stats.time.toFloat() / durationMs) * 100f).toInt().coerceIn(0, 100)
+                val now = SystemClock.elapsedRealtime()
+                if (pct != lastPct && (now - lastEmitMs >= 150L || pct == 0 || pct == 100)) {
+                    lastPct = pct
+                    lastEmitMs = now
+                    scope.launch(Dispatchers.Main) { onProgress(pct) }
+                }
+            }
+        }
+        cont.invokeOnCancellation { runCatching { session.cancel() } }
+    }
+}
 
 class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
 
@@ -192,36 +785,9 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         TargetMode.FILE_SIZE -> parseTargetSizeBytes() != null
     }
 
-    /**
-     * Hedef dosya boyutu (KB / MB) modunda dosyanın süresine ve konteyner üstbilgi payına göre
-     * gereken tam bit/saniye (bps) değerini hesaplar.
-     */
-    fun calculateBpsForFileSize(durationMs: Long, targetBytes: Long, format: OutputFormat = outputFormat): Int {
-        val durationSec = (durationMs / 1000.0).coerceAtLeast(1.0)
-        val overheadBytes = when (format) {
-            OutputFormat.OPUS -> 1024L + (132.0 * durationSec).toLong()
-            OutputFormat.MP3 -> 512L + (18.0 * durationSec).toLong()
-            OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2, OutputFormat.XHE_AAC -> 1536L + (95.0 * durationSec).toLong()
-        }
-        val minBps = when (format) {
-            OutputFormat.OPUS -> 6_000
-            OutputFormat.XHE_AAC -> 12_000
-            OutputFormat.MP3 -> 8_000
-            OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2 -> 12_000
-        }
-        val maxBps = when (format) {
-            OutputFormat.OPUS -> 510_000
-            OutputFormat.MP3 -> 320_000
-            OutputFormat.XHE_AAC -> 192_000
-            OutputFormat.HE_AAC -> 160_000
-            OutputFormat.HE_AAC_V2 -> 64_000
-        }
-        val usableBytes = (targetBytes - overheadBytes).coerceAtLeast((durationSec * minBps / 8.0).toLong())
-        val rawBps = ((usableBytes * 8.0) / durationSec).roundToInt()
-        return rawBps.coerceIn(minBps, maxBps)
-    }
+    fun calculateBpsForFileSize(durationMs: Long, targetBytes: Long, format: OutputFormat = outputFormat): Int =
+        AudioConversionEngine.calculateBpsForFileSize(durationMs, targetBytes, format)
 
-    /** UI'da seçili dosya için otomatik hesaplanan bitrate'i (kbps) göstermek üzere yardımcı. */
     fun previewAutoBitrateKbps(item: ConvertQueueItem): Int? {
         val targetBytes = parseTargetSizeBytes() ?: return null
         if (item.durationMs <= 0L) return null
@@ -392,30 +958,28 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                         )
                     }
 
-                    var returnCodeVal: Int? = 0
-                    val ok: Boolean = when (format) {
-                        OutputFormat.XHE_AAC -> {
-                            convertXheAac(item, targetBps, resolvedDurationMs, tempOutput, progressCb)
-                        }
-                        OutputFormat.HE_AAC, OutputFormat.HE_AAC_V2 -> {
-                            convertHeAac(item, format, targetBps, resolvedDurationMs, tempOutput, progressCb)
-                        }
-                        OutputFormat.OPUS -> {
-                            convertOpus(item, targetBps, targetBytes, resolvedDurationMs, tempOutput, progressCb)
-                        }
-                        OutputFormat.MP3 -> {
-                            val args = buildMp3FfmpegArgs(item, targetBps, tempOutput.absolutePath)
-                            returnCodeVal = runFfmpegAsync(args, resolvedDurationMs, progressCb)
-                            returnCodeVal == 0 && tempOutput.exists() && tempOutput.length() > 0L
-                        }
-                    }
+                    val outcome = AudioConversionEngine.convertAudioStream(
+                        app = app,
+                        scope = viewModelScope,
+                        inputPath = item.cachePath,
+                        streamSelector = "0:a:0",
+                        sourceChannels = item.sourceChannels,
+                        durationMs = resolvedDurationMs,
+                        format = format,
+                        targetMode = mode,
+                        targetBps = targetBps,
+                        targetBytes = targetBytes,
+                        channelMode = channelMode,
+                        tempOutput = tempOutput,
+                        onProgress = progressCb
+                    )
 
-                    if (!ok) {
+                    if (!outcome.ok) {
                         errorCount++
                         val errText = if (format == OutputFormat.XHE_AAC || format.isHeAac) {
                             app.getString(R.string.err_heaac_failed)
                         } else {
-                            app.getString(R.string.err_ffmpeg_code, (returnCodeVal ?: -1).toString())
+                            app.getString(R.string.err_ffmpeg_code, (outcome.returnCode ?: -1).toString())
                         }
                         updateQueueItem(item.id) { it.copy(status = ConvertStatus.ERROR, errorMessage = errText) }
                         runCatching { tempOutput.delete() }
@@ -470,306 +1034,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Gerçek xHE-AAC (ISO/IEC 23003-3 USAC / Kodek Kimliği: mp4a-40-42) kodlayıcı:
-     * APK içine gömülü `libexhale.so` ikilisini kullanarak MediaInfo'da:
-     *   Biçim: USAC
-     *   Ticari adı: xHE-AAC
-     *   Kodek Kimliği: mp4a-40-42
-     * olan gerçek xHE-AAC (.m4a) dosyası üretir.
-     */
-    private data class ExhaleConfig(val preset: String, val sampleRate: Int, val channels: Int)
-
-    private fun exhaleConfigsFor(targetBps: Int, mode: ChannelMode, sourceChannels: Int): List<ExhaleConfig> {
-        val kbps = (targetBps / 1000.0).roundToInt().coerceIn(10, 256)
-        val useMono = when (mode) {
-            ChannelMode.MONO -> true
-            ChannelMode.STEREO -> false
-            ChannelMode.AUTO -> kbps <= 24 || sourceChannels <= 1
-        }
-        val list = mutableListOf<ExhaleConfig>()
-        fun addCfg(preset: String, sr: Int, ch: Int) {
-            val c = ExhaleConfig(preset, sr, ch)
-            if (c !in list) list.add(c)
-        }
-
-        if (useMono) {
-            when {
-                kbps <= 13 -> {
-                    addCfg("a", 22050, 1)
-                    addCfg("0", 24000, 1)
-                    addCfg("a", 32000, 1)
-                }
-                kbps <= 17 -> {
-                    addCfg("0", 32000, 1)
-                    addCfg("a", 32000, 1)
-                    addCfg("a", 22050, 1)
-                }
-                kbps <= 21 -> {
-                    addCfg("a", 44100, 1)
-                    addCfg("b", 32000, 1)
-                    addCfg("a", 32000, 1)
-                }
-                kbps <= 26 -> {
-                    addCfg("b", 44100, 1)
-                    addCfg("c", 32000, 1)
-                    addCfg("1", 32000, 1)
-                }
-                kbps <= 30 -> {
-                    addCfg("c", 44100, 1)
-                    addCfg("1", 32000, 1)
-                }
-                kbps <= 35 -> {
-                    addCfg("1", 44100, 1)
-                    addCfg("d", 44100, 1)
-                }
-                kbps <= 44 -> addCfg("2", 44100, 1)
-                kbps <= 52 -> addCfg("3", 48000, 1)
-                kbps <= 60 -> addCfg("4", 48000, 1)
-                kbps <= 68 -> addCfg("5", 48000, 1)
-                kbps <= 76 -> addCfg("6", 48000, 1)
-                kbps <= 84 -> addCfg("7", 48000, 1)
-                kbps <= 92 -> addCfg("8", 48000, 1)
-                else -> addCfg("9", 48000, 1)
-            }
-            addCfg("a", 32000, 1)
-            addCfg("1", 32000, 1)
-        } else {
-            when {
-                kbps <= 26 -> {
-                    addCfg("a", 22050, 2)
-                    addCfg("0", 24000, 2)
-                    addCfg("a", 32000, 2)
-                }
-                kbps <= 34 -> {
-                    addCfg("a", 32000, 2)
-                    addCfg("0", 32000, 2)
-                    addCfg("a", 44100, 2)
-                }
-                kbps <= 43 -> {
-                    addCfg("a", 44100, 2)
-                    addCfg("b", 32000, 2)
-                    addCfg("1", 32000, 2)
-                }
-                kbps <= 52 -> {
-                    addCfg("b", 44100, 2)
-                    addCfg("1", 32000, 2)
-                }
-                kbps <= 59 -> {
-                    addCfg("c", 44100, 2)
-                    addCfg("1", 44100, 2)
-                }
-                kbps <= 68 -> {
-                    addCfg("1", 44100, 2)
-                    addCfg("d", 44100, 2)
-                }
-                kbps <= 75 -> {
-                    addCfg("e", 44100, 2)
-                    addCfg("2", 44100, 2)
-                }
-                kbps <= 88 -> {
-                    addCfg("2", 44100, 2)
-                    addCfg("f", 44100, 2)
-                }
-                kbps <= 104 -> {
-                    addCfg("3", 48000, 2)
-                    addCfg("g", 48000, 2)
-                }
-                kbps <= 120 -> addCfg("4", 48000, 2)
-                kbps <= 136 -> addCfg("5", 48000, 2)
-                kbps <= 152 -> addCfg("6", 48000, 2)
-                kbps <= 168 -> addCfg("7", 48000, 2)
-                kbps <= 184 -> addCfg("8", 48000, 2)
-                else -> addCfg("9", 48000, 2)
-            }
-            addCfg("a", 32000, 2)
-            addCfg("1", 44100, 2)
-        }
-        return list
-    }
-
-    private suspend fun convertXheAac(
-        item: ConvertQueueItem,
-        targetBps: Int,
-        durationMs: Long,
-        tempOutput: File,
-        onProgress: (Int) -> Unit
-    ): Boolean {
-        if (!NativeTools.hasExhale(app)) return false
-
-        val configs = exhaleConfigsFor(targetBps, channelMode, item.sourceChannels)
-        var lastWavKey = ""
-        val wavFile = File(tempOutput.parentFile, "xhe_in_${item.id}_${System.currentTimeMillis()}.wav")
-
-        try {
-            for (cfg in configs) {
-                val wavKey = "${cfg.sampleRate}_${cfg.channels}"
-                if (wavKey != lastWavKey || !wavFile.exists() || wavFile.length() <= 44L) {
-                    wavFile.delete()
-                    val wavArgs = arrayOf(
-                        "-y",
-                        "-err_detect", "ignore_err",
-                        "-i", item.cachePath,
-                        "-vn", "-sn", "-dn",
-                        "-map_metadata", "-1",
-                        "-map_chapters", "-1",
-                        "-map", "0:a:0",
-                        "-ar", cfg.sampleRate.toString(),
-                        "-ac", cfg.channels.toString(),
-                        "-bitexact",
-                        "-c:a", "pcm_s16le",
-                        "-f", "wav",
-                        "-threads", "0",
-                        wavFile.absolutePath
-                    )
-                    val rc = runFfmpegAsync(wavArgs, durationMs) { pct -> onProgress((pct * 35) / 100) }
-                    if (rc != 0 || !wavFile.exists() || wavFile.length() <= 44L) continue
-                    lastWavKey = wavKey
-                }
-
-                tempOutput.delete()
-                val realDurSec = ((wavFile.length() - 44L).toDouble() / (cfg.sampleRate * cfg.channels * 2.0)).coerceAtLeast(1.0)
-                val estOutBytes = ((targetBps / 8.0) * realDurSec).toLong().coerceAtLeast(8_192L)
-
-                val watcherJob = viewModelScope.launch(Dispatchers.IO) {
-                    while (isActive) {
-                        delay(120L)
-                        val cur = if (tempOutput.exists()) tempOutput.length() else 0L
-                        if (cur > 0L) {
-                            val pct = ((cur * 100L) / estOutBytes).toInt().coerceIn(1, 95)
-                            onProgress(35 + (pct * 63) / 100)
-                        }
-                    }
-                }
-
-                val res = try {
-                    NativeTools.run(
-                        app,
-                        NativeTools.exhalePath(app),
-                        listOf(cfg.preset, wavFile.absolutePath, tempOutput.absolutePath)
-                    )
-                } finally {
-                    watcherJob.cancel()
-                }
-
-                if (res.exitCode == 0 && tempOutput.exists() && tempOutput.length() > 256L) {
-                    onProgress(100)
-                    return true
-                }
-            }
-            return false
-        } finally {
-            runCatching { wavFile.delete() }
-        }
-    }
-
-    /**
-     * Opus kodlayıcı (6–510 kbps, özellikle 12–16 kbps düşük bitrate düzeltmesi):
-     * 1) Kaynak dosyayı FFmpeg ile tüm konteyner zaman damgası, kapak resmi ve meta verilerinden
-     *    arındırılmış ham 48 kHz 16-bit PCM'e (`pcm.raw`) çözer.
-     * 2) APK içine gömülü `libopusenc.so` (Termux'un resmi, `-fno-fast-math` ile derlenmiş ve
-     *    ffmpeg-kit'ten izole edilmiş `libmuxtn_opus.so` kütüphanesini kullanan kodlayıcı) ile
-     *    çerçeve boyutu üst sınırı (`max_frame_bytes`) denetimli olarak `.opus` üretir.
-     * 3) Böylece ffmpeg-kit'in bozuk SILK kodlayıcısı nedeniyle 16 kbps'de oluşan 6.5 MB'lık
-     *    bozuk dosya hatası %100 ortadan kaldırılır.
-     */
-    private suspend fun convertOpus(
-        item: ConvertQueueItem,
-        targetBps: Int,
-        targetBytes: Long?,
-        durationMs: Long,
-        tempOutput: File,
-        onProgress: (Int) -> Unit
-    ): Boolean {
-        val channels = when {
-            targetBps < 24_000 -> 1
-            channelMode == ChannelMode.MONO -> 1
-            channelMode == ChannelMode.STEREO -> 2
-            targetBps < 32_000 -> 1
-            item.sourceChannels == 1 -> 1
-            else -> 2
-        }
-
-        val pcm = File(tempOutput.parentFile, "opus_pcm_${item.id}_${System.currentTimeMillis()}.raw")
-        try {
-            val pcmArgs = arrayOf(
-                "-y",
-                "-err_detect", "ignore_err",
-                "-i", item.cachePath,
-                "-vn", "-sn", "-dn",
-                "-map_metadata", "-1",
-                "-map_chapters", "-1",
-                "-map", "0:a:0",
-                "-ar", "48000",
-                "-ac", channels.toString(),
-                "-c:a", "pcm_s16le",
-                "-f", "s16le",
-                "-threads", "0",
-                pcm.absolutePath
-            )
-            val rc = runFfmpegAsync(pcmArgs, durationMs) { pct -> onProgress((pct * 35) / 100) }
-            if (rc != 0 || !pcm.exists() || pcm.length() <= 0L) return false
-
-            val realDurationMs = ((pcm.length().toDouble() / (48000.0 * channels * 2.0)) * 1000.0).toLong().coerceAtLeast(1000L)
-            val effectiveBps = if (targetMode == TargetMode.FILE_SIZE && targetBytes != null) {
-                calculateBpsForFileSize(realDurationMs, targetBytes, OutputFormat.OPUS)
-            } else {
-                targetBps.coerceIn(6_000, 510_000)
-            }
-
-            val expectedRawBytes = ((realDurationMs / 1000.0) * (effectiveBps / 8.0)).toLong().coerceAtLeast(4096L)
-            val maxAllowedBytes = (expectedRawBytes * 2L) + 65_536L
-
-            // 1. Öncelik: Gömülü temiz libopusenc.so (Termux resmi libmuxtn_opus.so ile)
-            if (NativeTools.hasOpusenc(app)) {
-                tempOutput.delete()
-                val res = NativeTools.run(
-                    app,
-                    NativeTools.opusencPath(app),
-                    listOf(pcm.absolutePath, tempOutput.absolutePath, channels.toString(), effectiveBps.toString())
-                ) { pct ->
-                    viewModelScope.launch { onProgress(35 + (pct * 65) / 100) }
-                }
-                if (res.exitCode == 0 && tempOutput.exists() && tempOutput.length() in 64L..maxAllowedBytes) {
-                    onProgress(100)
-                    return true
-                }
-            }
-
-            // 2. Yedek: Ham PCM üzerinden saf CELT (-application lowdelay) ile FFmpeg
-            tempOutput.delete()
-            val fallbackArgs = arrayOf(
-                "-y",
-                "-f", "s16le",
-                "-ar", "48000",
-                "-ac", channels.toString(),
-                "-i", pcm.absolutePath,
-                "-c:a", "libopus",
-                "-application", "lowdelay",
-                "-vbr", "constrained",
-                "-frame_duration", "20",
-                "-compression_level", "6",
-                "-b:a", effectiveBps.toString(),
-                "-threads", "0",
-                tempOutput.absolutePath
-            )
-            val fbRc = runFfmpegAsync(fallbackArgs, realDurationMs) { pct -> onProgress(35 + (pct * 65) / 100) }
-            return fbRc == 0 && tempOutput.exists() && tempOutput.length() in 64L..maxAllowedBytes
-        } finally {
-            runCatching { pcm.delete() }
-        }
-    }
-
-    /**
-     * Çıktı dosyasını hedef klasöre güvenli şekilde yazar:
-     * 1) Önce doğrudan dosya sistemi yolunu (`resolveTreeFolderToFile`) dener: bu sayede Android
-     *    SAF'ın `audio/ogg` için `.opus` sonuna `.ogg` eklemesi veya eski 6.5 MB'lık dosyayı
-     *    kesmeden (truncate etmeden) üzerine yazması tamamen önlenir.
-     * 2) Hedef dosya kaynak dosyanın kendisiyse (aynı klasöre aynı uzantıyla kaydetme), kaynağın
-     *    üzerine yazmamak için dosya adına otomatik olarak `_16kbps` gibi sonek ekler.
-     * 3) SAF DocumentFile kullanıldığında da `Os.ftruncate` ile dosya boyutunu tam çıktı
-     *    boyutuna keser.
-     */
     private fun saveOutputToFolder(
         item: ConvertQueueItem,
         tempOutput: File,
@@ -782,7 +1046,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
         val expectedLen = tempOutput.length()
         if (expectedLen <= 0L) return false
 
-        // 1) Doğrudan yerel klasör erişimi (hızlı ve %100 kesin boyut/uzantı)
         val directFolder = resolveTreeFolderToFile(outFolder)
         if (directFolder != null && directFolder.isDirectory && directFolder.canWrite()) {
             try {
@@ -813,12 +1076,9 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                     )
                     return true
                 }
-            } catch (_: Throwable) {
-                // SAF DocumentFile yedek yoluna devam et
-            }
+            } catch (_: Throwable) { }
         }
 
-        // 2) SAF DocumentFile yolu
         return try {
             val tree = DocumentFile.fromTreeUri(app, outFolder) ?: return false
             var finalName = "$rawName.${format.extension}"
@@ -842,7 +1102,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            // "application/octet-stream" ile oluşturmak Android'in "song.opus" adına ".ogg" eklemesini önler
             val outDoc = tree.findFile(finalName)
                 ?: tree.createFile("application/octet-stream", finalName)
                 ?: tree.createFile(format.mimeType, finalName)
@@ -925,127 +1184,6 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
     private fun updateQueueItem(id: Long, transform: (ConvertQueueItem) -> ConvertQueueItem) {
         queue = queue.map { if (it.id == id) transform(it) else it }
     }
-
-    /**
-     * HE-AAC v1 / HE-AAC v2:
-     * 1) FFmpeg ile kaynak sesi kapak resmi ve meta verilerden arındırarak hızlıca ham PCM'e çevir,
-     * 2) Android MediaCodec (PROFILE_HE / PROFILE_HE_V2) ile tam hedef bps'te
-     *    yüksek öncelikle encode edip .m4a olarak yaz.
-     */
-    private suspend fun convertHeAac(
-        item: ConvertQueueItem,
-        format: OutputFormat,
-        targetBps: Int,
-        durationMs: Long,
-        tempOutput: File,
-        onProgress: (Int) -> Unit
-    ): Boolean {
-        val isV2 = format == OutputFormat.HE_AAC_V2 && channelMode != ChannelMode.MONO
-        val channels = when (channelMode) {
-            ChannelMode.MONO -> 1
-            ChannelMode.STEREO -> 2
-            ChannelMode.AUTO -> when {
-                isV2 -> 2
-                targetBps < 24_000 -> 1
-                item.sourceChannels == 1 -> 1
-                else -> 2
-            }
-        }
-        val sampleRate = if (targetBps < 24_000) 32000 else 44100
-        val loBps = if (isV2) 14_000 else if (channels == 1) 12_000 else 20_000
-        val hiBps = if (isV2) 64_000 else if (channels == 1) 96_000 else 160_000
-        val effectiveBps = targetBps.coerceIn(loBps, hiBps)
-
-        val pcm = File(tempOutput.parentFile, "pcm_${item.id}_${System.currentTimeMillis()}.raw")
-        try {
-            val args = arrayOf(
-                "-y",
-                "-err_detect", "ignore_err",
-                "-i", item.cachePath,
-                "-vn", "-sn", "-dn",
-                "-map_metadata", "-1",
-                "-map_chapters", "-1",
-                "-map", "0:a:0",
-                "-ar", sampleRate.toString(),
-                "-ac", channels.toString(),
-                "-c:a", "pcm_s16le",
-                "-f", "s16le",
-                "-threads", "0",
-                pcm.absolutePath
-            )
-            val rc = runFfmpegAsync(args, durationMs) { pct -> onProgress((pct * 35) / 100) }
-            if (rc != 0 || !pcm.exists() || pcm.length() <= 0L) return false
-
-            val profile = if (isV2) HeAacEncoder.PROFILE_HE_V2 else HeAacEncoder.PROFILE_HE
-            return withContext(Dispatchers.Default) {
-                HeAacEncoder.encodeBps(
-                    pcmFile = pcm,
-                    outFile = tempOutput,
-                    sampleRate = sampleRate,
-                    channels = channels,
-                    bitrateBps = effectiveBps,
-                    profile = profile,
-                    onProgress = { pct -> viewModelScope.launch { onProgress(35 + (pct * 65) / 100) } },
-                    isCancelled = { !isActive }
-                ) && tempOutput.exists() && tempOutput.length() > 0L
-            }
-        } finally {
-            runCatching { pcm.delete() }
-        }
-    }
-
-    private fun buildMp3FfmpegArgs(
-        item: ConvertQueueItem,
-        targetBps: Int,
-        outputPath: String
-    ): Array<String> {
-        val clampedBps = targetBps.coerceIn(8_000, 320_000)
-        val acValue: String = when {
-            clampedBps < 32_000 -> "1"
-            channelMode == ChannelMode.MONO -> "1"
-            channelMode == ChannelMode.STEREO -> "2"
-            clampedBps < 40_000 -> "1"
-            item.sourceChannels == 1 -> "1"
-            else -> "2"
-        }
-        val sampleRate: String = when {
-            clampedBps < 16_000 -> "16000"
-            clampedBps < 32_000 -> "24000"
-            clampedBps < 48_000 -> "32000"
-            else -> "44100"
-        }
-        return arrayOf(
-            "-y",
-            "-err_detect", "ignore_err",
-            "-i", item.cachePath,
-            "-vn", "-sn", "-dn",
-            "-map_metadata", "-1",
-            "-map_chapters", "-1",
-            "-map", "0:a:0",
-            "-ar", sampleRate,
-            "-ac", acValue,
-            "-c:a", "libmp3lame",
-            "-write_xing", "1",
-            "-b:a", clampedBps.toString(),
-            "-threads", "0",
-            outputPath
-        )
-    }
-
-    private suspend fun runFfmpegAsync(args: Array<String>, durationMs: Long, onProgress: (Int) -> Unit): Int? =
-        suspendCancellableCoroutine { cont ->
-            val session = FFmpegKit.executeWithArgumentsAsync(
-                args,
-                { completedSession -> val rc = completedSession.returnCode?.value; if (cont.isActive) cont.resume(rc) },
-                null
-            ) { stats ->
-                if (durationMs > 0) {
-                    val pct = ((stats.time.toFloat() / durationMs) * 100f).toInt().coerceIn(0, 100)
-                    viewModelScope.launch { onProgress(pct) }
-                }
-            }
-            cont.invokeOnCancellation { runCatching { session.cancel() } }
-        }
 
     private fun copyUriToCache(uri: Uri, fileName: String): String? =
         InputAccess.acquire(app, uri, File(app.cacheDir, "convert_work"), fileName, needChildRead = true)

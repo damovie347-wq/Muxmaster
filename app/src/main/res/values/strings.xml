@@ -6,6 +6,8 @@
     <string name="action_change">DEĞİŞTİR</string>
     <string name="action_close">Kapat</string>
     <string name="action_export">Dışa Aktar</string>
+    <string name="action_convert_audio">Sesi Dönüştür</string>
+    <string name="action_show_mux_bar">Mux Paneli</string>
 
     <!-- MuxScreen -->
     <string name="nav_converter_desc">Ses Dönüştürücü</string>
@@ -16,6 +18,11 @@
     <string name="add_subtitle_button">Altyazı Dosyası Ekle</string>
     <string name="empty_audio_hint">Bu videoda ses track\'i yok. + ile ekleyebilirsin.</string>
     <string name="empty_subtitle_hint">Bu videoda altyazı yok. + ile ekleyebilirsin.</string>
+    <string name="long_press_track_hint">İpucu: Parçaya basılı tut → Dışa Aktar / Sesi Dönüştür</string>
+    <string name="inplace_convert_title">Sesi Yerinde Dönüştür</string>
+    <string name="inplace_convert_action">DÖNÜŞTÜR VE DEĞİŞTİR (%1$s)</string>
+    <string name="track_convert_success">✅ Ses dönüştürüldü ve değiştirildi: %1$s (%2$d kbps)</string>
+    <string name="track_convert_failed">Ses dönüştürme başarısız oldu.</string>
 
     <!-- VideoCard -->
     <string name="video_analyzing">Video analiz ediliyor...</string>

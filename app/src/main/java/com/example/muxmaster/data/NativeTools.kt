@@ -2,6 +2,7 @@ package com.example.muxmaster.data
 
 import android.content.Context
 import android.os.Process as AndroidProcess
+import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -64,27 +65,45 @@ object NativeTools {
             if (cause is CancellationException) {
                 try {
                     process?.destroyForcibly()
-                } catch (e: Exception) {
-                }
+                } catch (_: Exception) { }
             }
         }
         try {
+            val callerTid = AndroidProcess.myTid()
+            val previousPriority = runCatching { AndroidProcess.getThreadPriority(callerTid) }
+                .getOrDefault(AndroidProcess.THREAD_PRIORITY_DEFAULT)
+            runCatching { AndroidProcess.setThreadPriority(callerTid, AndroidProcess.THREAD_PRIORITY_URGENT_AUDIO) }
+            MuxForegroundService.boostAllProcessThreads()
+
             val fullCommand = mutableListOf(binaryPath)
             fullCommand.addAll(args)
+
             val pb = ProcessBuilder(fullCommand)
             pb.directory(context.filesDir)
             pb.environment().put("LD_LIBRARY_PATH", dir.absolutePath)
             pb.redirectErrorStream(true)
 
-            val callerTid = AndroidProcess.myTid()
-            val previousPriority = runCatching { AndroidProcess.getThreadPriority(callerTid) }.getOrDefault(AndroidProcess.THREAD_PRIORITY_DEFAULT)
-            runCatching { AndroidProcess.setThreadPriority(callerTid, AndroidProcess.THREAD_PRIORITY_URGENT_AUDIO) }
             val p = try {
                 pb.start()
             } finally {
                 runCatching { AndroidProcess.setThreadPriority(callerTid, previousPriority) }
             }
             process = p
+
+            // Arka plandayken işletim sisteminin yeni alt süreci yavaş çekirdeklere (0..3)
+            // hapsetmesini önlemek için tüm çekirdeklerin (0xff) afinitesini aç.
+            runCatching {
+                val tasksetBin = File("/system/bin/taskset")
+                if (tasksetBin.canExecute()) {
+                    val pidField = p.javaClass.getDeclaredField("pid").apply { isAccessible = true }
+                    val childPid = pidField.getInt(p)
+                    if (childPid > 0) {
+                        ProcessBuilder("/system/bin/taskset", "-p", "-a", "ff", childPid.toString())
+                            .redirectErrorStream(true)
+                            .start()
+                    }
+                }
+            }
 
             val output = StringBuilder()
             val progressRegex = Regex("progress\\s+(\\d+)%")
@@ -95,12 +114,9 @@ object NativeTools {
                 var line: String?
                 while (true) {
                     line = r.readLine()
-                    if (line == null) {
-                        break
-                    }
-                    val l = line as String
-                    output.append(l)
-                    output.append("\n")
+                    if (line == null) break
+                    val l = line
+                    output.append(l).append("\n")
                     if (onProgress != null) {
                         val m = progressRegex.find(l)
                         val pct = m?.groupValues?.get(1)?.toIntOrNull()

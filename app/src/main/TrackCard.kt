@@ -8,6 +8,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -15,9 +16,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Subtitles
@@ -41,6 +44,8 @@ import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
 import com.example.muxmaster.model.TrackSource
 import com.example.muxmaster.ui.theme.*
+import kotlin.math.abs
+import kotlin.math.max
 
 private val LANGUAGE_CHOICES = listOf(
     "tur" to "TR", "eng" to "EN", "deu" to "DE", "fra" to "FR",
@@ -88,7 +93,8 @@ private fun TrackHeaderRow(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onRemove: () -> Unit,
-    onExport: () -> Unit
+    onExport: () -> Unit,
+    onConvertAudio: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -97,19 +103,29 @@ private fun TrackHeaderRow(
         Spacer(Modifier.width(10.dp))
         Box(modifier = Modifier.weight(1f)) {
             Column(
-                Modifier.combinedClickable(
-                    onClick = onToggleExpand,
-                    onLongClick = { showMenu = true }
-                )
+                Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = onToggleExpand,
+                        onLongClick = { showMenu = true }
+                    )
             ) {
                 Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
                 Text(subtitle, color = TextSec, fontSize = 12.sp, maxLines = 1)
             }
             DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                 DropdownMenuItem(
+                    leadingIcon = { Icon(Icons.Filled.FileDownload, null, tint = PurpleLight, modifier = Modifier.size(18.dp)) },
                     text = { Text(stringResource(R.string.action_export)) },
                     onClick = { showMenu = false; onExport() }
                 )
+                if (onConvertAudio != null) {
+                    DropdownMenuItem(
+                        leadingIcon = { Icon(Icons.Filled.Autorenew, null, tint = Green, modifier = Modifier.size(18.dp)) },
+                        text = { Text(stringResource(R.string.action_convert_audio), fontWeight = FontWeight.SemiBold) },
+                        onClick = { showMenu = false; onConvertAudio() }
+                    )
+                }
             }
         }
         IconButton(onClick = onToggleExpand, modifier = Modifier.size(32.dp)) {
@@ -133,7 +149,7 @@ private fun TrackHeaderRow(
     }
 }
 
-private const val DELAY_RANGE_MS = 10000f
+private const val DELAY_BASE_RANGE_MS = 10000f
 
 @Composable
 private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
@@ -141,12 +157,14 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     var isDragging by remember { mutableStateOf(false) }
 
+    val dynamicRange = remember(delayMs) { max(DELAY_BASE_RANGE_MS, abs(delayMs.toFloat()) * 1.2f) }
+
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.delay_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(40.dp))
 
         BoxWithConstraints(modifier = Modifier.weight(1f).padding(horizontal = 8.dp)) {
             Slider(
-                value = sliderValue,
+                value = sliderValue.coerceIn(-dynamicRange, dynamicRange),
                 onValueChange = { isDragging = true; sliderValue = it },
                 onValueChangeFinished = {
                     isDragging = false
@@ -154,13 +172,13 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
                     text = finalValue.toString()
                     onDelayChange(finalValue)
                 },
-                valueRange = -DELAY_RANGE_MS..DELAY_RANGE_MS,
+                valueRange = -dynamicRange..dynamicRange,
                 modifier = Modifier.fillMaxWidth(),
                 colors = SliderDefaults.colors(thumbColor = Purple, activeTrackColor = Purple)
             )
 
             if (isDragging) {
-                val fraction = ((sliderValue + DELAY_RANGE_MS) / (2 * DELAY_RANGE_MS)).coerceIn(0f, 1f)
+                val fraction = ((sliderValue + dynamicRange) / (2 * dynamicRange)).coerceIn(0f, 1f)
                 val bubbleWidth = 46.dp
                 val bubbleX = (maxWidth - bubbleWidth) * fraction
                 Box(
@@ -187,9 +205,8 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             onValueChange = { newVal ->
                 text = newVal
                 newVal.toLongOrNull()?.let { parsed ->
-                    val coerced = parsed.coerceIn(-10000, 10000)
-                    sliderValue = coerced.toFloat()
-                    onDelayChange(coerced)
+                    sliderValue = parsed.toFloat()
+                    onDelayChange(parsed)
                 }
             },
             modifier = Modifier.width(86.dp),
@@ -203,18 +220,35 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
 
 private const val GAIN_MAX_DB = 15f
 
+private fun dbToBoostPercent(db: Float): Float =
+    (100.0 * Math.pow(10.0, db / 20.0) - 100.0).toFloat()
+
+private fun percentToDb(percent: Float): Float =
+    (20.0 * Math.log10(1.0 + percent / 100.0)).toFloat()
+
 @Composable
 private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
+    var showPercent by remember { mutableStateOf(false) }
+    val maxPercent = remember { dbToBoostPercent(GAIN_MAX_DB) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.gain_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(90.dp))
         Slider(
-            value = gainDb,
-            onValueChange = onGainChange,
-            valueRange = 0f..GAIN_MAX_DB,
+            value = if (showPercent) dbToBoostPercent(gainDb) else gainDb,
+            onValueChange = { newVal -> onGainChange(if (showPercent) percentToDb(newVal) else newVal) },
+            valueRange = if (showPercent) 0f..maxPercent else 0f..GAIN_MAX_DB,
             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             colors = SliderDefaults.colors(thumbColor = Amber, activeTrackColor = Amber)
         )
-        Text("+%.1f dB".format(gainDb), color = TextSec, fontSize = 11.sp, modifier = Modifier.width(58.dp))
+        Text(
+            if (showPercent) "+%.0f%%".format(java.util.Locale.US, dbToBoostPercent(gainDb))
+            else "+%.1f dB".format(java.util.Locale.US, gainDb),
+            color = TextSec, fontSize = 11.sp, modifier = Modifier.width(58.dp)
+        )
+        Text(
+            if (showPercent) "%" else "dB",
+            color = Amber, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clickable { showPercent = !showPercent }.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
     }
 }
 
@@ -252,6 +286,7 @@ fun AudioTrackCard(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onExport: () -> Unit,
+    onConvertAudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -262,18 +297,25 @@ fun AudioTrackCard(
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
-                if (track.source == TrackSource.EXISTING) stringResource(R.string.audio_track_fallback_title, track.existingStreamIndex) else track.fileDisplayName
+                if (track.source == TrackSource.EXISTING) {
+                    stringResource(R.string.audio_track_fallback_title, track.existingStreamIndex)
+                } else {
+                    track.fileDisplayName
+                }
             }
-            val subtitle = if (track.source == TrackSource.EXISTING) {
+            val subtitle = if (track.existingCodec.isNotBlank()) {
                 "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
-            } else track.fileDisplayName
+            } else {
+                track.fileDisplayName
+            }
 
             TrackHeaderRow(
                 icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
                 expanded = expanded, onToggleExpand = onToggleExpand,
                 onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove,
-                onExport = onExport
+                onExport = onExport,
+                onConvertAudio = onConvertAudio
             )
 
             AnimatedVisibility(

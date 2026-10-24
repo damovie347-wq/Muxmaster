@@ -5,6 +5,8 @@
     <string name="action_change">CHANGE</string>
     <string name="action_close">Close</string>
     <string name="action_export">Export</string>
+    <string name="action_convert_audio">Convert Audio</string>
+    <string name="action_show_mux_bar">Mux Panel</string>
 
     <string name="nav_converter_desc">Audio Converter</string>
     <string name="nav_settings_desc">Settings</string>
@@ -14,6 +16,11 @@
     <string name="add_subtitle_button">Add Subtitle File</string>
     <string name="empty_audio_hint">This video has no audio track. Add one with +.</string>
     <string name="empty_subtitle_hint">This video has no subtitles. Add one with +.</string>
+    <string name="long_press_track_hint">Tip: Long-press track → Export / Convert Audio</string>
+    <string name="inplace_convert_title">Convert Audio In-Place</string>
+    <string name="inplace_convert_action">CONVERT &amp; REPLACE (%1$s)</string>
+    <string name="track_convert_success">✅ Audio converted and replaced: %1$s (%2$d kbps)</string>
+    <string name="track_convert_failed">Audio conversion failed.</string>
 
     <string name="video_analyzing">Analyzing video...</string>
     <string name="video_none_selected">No video selected yet</string>

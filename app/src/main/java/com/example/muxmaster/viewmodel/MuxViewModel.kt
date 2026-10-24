@@ -15,8 +15,8 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import com.example.muxmaster.R
 import com.example.muxmaster.data.AppPreferences
-import com.example.muxmaster.data.NativeTools
 import com.example.muxmaster.data.InputAccess
+import com.example.muxmaster.data.NativeTools
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.model.AudioTrackItem
 import com.example.muxmaster.model.SubtitleTrackItem
@@ -31,17 +31,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
-/**
- * Bir audio/subtitle track'inin mkvmerge komutunda nasıl temsil edileceğini belirtir.
- *
- * FromSource -> track, ana video dosyasının İÇİNDEN doğrudan mkvmerge'e -a/-s ile seçilerek
- *               alınır (ekstraksiyon YOK, tamamen lossless, --sync ile delay uygulanır).
- * FromFile   -> track, ayrı bir dosya olarak mkvmerge'e eklenir (kullanıcının eklediği harici
- *               dosya OLABİLİR, ya da ses yükseltme (gain) gerektiği için önce ffmpeg ile
- *               işlenip yeni bir dosyaya yazılmış OLABİLİR).
- */
 private sealed class TrackPlan {
     data class FromSource(val trackId: Int, val delayMs: Long) : TrackPlan()
     data class FromFile(val path: String, val delayMs: Long) : TrackPlan()
@@ -73,6 +66,15 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     var isSuccess by mutableStateOf(false)
         private set
 
+    // ── Yerinde Ses Dönüştürme ("Sesi Dönüştür") durumları ────────────────────
+    var isConvertingTrack by mutableStateOf(false)
+        private set
+    var convertingTrackProgress by mutableStateOf(0)
+        private set
+    var convertingTrackName by mutableStateOf("")
+        private set
+    private var convertTrackJob: Job? = null
+
     private fun setProgress(p: Int, statusText: String? = null) {
         muxProgress = p
         MuxForegroundService.update(app, p, statusText ?: app.getString(R.string.notif_muxing_progress))
@@ -90,7 +92,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private var muxJob: Job? = null
 
-    /** Uygulamanın kendi private çalışma dizini (Termux/paylaşımlı depolamaya gerek yok). */
     private fun workDir(): File = File(app.cacheDir, "mux_work").also { it.mkdirs() }
 
     init {
@@ -98,6 +99,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelMux() { muxJob?.cancel() }
+    fun cancelTrackConvert() { convertTrackJob?.cancel() }
 
     fun clearResult() { resultMessage = null; isSuccess = false }
     fun clearExportResult() { exportMessage = null }
@@ -107,14 +109,14 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 workDir().listFiles()
-                    ?.filter { !it.name.startsWith("input_video") }
+                    ?.filter { !it.name.startsWith("input_video") && !it.name.startsWith("converted_track_") }
                     ?.forEach { it.delete() }
             }
         }
     }
 
     fun clearVideo() {
-        if (isMuxing) return
+        if (isMuxing || isConvertingTrack) return
         val old = videoFile?.cachePath
         videoFile = null; audioTracks.clear(); subtitleTracks.clear()
         expandedAudioIds.clear(); expandedSubtitleIds.clear()
@@ -140,9 +142,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         folderQueue = emptyList(); queueIndex = -1; folderName = ""
     }
 
-    /** Klasör seçtirir: içindeki tüm videoları kuyruğa alır, ilkini açar. */
     fun onFolderSelected(treeUri: Uri) {
-        if (isMuxing) return
+        if (isMuxing || isConvertingTrack) return
         try {
             app.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: Exception) { }
@@ -173,14 +174,14 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun nextInQueue() {
-        if (isMuxing || isLoading || !hasNextInQueue) return
+        if (isMuxing || isConvertingTrack || isLoading || !hasNextInQueue) return
         queueIndex += 1
         val e = folderQueue[queueIndex]
         onVideoSelected(e.uri, e.name, fromQueue = true)
     }
 
     fun prevInQueue() {
-        if (isMuxing || isLoading || !hasPrevInQueue) return
+        if (isMuxing || isConvertingTrack || isLoading || !hasPrevInQueue) return
         queueIndex -= 1
         val e = folderQueue[queueIndex]
         onVideoSelected(e.uri, e.name, fromQueue = true)
@@ -277,7 +278,16 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         if (updated.isDefault) for (j in audioTracks.indices) if (audioTracks[j].id != updated.id && audioTracks[j].isDefault) audioTracks[j] = audioTracks[j].copy(isDefault = false)
         audioTracks[idx] = updated
     }
-    fun removeAudio(id: Int) { audioTracks.removeAll { it.id == id }; expandedAudioIds.remove(id) }
+
+    fun removeAudio(id: Int) {
+        val old = audioTracks.firstOrNull { it.id == id }
+        audioTracks.removeAll { it.id == id }
+        expandedAudioIds.remove(id)
+        if (old != null && old.fileCachePath.contains("converted_track_")) {
+            viewModelScope.launch(Dispatchers.IO) { runCatching { File(old.fileCachePath).delete() } }
+        }
+    }
+
     fun moveAudioUp(id: Int) { val i = audioTracks.indexOfFirst { it.id == id }; if (i > 0) { val t = audioTracks[i]; audioTracks[i] = audioTracks[i-1]; audioTracks[i-1] = t } }
     fun moveAudioDown(id: Int) { val i = audioTracks.indexOfFirst { it.id == id }; if (i in 0 until audioTracks.size-1) { val t = audioTracks[i]; audioTracks[i] = audioTracks[i+1]; audioTracks[i+1] = t } }
 
@@ -298,10 +308,184 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     }
     fun updateOutputFileName(name: String) { outputFileName = name }
 
+    /**
+     * Mux ekranındaki bir ses parçasının üzerine basılı tutulduğunda açılan "Sesi Dönüştür"
+     * özelliği: sesi dışarı aktarmaya gerek kalmadan doğrudan uygulama içinde seçilen
+     * kodek (Opus, xHE-AAC, HE-AAC, HE-AAC v2, MP3) ve bitrate / hedef boyuta dönüştürür
+     * ve listedeki mevcut ses parçasını dönüştürülmüş yeni ses parçasıyla yerinde değiştirir.
+     */
+    fun convertAudioTrackInPlace(
+        track: AudioTrackItem,
+        format: OutputFormat,
+        targetMode: TargetMode,
+        bitrateKbps: Int,
+        targetSizeBytes: Long?,
+        channelMode: ChannelMode,
+        onComplete: () -> Unit = {}
+    ) {
+        val video = videoFile ?: return
+        if (isMuxing || isConvertingTrack || isExporting) return
+
+        val trackDisplayTitle = track.title.ifBlank {
+            if (track.source == TrackSource.EXISTING) {
+                app.getString(R.string.audio_track_fallback_title, track.existingStreamIndex)
+            } else {
+                track.fileDisplayName
+            }
+        }
+
+        convertTrackJob = viewModelScope.launch {
+            MuxForegroundService.start(app)
+            MuxCancelBus.onCancelRequested = { cancelTrackConvert() }
+            var acquiredTempSource: String? = null
+            try {
+                isConvertingTrack = true
+                convertingTrackProgress = 0
+                convertingTrackName = trackDisplayTitle
+                exportMessage = null
+
+                val wd = workDir()
+                val inputPath: String
+                val streamSelector: String
+                val sourceCh: Int
+
+                if (track.source == TrackSource.EXISTING) {
+                    inputPath = video.cachePath
+                    streamSelector = "0:${track.existingStreamIndex}"
+                    sourceCh = track.existingChannels.coerceAtLeast(1)
+                } else {
+                    streamSelector = "0:a:0"
+                    sourceCh = track.existingChannels.takeIf { it > 0 } ?: 2
+                    inputPath = if (track.fileCachePath.isNotBlank() && File(track.fileCachePath).exists()) {
+                        track.fileCachePath
+                    } else {
+                        val uri = track.fileUri ?: run {
+                            exportMessage = app.getString(R.string.err_audio_file_missing, track.fileDisplayName)
+                            return@launch
+                        }
+                        val ext = extensionFromName(track.fileDisplayName).ifBlank { "bin" }
+                        val cp = withContext(Dispatchers.IO) {
+                            copyUriToCache(uri, "inplace_src_${track.id}_${System.currentTimeMillis()}.$ext")
+                        }
+                        if (cp == null) {
+                            exportMessage = app.getString(R.string.err_audio_read_failed, track.fileDisplayName)
+                            return@launch
+                        }
+                        acquiredTempSource = cp
+                        cp
+                    }
+                }
+
+                val durationMs = if (video.durationMs > 0L) {
+                    video.durationMs
+                } else {
+                    withContext(Dispatchers.IO) { TrackProber.probeAudioDurationMsFallback(inputPath) }
+                }
+
+                val targetBps = if (targetMode == TargetMode.FILE_SIZE && targetSizeBytes != null) {
+                    AudioConversionEngine.calculateBpsForFileSize(durationMs, targetSizeBytes, format)
+                } else {
+                    bitrateKbps.coerceIn(6, 512) * 1000
+                }
+
+                val outFile = File(wd, "converted_track_${track.id}_${System.currentTimeMillis()}.${format.extension}")
+                outFile.delete()
+
+                val progressCb: (Int) -> Unit = { pct ->
+                    val clamped = pct.coerceIn(0, 99)
+                    convertingTrackProgress = clamped
+                    MuxForegroundService.update(
+                        app,
+                        clamped,
+                        app.getString(R.string.notif_converting_progress, trackDisplayTitle, clamped)
+                    )
+                }
+
+                val outcome = AudioConversionEngine.convertAudioStream(
+                    app = app,
+                    scope = viewModelScope,
+                    inputPath = inputPath,
+                    streamSelector = streamSelector,
+                    sourceChannels = sourceCh,
+                    durationMs = durationMs,
+                    format = format,
+                    targetMode = targetMode,
+                    targetBps = targetBps,
+                    targetBytes = targetSizeBytes,
+                    channelMode = channelMode,
+                    tempOutput = outFile,
+                    onProgress = progressCb
+                )
+
+                if (outcome.ok && outFile.exists() && outFile.length() > 0L) {
+                    convertingTrackProgress = 100
+                    val idx = audioTracks.indexOfFirst { it.id == track.id }
+                    if (idx >= 0) {
+                        val oldTrack = audioTracks[idx]
+                        if (oldTrack.fileCachePath.isNotBlank() &&
+                            oldTrack.fileCachePath != outFile.absolutePath &&
+                            oldTrack.fileCachePath.contains("converted_track_")
+                        ) {
+                            withContext(Dispatchers.IO) { runCatching { File(oldTrack.fileCachePath).delete() } }
+                        }
+                        val sizeMb = outFile.length() / (1024f * 1024f)
+                        val sizeLabel = if (sizeMb < 1.0f) {
+                            "${(sizeMb * 1024f).roundToInt()} KB"
+                        } else {
+                            String.format(Locale.US, "%.2f MB", sizeMb)
+                        }
+                        val cleanBase = sanitizeFileName(
+                            track.title.ifBlank {
+                                if (track.source == TrackSource.EXISTING) {
+                                    app.getString(R.string.audio_track_fallback_title, track.existingStreamIndex)
+                                } else {
+                                    track.fileDisplayName.substringBeforeLast('.', track.fileDisplayName)
+                                }
+                            }
+                        )
+                        val updated = oldTrack.copy(
+                            source = TrackSource.NEW_FILE,
+                            fileUri = null,
+                            fileCachePath = outFile.absolutePath,
+                            fileDisplayName = "$cleanBase.${format.extension}",
+                            existingCodec = format.label,
+                            existingChannels = outcome.outputChannels,
+                            existingBitrate = "${outcome.effectiveKbps} kbps · $sizeLabel"
+                        )
+                        audioTracks[idx] = updated
+                    }
+                    exportIsSuccess = true
+                    exportMessage = app.getString(
+                        R.string.track_convert_success,
+                        format.label,
+                        outcome.effectiveKbps
+                    )
+                    onComplete()
+                } else {
+                    runCatching { outFile.delete() }
+                    exportIsSuccess = false
+                    exportMessage = app.getString(R.string.track_convert_failed)
+                }
+            } catch (c: CancellationException) {
+                exportIsSuccess = false
+                exportMessage = app.getString(R.string.result_cancelled)
+                throw c
+            } finally {
+                if (acquiredTempSource != null) {
+                    withContext(Dispatchers.IO) { runCatching { InputAccess.release(acquiredTempSource) } }
+                }
+                isConvertingTrack = false
+                convertingTrackName = ""
+                MuxCancelBus.onCancelRequested = null
+                MuxForegroundService.stop(app, exportMessage, exportIsSuccess)
+            }
+        }
+    }
+
     fun exportAudioTrack(track: AudioTrackItem) {
         val folder = outputFolderUri
         if (folder == null) { exportMessage = app.getString(R.string.export_no_output_folder); exportIsSuccess = false; return }
-        if (isExporting || isMuxing) return
+        if (isExporting || isMuxing || isConvertingTrack) return
 
         viewModelScope.launch {
             isExporting = true; exportMessage = null
@@ -321,6 +505,16 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                         val result = if (good) copyFileToTree(tmp, folder, "$baseName.$ext", mime) else null
                         runCatching { tmp.delete() }
                         result
+                    } else if (track.fileCachePath.isNotBlank() && File(track.fileCachePath).exists()) {
+                        val srcFile = File(track.fileCachePath)
+                        val ext = srcFile.extension.ifBlank { extensionFromName(track.fileDisplayName).ifBlank { "m4a" } }
+                        val mime = when (ext.lowercase()) {
+                            "opus" -> "audio/opus"
+                            "m4a" -> "audio/mp4"
+                            "mp3" -> "audio/mpeg"
+                            else -> "application/octet-stream"
+                        }
+                        copyFileToTree(srcFile, folder, "$baseName.$ext", mime)
                     } else {
                         val uri = track.fileUri ?: return@runCatching null
                         val ext = extensionFromName(track.fileDisplayName).ifBlank { "bin" }
@@ -338,7 +532,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     fun exportSubtitleTrack(track: SubtitleTrackItem) {
         val folder = outputFolderUri
         if (folder == null) { exportMessage = app.getString(R.string.export_no_output_folder); exportIsSuccess = false; return }
-        if (isExporting || isMuxing) return
+        if (isExporting || isMuxing || isConvertingTrack) return
 
         viewModelScope.launch {
             isExporting = true; exportMessage = null
@@ -384,13 +578,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * mkvextract SADECE Matroska/WebM (.mkv/.mka/.mks/.webm) konteynerlerini kaynak olarak
-     * okuyabilir. "Filmler" genelde zaten .mkv olduğu için export sorunsuz çalışıyordu, ama
-     * normal videolarda (mp4, mov, m4v, HEVC vb.) mkvextract kaynağı açamadığından track
-     * dışa aktarma her zaman başarısız oluyordu. Konteyner Matroska değilse ffmpeg (stream
-     * copy, yeniden kodlama YOK -> lossless) ile çıkarma yaparak bunu tüm formatlarda düzeltiyoruz.
-     */
     private fun isMatroskaContainer(path: String): Boolean =
         File(path).extension.lowercase() in setOf("mkv", "mka", "mks", "webm")
 
@@ -456,7 +643,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         val outFolder = outputFolderUri
         if (video == null) { resultMessage = app.getString(R.string.err_no_video); isSuccess = false; return }
         if (outFolder == null) { resultMessage = app.getString(R.string.err_no_output_folder); isSuccess = false; return }
-        if (isMuxing) return
+        if (isMuxing || isConvertingTrack) return
 
         muxJob = viewModelScope.launch {
             MuxForegroundService.start(app)
@@ -477,7 +664,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
                 val preparedAudio = mutableListOf<AudioTrackItem>()
                 for ((i, track) in enabledAudio.withIndex()) {
-                    if (track.source == TrackSource.NEW_FILE && track.fileUri != null) {
+                    if (track.source == TrackSource.NEW_FILE && track.fileCachePath.isNotBlank() && File(track.fileCachePath).exists()) {
+                        preparedAudio.add(track)
+                    } else if (track.source == TrackSource.NEW_FILE && track.fileUri != null) {
                         val ext = extensionFromName(track.fileDisplayName)
                         val cp = withContext(Dispatchers.IO) { copyUriToCache(track.fileUri, "new_audio_${track.id}.$ext") }
                         if (cp == null) { resultMessage = app.getString(R.string.err_audio_read_failed, track.fileDisplayName); return@launch }
@@ -524,7 +713,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                 }
                 setProgress(85)
 
-                // mkvmerge exit code: 0 = başarılı, 1 = uyarılarla tamamlandı (yine de geçerli çıktı), 2 = hata
                 if (execResult.exitCode != 0 && execResult.exitCode != 1) {
                     val detail = execResult.output.trim().takeLast(300)
                     resultMessage = app.getString(R.string.err_mkvmerge_code, execResult.exitCode) +
@@ -582,7 +770,13 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             } catch (c: CancellationException) {
                 resultMessage = app.getString(R.string.result_mux_cancelled)
                 isSuccess = false
-                withContext(Dispatchers.IO) { runCatching { workDir().listFiles()?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() } } }
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        workDir().listFiles()
+                            ?.filter { !it.name.startsWith("input_video") && !it.name.startsWith("converted_track_") }
+                            ?.forEach { it.delete() }
+                    }
+                }
                 throw c
             } finally {
                 isMuxing = false
@@ -592,13 +786,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * EXISTING (videonun içinden) track, ses yükseltme (gain) istemiyorsa hiç ekstraksiyon
-     * yapılmadan doğrudan mkvmerge'e -a ile seçtirilir (FromSource). Gain isteniyorsa - mkvmerge
-     * ses filtresi uygulayamadığı için - önce ffmpeg ile volume/compressor/limiter filtresinden
-     * geçirilip yeni bir dosyaya yazılır (FromFile). Delay HER ZAMAN mkvmerge --sync ile
-     * uygulanır (ffmpeg'in adelay/atrim'ine artık hiç gerek yok).
-     */
     private suspend fun resolveAudioPlan(track: AudioTrackItem, wd: File, runTempFiles: MutableList<File>): TrackPlan {
         val needsGain = abs(track.gainDb) > 0.05f
         return if (track.source == TrackSource.EXISTING) {
@@ -627,7 +814,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Altyazılarda gain kavramı yok; her zaman doğrudan seçilir veya doğrudan eklenir. */
     private fun resolveSubtitlePlan(track: SubtitleTrackItem): TrackPlan {
         return if (track.source == TrackSource.EXISTING) {
             TrackPlan.FromSource(track.existingStreamIndex, track.delayMs)
@@ -638,13 +824,6 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * mkvmerge komut satırı argümanlarını inşa eder. Video + gain gerektirmeyen mevcut audio/altyazı
-     * track'leri TEK bir kaynak dosya (ana video) segmentinden -d/-a/-s ile seçilir; her track'in
-     * language/track-name/default/forced/hi/sync ayarları o segmentte ilgili track id'sine uygulanır.
-     * Harici dosyalar (yeni eklenen ya da gain-işlenmiş) ayrı segmentler olarak eklenir.
-     * --track-order ile nihai sıralama (video, sonra kullanıcının sıraladığı ses/altyazılar) garanti edilir.
-     */
     private fun buildMkvmergeArgs(
         video: VideoFile,
         audioTracks: List<AudioTrackItem>, audioPlans: List<TrackPlan>,
@@ -746,7 +925,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             "vorbis" -> "libvorbis" to "160k"
             "mp3" -> "libmp3lame" to "192k"
             "ac3" -> "ac3" to "192k"
-            "eac3" -> "eac3" to "192k"
+            "eac3" -> "ac3" to "192k"
             "flac", "pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_u8" -> "flac" to ""
             else -> "aac" to "192k"
         }
@@ -764,13 +943,12 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         else -> "m4a"
     }
 
-    /** Ses yükseltme (volume boost) + compressor/limiter'ı ffmpeg ile uygular, mkvmerge'e verilecek yeni dosyayı döner. */
     private fun applyGainFilter(inputPath: String, mapSelector: String, codecHint: String, gainDb: Float, wd: File): File? {
         return try {
             val (encoder, bitrate) = gainEncoderFor(codecHint)
             val ext = gainContainerExtFor(encoder)
             val out = File(wd, "gain_${System.currentTimeMillis()}_${(1000..9999).random()}.$ext")
-            val gainStr = "%.1f".format(java.util.Locale.US, gainDb)
+            val gainStr = "%.1f".format(Locale.US, gainDb)
             val filter = "volume=${gainStr}dB,acompressor=threshold=-6dB:ratio=4:attack=5:release=80:makeup=1,alimiter=limit=0.999:attack=1:release=50:level=0"
             val args = mutableListOf("-y", "-i", inputPath, "-map", mapSelector, "-vn", "-filter:a", filter, "-c:a", encoder)
             if (bitrate.isNotBlank()) args += listOf("-b:a", bitrate)

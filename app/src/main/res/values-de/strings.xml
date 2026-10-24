@@ -5,6 +5,8 @@
     <string name="action_change">ÄNDERN</string>
     <string name="action_close">Schließen</string>
     <string name="action_export">Exportieren</string>
+    <string name="action_convert_audio">Audio konvertieren</string>
+    <string name="action_show_mux_bar">Mux-Leiste</string>
 
     <string name="nav_converter_desc">Audio-Konverter</string>
     <string name="nav_settings_desc">Einstellungen</string>
@@ -14,6 +16,11 @@
     <string name="add_subtitle_button">Untertiteldatei hinzufügen</string>
     <string name="empty_audio_hint">Dieses Video hat keine Audiospur. Mit + hinzufügen.</string>
     <string name="empty_subtitle_hint">Dieses Video hat keine Untertitel. Mit + hinzufügen.</string>
+    <string name="long_press_track_hint">Tipp: Spur gedrückt halten → Exportieren / Audio konvertieren</string>
+    <string name="inplace_convert_title">Audio direkt konvertieren</string>
+    <string name="inplace_convert_action">KONVERTIEREN &amp; ERSETZEN (%1$s)</string>
+    <string name="track_convert_success">✅ Audio konvertiert und ersetzt: %1$s (%2$d kbps)</string>
+    <string name="track_convert_failed">Audio-Konvertierung fehlgeschlagen.</string>
 
     <string name="video_analyzing">Video wird analysiert...</string>
     <string name="video_none_selected">Noch kein Video ausgewählt</string>
@@ -138,7 +145,7 @@
     <string name="settings_battery_title">Hintergrundleistung</string>
     <string name="settings_battery_desc">Auf manchen Geräten kann die Akku-Optimierung die Konvertierung im Hintergrund verlangsamen. Eine Ausnahme hält den Vorgang im Hintergrund mit voller Geschwindigkeit.</string>
     <string name="settings_battery_status_ok">Akku-Optimierung deaktiviert</string>
-    <string name="settings_battery_status_restricted">Akku-Optimierung aktiv (kann verlangsamen)</string>
+    <string name="settings_battery_status_restricted">Pil optimizasyonu aktif (yavaşlatabilir)</string>
     <string name="settings_battery_action">Einrichten</string>
     <string name="err_native_tools_missing">mkvmerge/mkvextract konnten nicht aus der App entpackt werden. App deinstallieren und neu installieren.</string>
 </resources>

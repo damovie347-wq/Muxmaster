@@ -16,9 +16,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Subtitles
@@ -91,7 +93,8 @@ private fun TrackHeaderRow(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onRemove: () -> Unit,
-    onExport: () -> Unit
+    onExport: () -> Unit,
+    onConvertAudio: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -100,19 +103,29 @@ private fun TrackHeaderRow(
         Spacer(Modifier.width(10.dp))
         Box(modifier = Modifier.weight(1f)) {
             Column(
-                Modifier.combinedClickable(
-                    onClick = onToggleExpand,
-                    onLongClick = { showMenu = true }
-                )
+                Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = onToggleExpand,
+                        onLongClick = { showMenu = true }
+                    )
             ) {
                 Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1)
                 Text(subtitle, color = TextSec, fontSize = 12.sp, maxLines = 1)
             }
             DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                 DropdownMenuItem(
+                    leadingIcon = { Icon(Icons.Filled.FileDownload, null, tint = PurpleLight, modifier = Modifier.size(18.dp)) },
                     text = { Text(stringResource(R.string.action_export)) },
                     onClick = { showMenu = false; onExport() }
                 )
+                if (onConvertAudio != null) {
+                    DropdownMenuItem(
+                        leadingIcon = { Icon(Icons.Filled.Autorenew, null, tint = Green, modifier = Modifier.size(18.dp)) },
+                        text = { Text(stringResource(R.string.action_convert_audio), fontWeight = FontWeight.SemiBold) },
+                        onClick = { showMenu = false; onConvertAudio() }
+                    )
+                }
             }
         }
         IconButton(onClick = onToggleExpand, modifier = Modifier.size(32.dp)) {
@@ -136,9 +149,6 @@ private fun TrackHeaderRow(
     }
 }
 
-// Slider'ın taban genişliği. ARTIK BİR ÜST/ALT SINIR DEĞİL — sadece varsayılan
-// görünüm genişliği. Gerçek sınır kaldırıldı; slider aşağıda mevcut değere göre
-// dinamik olarak genişliyor, metin kutusu ise hiçbir coerceIn() uygulamıyor.
 private const val DELAY_BASE_RANGE_MS = 10000f
 
 @Composable
@@ -147,13 +157,6 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
     var text by remember(delayMs) { mutableStateOf(delayMs.toString()) }
     var isDragging by remember { mutableStateOf(false) }
 
-    // KÖK NEDEN (slider -10000/+10000'de kilitleniyordu): valueRange SABİT bir
-    // sabitle (-10000f..10000f) tanımlıydı ve metin kutusu da coerceIn(-10000,10000)
-    // ile değeri zorla kırpıyordu. Kullanıcı 27763 veya 186000 gibi bir değer girse
-    // bile hem gösterilen hem de gerçekte uygulanan değer sessizce 10000'e düşüyordu.
-    // ÇÖZÜM: metin kutusunda ARTIK HİÇBİR SINIRLAMA yok (girilen Long değeri olduğu
-    // gibi kabul edilir); slider'ın valueRange'i de mevcut değeri her zaman kapsayacak
-    // şekilde dinamik hesaplanıyor (taban ±10000ms, gerekirse |değer|'in %20 fazlası).
     val dynamicRange = remember(delayMs) { max(DELAY_BASE_RANGE_MS, abs(delayMs.toFloat()) * 1.2f) }
 
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
@@ -202,8 +205,6 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             onValueChange = { newVal ->
                 text = newVal
                 newVal.toLongOrNull()?.let { parsed ->
-                    // Artık hiçbir sınırlama yok: pozitif/negatif, ne büyüklükte olursa
-                    // olsun girilen değer olduğu gibi kabul edilir.
                     sliderValue = parsed.toFloat()
                     onDelayChange(parsed)
                 }
@@ -219,7 +220,6 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
 
 private const val GAIN_MAX_DB = 15f
 
-// dB <-> yüzde (%) dönüşümleri. +X% ses artışı = 20*log10(1 + X/100) dB kazanç.
 private fun dbToBoostPercent(db: Float): Float =
     (100.0 * Math.pow(10.0, db / 20.0) - 100.0).toFloat()
 
@@ -233,8 +233,6 @@ private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(stringResource(R.string.gain_label), color = TextSec, fontSize = 12.sp, modifier = Modifier.width(90.dp))
         Slider(
-            // Yüzde modunda slider doğrudan % biriminde çalışır; dB'ye çevrilip
-            // aynı gainDb state'ine yazılır (tek gerçek kaynak hep dB'dir).
             value = if (showPercent) dbToBoostPercent(gainDb) else gainDb,
             onValueChange = { newVal -> onGainChange(if (showPercent) percentToDb(newVal) else newVal) },
             valueRange = if (showPercent) 0f..maxPercent else 0f..GAIN_MAX_DB,
@@ -288,6 +286,7 @@ fun AudioTrackCard(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onExport: () -> Unit,
+    onConvertAudio: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -298,18 +297,25 @@ fun AudioTrackCard(
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
-                if (track.source == TrackSource.EXISTING) stringResource(R.string.audio_track_fallback_title, track.existingStreamIndex) else track.fileDisplayName
+                if (track.source == TrackSource.EXISTING) {
+                    stringResource(R.string.audio_track_fallback_title, track.existingStreamIndex)
+                } else {
+                    track.fileDisplayName
+                }
             }
-            val subtitle = if (track.source == TrackSource.EXISTING) {
+            val subtitle = if (track.existingCodec.isNotBlank()) {
                 "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
-            } else track.fileDisplayName
+            } else {
+                track.fileDisplayName
+            }
 
             TrackHeaderRow(
                 icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
                 source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
                 expanded = expanded, onToggleExpand = onToggleExpand,
                 onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove,
-                onExport = onExport
+                onExport = onExport,
+                onConvertAudio = onConvertAudio
             )
 
             AnimatedVisibility(

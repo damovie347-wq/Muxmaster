@@ -121,18 +121,10 @@ import com.example.muxmaster.viewmodel.TrimViewModel
 import java.io.File
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.hypot
 import kotlin.math.roundToInt
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChanged
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import kotlinx.coroutines.CoroutineScope
@@ -1451,13 +1443,12 @@ internal fun speedLabel(v: Float): String {
 }
 
 /**
- * 120 FPS Pürüzsüz Yakınlaştırma / Kaydırma ve Sıfır Siyah Ekranlı VideoSurface:
- * - Yakınlaştırma (%25 – %400) veya ölçekleme modu (En uygun / Genişlet / Yay / Orijinal) değiştiğinde
- *   SurfaceView <-> TextureView geçişi ASLA yapılmaz ve View boyutu (requiredSize) her dokunuşta
- *   yeniden ölçülmez.
- * - Tek ve kalıcı TextureView (`key(player)`) sabit `fit` boyutunda tutulur; tüm yakınlaştırma,
- *   ölçekleme ve kaydırma işlemleri doğrudan GPU RenderNode (`Modifier.graphicsLayer`) matrisi
- *   üzerinde 0 ms gecikmeyle uygulanır.
+ * Maksimum donanım hızlandırmalı, sıfır ısınmalı ve taşmasız VideoSurface:
+ * - FIT ("En uygun") ve STRETCH ("Ekrana yay") modlarında boyut hücre sınırlarını (cw, ch) ASLA aşmadığı için
+ *   %100 donanım birleştiricisi (SurfaceView / Hardware Composer Overlay) kullanılır -> GPU kopyalaması %0,
+ *   cihaz buz gibi çalışır ve döndürme esnasında Surface yeniden oluşturulmadığı için 0 ms'de döner!
+ * - Yalnızca CROP ("Klibi genişlet") veya ORIGINAL modlarında hedef boyut hücreden büyük olduğunda
+ *   TextureView + clipToBounds() kullanılarak yan hücrelere taşma %100 engellenir.
  */
 @Composable
 internal fun VideoSurface(
@@ -1467,17 +1458,15 @@ internal fun VideoSurface(
     videoHpx: Int,
     mode: ScaleMode,
     modifier: Modifier = Modifier,
-    zoomProvider: () -> Float = { 1f },
-    panXProvider: () -> Float = { 0f },
-    panYProvider: () -> Float = { 0f },
-    onSurfaceMetrics: ((viewW: Float, viewH: Float, baseW: Float, baseH: Float) -> Unit)? = null
+    zoom: Float = 1f,
+    panX: Float = 0f,
+    panY: Float = 0f,
+    onPanLimits: ((Float, Float) -> Unit)? = null
 ) {
     val density = LocalDensity.current
     BoxWithConstraints(modifier = modifier.clipToBounds(), contentAlignment = Alignment.Center) {
         val cw = maxWidth
         val ch = maxHeight
-        val cwPx = with(density) { cw.toPx().coerceAtLeast(1f) }
-        val chPx = with(density) { ch.toPx().coerceAtLeast(1f) }
         val a = aspect.coerceAtLeast(0.1f)
         val wider = (cw / ch.coerceAtLeast(1.dp)) > a
         val fit: Pair<Dp, Dp> = if (wider) Pair(ch * a, ch) else Pair(cw, cw / a)
@@ -1489,133 +1478,83 @@ internal fun VideoSurface(
                 with(density) { Pair(videoWpx.toDp(), videoHpx.toDp()) }
             } else fit
         }
-        val baseWpx = with(density) { baseTarget.first.toPx().coerceAtLeast(1f) }
-        val baseHpx = with(density) { baseTarget.second.toPx().coerceAtLeast(1f) }
+        // Parmakla yakınlaştırma / uzaklaştırma (%30 – %150)
+        val z = zoom.coerceIn(0.3f, 1.5f)
+        val target: Pair<Dp, Dp> = Pair(baseTarget.first * z, baseTarget.second * z)
 
-        if (onSurfaceMetrics != null) {
-            SideEffect { onSurfaceMetrics(cwPx, chPx, baseWpx, baseHpx) }
+        // Kaydırma sınırları (px): video hücreden ne kadar taşıyorsa o kadar kaydırılabilir
+        val maxPanX = with(density) { ((target.first - cw) / 2).coerceAtLeast(0.dp).toPx() }
+        val maxPanY = with(density) { ((target.second - ch) / 2).coerceAtLeast(0.dp).toPx() }
+        if (onPanLimits != null) SideEffect { onPanLimits(maxPanX, maxPanY) }
+
+        // Hücreye sığan her durumda donanım katmanı (SurfaceView / HWC overlay, GPU kopyası yok).
+        // Yalnızca taşan (kırpılması gereken) durumda TextureView kullanılır.
+        val needsCroppedTexture = (target.first > cw + 1.dp || target.second > ch + 1.dp)
+
+        if (!needsCroppedTexture) {
+            val safeW = target.first.coerceAtMost(cw)
+            val safeH = target.second.coerceAtMost(ch)
+            key("hw_surface") {
+                AndroidView(
+                    factory = { ctx ->
+                        SurfaceView(ctx).also { sv ->
+                            sv.tag = player
+                            player.setVideoSurfaceView(sv)
+                        }
+                    },
+                    update = { sv ->
+                        if (sv.tag !== player) {
+                            sv.tag = player
+                            player.setVideoSurfaceView(sv)
+                        }
+                    },
+                    onRelease = { sv ->
+                        if (sv.tag === player) {
+                            player.clearVideoSurfaceView(sv)
+                        }
+                        sv.tag = null
+                    },
+                    modifier = Modifier.requiredSize(safeW, safeH)
+                )
+            }
+        } else {
+            val fw = fit.first.value.coerceAtLeast(1f)
+            val fh = fit.second.value.coerceAtLeast(1f)
+            val sx = target.first.value / fw
+            val sy = target.second.value / fh
+            key("cropped_texture") {
+                AndroidView(
+                    factory = { ctx ->
+                        TextureView(ctx).also { tv ->
+                            tv.isOpaque = false
+                            tv.tag = player
+                            player.setVideoTextureView(tv)
+                        }
+                    },
+                    update = { tv ->
+                        if (tv.tag !== player) {
+                            tv.tag = player
+                            player.setVideoTextureView(tv)
+                        }
+                    },
+                    onRelease = { tv ->
+                        if (tv.tag === player) {
+                            player.clearVideoTextureView(tv)
+                        }
+                        tv.tag = null
+                    },
+                    modifier = Modifier
+                        .requiredSize(fit.first, fit.second)
+                        .graphicsLayer {
+                            scaleX = sx
+                            scaleY = sy
+                            translationX = panX.coerceIn(-maxPanX, maxPanX)
+                            translationY = panY.coerceIn(-maxPanY, maxPanY)
+                        }
+                )
+            }
         }
-
-        val fw = fit.first.value.coerceAtLeast(1f)
-        val fh = fit.second.value.coerceAtLeast(1f)
-        val baseSx = baseTarget.first.value / fw
-        val baseSy = baseTarget.second.value / fh
-
-        // Tek ve kalıcı TextureView: zoom/pan değerleri YALNIZCA graphicsLayer içinde okunur ->
-        // yakınlaştırma ve kaydırma esnasında 0 recomposition, 0 relayout, 120 FPS saf GPU matrisi!
-        key(player) {
-            AndroidView(
-                factory = { ctx ->
-                    TextureView(ctx).also { tv ->
-                        tv.isOpaque = false
-                        tv.tag = player
-                        player.setVideoTextureView(tv)
-                    }
-                },
-                update = { tv ->
-                    if (tv.tag !== player) {
-                        tv.tag = player
-                        player.setVideoTextureView(tv)
-                    }
-                },
-                onRelease = { tv ->
-                    if (tv.tag === player) {
-                        player.clearVideoTextureView(tv)
-                    }
-                    tv.tag = null
-                },
-                modifier = Modifier
-                    .requiredSize(fit.first, fit.second)
-                    .graphicsLayer {
-                        val z = zoomProvider().coerceIn(0.25f, 4.0f)
-                        val limX = ((baseWpx * z - cwPx) * 0.5f).coerceAtLeast(0f)
-                        val limY = ((baseHpx * z - chPx) * 0.5f).coerceAtLeast(0f)
-                        scaleX = baseSx * z
-                        scaleY = baseSy * z
-                        translationX = panXProvider().coerceIn(-limX, limX)
-                        translationY = panYProvider().coerceIn(-limY, limY)
-                    }
-            )
-        }
     }
-}
-
-private enum class VideoTouchGestureMode {
-    NONE,
-    PINCH_ZOOM,
-    HOLD_2X,
-    SWIPE_SEEK,
-    PAN_ONLY
-}
-
-private fun calculateCentroid(changes: List<PointerInputChange>): Offset {
-    if (changes.isEmpty()) return Offset.Zero
-    var sx = 0f
-    var sy = 0f
-    for (c in changes) {
-        sx += c.position.x
-        sy += c.position.y
-    }
-    val n = changes.size.toFloat()
-    return Offset(sx / n, sy / n)
-}
-
-private fun calculateAverageSpan(changes: List<PointerInputChange>, centroid: Offset): Float {
-    if (changes.size < 2) return 0f
-    var sum = 0f
-    for (c in changes) {
-        sum += hypot(c.position.x - centroid.x, c.position.y - centroid.y)
-    }
-    return sum / changes.size.toFloat()
-}
-
-/**
- * Üst merkezde referans oynatıcıdaki gibi şık "2X ▶▶" hızlı oynatma rozeti.
- */
-@Composable
-internal fun Hold2xIndicatorBadge(modifier: Modifier = Modifier) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xCC101318))
-            .padding(horizontal = 14.dp, vertical = 6.dp)
-    ) {
-        Text(
-            text = "2X",
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.ExtraBold
-        )
-        Icon(
-            imageVector = Icons.Filled.FastForward,
-            contentDescription = "2X Hızlı İlerleme",
-            tint = Color.White,
-            modifier = Modifier.size(18.dp)
-        )
-    }
-}
-
-/**
- * Parmağı sağa/sola kaydırarak ileri/geri sararken ekranın tam ortasında beliren büyük zaman göstergesi.
- */
-@Composable
-internal fun SwipeSeekTimeOverlay(timeText: String, modifier: Modifier = Modifier) {
-    Text(
-        text = timeText,
-        color = Color.White,
-        fontSize = 38.sp,
-        fontWeight = FontWeight.Bold,
-        style = TextStyle(
-            shadow = Shadow(
-                color = Color(0xDD000000),
-                offset = Offset(0f, 2f),
-                blurRadius = 8f
-            )
-        ),
-        modifier = modifier
-    )
 }
 
 @Composable
@@ -1949,226 +1888,21 @@ private fun FullscreenPlayerDialog(
             }
         }
 
-        var fsZoom by remember { mutableFloatStateOf(1f) }
-        var fsPanX by remember { mutableFloatStateOf(0f) }
-        var fsPanY by remember { mutableFloatStateOf(0f) }
-        var fsViewW by remember { mutableFloatStateOf(1f) }
-        var fsViewH by remember { mutableFloatStateOf(1f) }
-        var fsBaseW by remember { mutableFloatStateOf(1f) }
-        var fsBaseH by remember { mutableFloatStateOf(1f) }
-        var fsHold2x by remember { mutableStateOf(false) }
-        var fsSwipeTimeText by remember { mutableStateOf<String?>(null) }
-        val fsScope = rememberCoroutineScope()
-        val fsTogglePlayState = rememberUpdatedState(onTogglePlay)
-        val fsSeekToState = rememberUpdatedState(onSeekTo)
-        val fsSpeedState = rememberUpdatedState(speed)
-        val fsPosState = rememberUpdatedState(positionMs)
-        val fsStartState = rememberUpdatedState(startMs)
-        val fsEndState = rememberUpdatedState(endMs)
-
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
         ) {
-            VideoSurface(
-                player = player,
-                aspect = aspect,
-                videoWpx = videoWpx,
-                videoHpx = videoHpx,
-                mode = scaleMode,
-                modifier = Modifier.fillMaxSize(),
-                zoomProvider = { fsZoom },
-                panXProvider = { fsPanX },
-                panYProvider = { fsPanY },
-                onSurfaceMetrics = { vw, vh, bw, bh ->
-                    fsViewW = vw
-                    fsViewH = vh
-                    fsBaseW = bw
-                    fsBaseH = bh
-                }
-            )
+            VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
 
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(player) {
-                        val slop = viewConfiguration.touchSlop
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val startPos = down.position
-                            var mode = VideoTouchGestureMode.NONE
-                            var prevCount = 1
-                            var prevCentroid = down.position
-                            var prevSpan = 0f
-                            var swipeStartMs = 0L
-                            var swipeAccumDx = 0f
-                            var swipeTargetMs = 0L
-                            var lastLiveSeekAt = 0L
-                            var speedBeforeHold = fsSpeedState.value
-
-                            val longPressJob = fsScope.launch {
-                                delay(240L)
-                                if (mode == VideoTouchGestureMode.NONE) {
-                                    mode = VideoTouchGestureMode.HOLD_2X
-                                    speedBeforeHold = fsSpeedState.value
-                                    fsHold2x = true
-                                    player.setPlaybackSpeed(2.0f)
-                                    if (!player.playWhenReady) fsTogglePlayState.value()
-                                }
-                            }
-
-                            try {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val pressed = event.changes.filter { it.pressed }
-                                    if (pressed.isEmpty()) break
-
-                                    if (pressed.size >= 2) {
-                                        longPressJob.cancel()
-                                        if (mode == VideoTouchGestureMode.HOLD_2X) {
-                                            fsHold2x = false
-                                            player.setPlaybackSpeed(speedBeforeHold)
-                                        }
-                                        if (mode == VideoTouchGestureMode.SWIPE_SEEK) {
-                                            fsSwipeTimeText = null
-                                        }
-                                        val curCentroid = calculateCentroid(pressed)
-                                        val curSpan = calculateAverageSpan(pressed, curCentroid)
-                                        if (mode != VideoTouchGestureMode.PINCH_ZOOM || prevCount != pressed.size) {
-                                            mode = VideoTouchGestureMode.PINCH_ZOOM
-                                            prevCentroid = curCentroid
-                                            prevSpan = curSpan
-                                            prevCount = pressed.size
-                                        } else {
-                                            val factor = if (prevSpan > 8f && curSpan > 8f) (curSpan / prevSpan).coerceIn(0.5f, 2.0f) else 1f
-                                            val panDx = curCentroid.x - prevCentroid.x
-                                            val panDy = curCentroid.y - prevCentroid.y
-                                            val oldZ = fsZoom
-                                            val newZ = (oldZ * factor).coerceIn(0.25f, 4.0f)
-                                            val eff = if (oldZ > 0.001f) newZ / oldZ else 1f
-                                            fsZoom = newZ
-                                            val focusX = curCentroid.x - fsViewW * 0.5f
-                                            val focusY = curCentroid.y - fsViewH * 0.5f
-                                            val rawX = (fsPanX - focusX) * eff + focusX + panDx
-                                            val rawY = (fsPanY - focusY) * eff + focusY + panDy
-                                            val limX = ((fsBaseW * newZ - fsViewW) * 0.5f).coerceAtLeast(0f)
-                                            val limY = ((fsBaseH * newZ - fsViewH) * 0.5f).coerceAtLeast(0f)
-                                            if (newZ > 1.001f) {
-                                                fsPanX = rawX.coerceIn(-limX, limX)
-                                                fsPanY = rawY.coerceIn(-limY, limY)
-                                            } else {
-                                                fsPanX = (fsPanX * eff).let { if (abs(it) < 0.5f) 0f else it }
-                                                fsPanY = (fsPanY * eff).let { if (abs(it) < 0.5f) 0f else it }
-                                            }
-                                            prevCentroid = curCentroid
-                                            prevSpan = curSpan
-                                        }
-                                        event.changes.forEach { if (it.positionChanged()) it.consume() }
-                                    } else {
-                                        val p = pressed[0]
-                                        if (mode == VideoTouchGestureMode.PINCH_ZOOM) {
-                                            if (prevCount != 1) {
-                                                prevCentroid = p.position
-                                                prevCount = 1
-                                            } else if (fsZoom > 1.01f) {
-                                                val panDx = p.position.x - prevCentroid.x
-                                                val panDy = p.position.y - prevCentroid.y
-                                                prevCentroid = p.position
-                                                val limX = ((fsBaseW * fsZoom - fsViewW) * 0.5f).coerceAtLeast(0f)
-                                                val limY = ((fsBaseH * fsZoom - fsViewH) * 0.5f).coerceAtLeast(0f)
-                                                fsPanX = (fsPanX + panDx).coerceIn(-limX, limX)
-                                                fsPanY = (fsPanY + panDy).coerceIn(-limY, limY)
-                                            }
-                                            if (p.positionChanged()) p.consume()
-                                        } else if (mode == VideoTouchGestureMode.HOLD_2X) {
-                                            if (p.positionChanged()) p.consume()
-                                        } else if (mode == VideoTouchGestureMode.NONE) {
-                                            val dx = p.position.x - startPos.x
-                                            val dy = p.position.y - startPos.y
-                                            if (hypot(dx, dy) > slop) {
-                                                longPressJob.cancel()
-                                                if (abs(dx) > abs(dy) * 1.15f) {
-                                                    mode = VideoTouchGestureMode.SWIPE_SEEK
-                                                    swipeStartMs = fsPosState.value
-                                                    swipeTargetMs = swipeStartMs
-                                                    swipeAccumDx = 0f
-                                                    prevCentroid = p.position
-                                                    controlsVisible = true
-                                                    interaction++
-                                                } else {
-                                                    mode = VideoTouchGestureMode.PAN_ONLY
-                                                    prevCentroid = p.position
-                                                }
-                                            }
-                                        }
-
-                                        if (mode == VideoTouchGestureMode.SWIPE_SEEK) {
-                                            val stepDx = p.position.x - prevCentroid.x
-                                            prevCentroid = p.position
-                                            swipeAccumDx += stepDx
-                                            val lo = fsStartState.value
-                                            val hi = fsEndState.value.coerceAtLeast(lo + 1000L)
-                                            val rangeMs = ((hi - lo) / 3L).coerceIn(30_000L, 180_000L)
-                                            val deltaMs = ((swipeAccumDx / fsViewW.coerceAtLeast(300f)) * rangeMs.toFloat()).toLong()
-                                            swipeTargetMs = (swipeStartMs + deltaMs).coerceIn(lo, hi)
-                                            fsSwipeTimeText = formatShortTime(swipeTargetMs)
-                                            interaction++
-                                            val now = System.currentTimeMillis()
-                                            if (now - lastLiveSeekAt >= 90L) {
-                                                lastLiveSeekAt = now
-                                                fsSeekToState.value(swipeTargetMs)
-                                            }
-                                            if (p.positionChanged()) p.consume()
-                                        } else if (mode == VideoTouchGestureMode.PAN_ONLY && fsZoom > 1.01f) {
-                                            val panDx = p.position.x - prevCentroid.x
-                                            val panDy = p.position.y - prevCentroid.y
-                                            prevCentroid = p.position
-                                            val limX = ((fsBaseW * fsZoom - fsViewW) * 0.5f).coerceAtLeast(0f)
-                                            val limY = ((fsBaseH * fsZoom - fsViewH) * 0.5f).coerceAtLeast(0f)
-                                            fsPanX = (fsPanX + panDx).coerceIn(-limX, limX)
-                                            fsPanY = (fsPanY + panDy).coerceIn(-limY, limY)
-                                            if (p.positionChanged()) p.consume()
-                                        }
-                                    }
-                                }
-                            } finally {
-                                longPressJob.cancel()
-                                when (mode) {
-                                    VideoTouchGestureMode.NONE -> {
-                                        controlsVisible = !controlsVisible
-                                        interaction++
-                                    }
-                                    VideoTouchGestureMode.HOLD_2X -> {
-                                        fsHold2x = false
-                                        player.setPlaybackSpeed(speedBeforeHold)
-                                    }
-                                    VideoTouchGestureMode.SWIPE_SEEK -> {
-                                        fsSwipeTimeText = null
-                                        fsSeekToState.value(swipeTargetMs)
-                                    }
-                                    else -> {}
-                                }
-                            }
-                        }
-                    }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { controlsVisible = !controlsVisible }
             )
-
-            if (fsHold2x) {
-                Hold2xIndicatorBadge(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(top = 24.dp)
-                )
-            }
-
-            val seekOverlay = fsSwipeTimeText
-            if (seekOverlay != null) {
-                SwipeSeekTimeOverlay(
-                    timeText = seekOverlay,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
 
             SubtitleOverlay(
                 cueText,
@@ -2309,88 +2043,33 @@ internal class SlotPlayerHolder(
     /** Bulut (Google Drive) hazırlık / indirme durumu metni; yalnızca yüklenirken dolu. */
     var cloudStatus: String? by mutableStateOf(null)
 
-    /** Parmakla pürüzsüz yakınlaştırma: 0.25 (%25) – 4.0 (%400). */
+    /** Parmakla yakınlaştırma: 0.3 (%30) – 1.5 (%150). */
     var zoom: Float by mutableFloatStateOf(1f)
     var panX: Float by mutableFloatStateOf(0f)
     var panY: Float by mutableFloatStateOf(0f)
+    private var rawZoom: Float = 1f
     var maxPanX: Float = 0f
     var maxPanY: Float = 0f
-    var viewWidthPx: Float = 1f
-    var viewHeightPx: Float = 1f
-    var baseVideoWidthPx: Float = 1f
-    var baseVideoHeightPx: Float = 1f
-
-    /** Basılı tutarken 2X hızlı ilerleme durumu */
-    var isHold2xActive: Boolean by mutableStateOf(false)
-    private var speedBeforeHold: Float = 1f
-
-    /** Parmağı sağa/sola kaydırarak sararken merkezde gösterilecek hedef süre metni */
-    var swipeSeekTimeText: String? by mutableStateOf(null)
     @Volatile private var released = false
 
-    fun applyPinch(
-        factor: Float,
-        panDx: Float,
-        panDy: Float,
-        centroidX: Float = viewWidthPx * 0.5f,
-        centroidY: Float = viewHeightPx * 0.5f
-    ) {
-        val oldZoom = zoom
-        val newZoom = (oldZoom * factor).coerceIn(0.25f, 4.0f)
-        val effectiveFactor = if (oldZoom > 0.001f) newZoom / oldZoom else 1f
-        zoom = newZoom
-
-        val cx = viewWidthPx * 0.5f
-        val cy = viewHeightPx * 0.5f
-        val focusX = centroidX - cx
-        val focusY = centroidY - cy
-
-        val rawPanX = (panX - focusX) * effectiveFactor + focusX + panDx
-        val rawPanY = (panY - focusY) * effectiveFactor + focusY + panDy
-
-        val limX = ((baseVideoWidthPx * newZoom - viewWidthPx) * 0.5f).coerceAtLeast(0f)
-        val limY = ((baseVideoHeightPx * newZoom - viewHeightPx) * 0.5f).coerceAtLeast(0f)
-        maxPanX = limX
-        maxPanY = limY
-
-        if (newZoom > 1.001f) {
-            panX = rawPanX.coerceIn(-limX, limX)
-            panY = rawPanY.coerceIn(-limY, limY)
+    fun applyPinch(factor: Float, panDx: Float, panDy: Float) {
+        rawZoom = (rawZoom * factor).coerceIn(0.3f, 1.5f)
+        // %100 civarında hafif mıknatıs: tam boyuta kolayca dönülür
+        zoom = if (abs(rawZoom - 1f) < 0.04f) 1f else rawZoom
+        if (zoom > 1f) {
+            panX = (panX + panDx).coerceIn(-maxPanX, maxPanX)
+            panY = (panY + panDy).coerceIn(-maxPanY, maxPanY)
         } else {
-            panX = (panX * effectiveFactor).let { if (abs(it) < 0.5f) 0f else it }
-            panY = (panY * effectiveFactor).let { if (abs(it) < 0.5f) 0f else it }
+            panX = 0f
+            panY = 0f
         }
     }
 
     fun resetZoom() {
+        rawZoom = 1f
         zoom = 1f
         panX = 0f
         panY = 0f
-    }
-
-    fun startHold2x() {
-        if (isHold2xActive) return
-        isHold2xActive = true
-        speedBeforeHold = speed
-        player.setPlaybackSpeed(2.0f)
-        if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) {
-            if (player.playbackState == Player.STATE_ENDED) seekTo(0L)
-            if (player.playbackState == Player.STATE_IDLE) player.prepare()
-            player.play()
-        }
-    }
-
-    fun stopHold2x() {
-        if (!isHold2xActive) return
-        isHold2xActive = false
-        player.setPlaybackSpeed(speedBeforeHold)
-    }
-
-    fun previewScrubPosition(targetMs: Long) {
-        val safe = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
-        pendingSeekTargetMs = safe
-        pendingSeekTimestamp = System.currentTimeMillis()
-        positionMs = safe
     }
 
     private var pendingSeekTargetMs: Long = -1L
@@ -3146,191 +2825,52 @@ private fun SingleOrFocusedPlayerContent(
                 videoHpx = holder.videoHpx,
                 mode = holder.scaleMode,
                 modifier = Modifier.fillMaxSize(),
-                zoomProvider = { holder.zoom },
-                panXProvider = { holder.panX },
-                panYProvider = { holder.panY },
-                onSurfaceMetrics = { vw, vh, bw, bh ->
-                    holder.viewWidthPx = vw
-                    holder.viewHeightPx = vh
-                    holder.baseVideoWidthPx = bw
-                    holder.baseVideoHeightPx = bh
+                zoom = holder.zoom,
+                panX = holder.panX,
+                panY = holder.panY,
+                onPanLimits = { mx, my ->
+                    holder.maxPanX = mx
+                    holder.maxPanY = my
                 }
             )
         }
 
-        // Birleşik ve çakışmasız çoklu dokunuş motoru:
-        // 1) İki parmak: odak noktası (centroid) etrafında 120 FPS pürüzsüz yakınlaştırma (%25–%400) ve kaydırma (parmak kaldırırken sıçrama yapmaz).
-        // 2) Tek parmak basılı tutma: basılı tutulduğu sürece 2X hızında oynatır ("2X ▶▶"), parmak kaldırıldığında anında normal hıza döner.
-        // 3) Tek parmak sağa/sola kaydırma: videoyu pürüzsüzce ileri/geri sarar ve ortada hedef süreyi gösterir.
-        // 4) Tek dokunuş: kontrolleri açar/kapatır.
+        // Dokun = kontrolleri aç/kapat, iki parmak = yakınlaştır/uzaklaştır (%30 – %150),
+        // yakınlaştırılmışken tek parmak = kaydır.
         val toggleState = rememberUpdatedState(onToggleControls)
-        val interactionState = rememberUpdatedState(onInteraction)
-        val gestureScope = rememberCoroutineScope()
+        var zoomHint by remember { mutableStateOf<String?>(null) }
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { toggleState.value() })
+                }
                 .pointerInput(holder) {
-                    val slop = viewConfiguration.touchSlop
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val startPos = down.position
-                        var mode = VideoTouchGestureMode.NONE
-                        var prevCount = 1
-                        var prevCentroid = down.position
-                        var prevSpan = 0f
-                        var swipeStartMs = 0L
-                        var swipeAccumDx = 0f
-                        var swipeTargetMs = 0L
-                        var lastLiveSeekAt = 0L
-
-                        val longPressJob = gestureScope.launch {
-                            delay(240L)
-                            if (mode == VideoTouchGestureMode.NONE) {
-                                mode = VideoTouchGestureMode.HOLD_2X
-                                holder.startHold2x()
-                            }
-                        }
-
-                        try {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val pressed = event.changes.filter { it.pressed }
-                                if (pressed.isEmpty()) break
-
-                                if (pressed.size >= 2) {
-                                    longPressJob.cancel()
-                                    if (mode == VideoTouchGestureMode.HOLD_2X) {
-                                        holder.stopHold2x()
-                                    }
-                                    if (mode == VideoTouchGestureMode.SWIPE_SEEK) {
-                                        holder.swipeSeekTimeText = null
-                                    }
-                                    val curCentroid = calculateCentroid(pressed)
-                                    val curSpan = calculateAverageSpan(pressed, curCentroid)
-                                    if (mode != VideoTouchGestureMode.PINCH_ZOOM || prevCount != pressed.size) {
-                                        mode = VideoTouchGestureMode.PINCH_ZOOM
-                                        prevCentroid = curCentroid
-                                        prevSpan = curSpan
-                                        prevCount = pressed.size
-                                    } else {
-                                        val factor = if (prevSpan > 8f && curSpan > 8f) {
-                                            (curSpan / prevSpan).coerceIn(0.5f, 2.0f)
-                                        } else 1f
-                                        val panDx = curCentroid.x - prevCentroid.x
-                                        val panDy = curCentroid.y - prevCentroid.y
-                                        holder.applyPinch(factor, panDx, panDy, curCentroid.x, curCentroid.y)
-                                        prevCentroid = curCentroid
-                                        prevSpan = curSpan
-                                    }
-                                    event.changes.forEach { if (it.positionChanged()) it.consume() }
-                                } else {
-                                    val p = pressed[0]
-                                    if (mode == VideoTouchGestureMode.PINCH_ZOOM) {
-                                        // İki parmaktan tek parmağa düşüldüğünde merkez (centroid) sıçramasını %100 engelle
-                                        if (prevCount != 1) {
-                                            prevCentroid = p.position
-                                            prevCount = 1
-                                        } else if (holder.zoom > 1.01f) {
-                                            val panDx = p.position.x - prevCentroid.x
-                                            val panDy = p.position.y - prevCentroid.y
-                                            prevCentroid = p.position
-                                            holder.applyPinch(1f, panDx, panDy, p.position.x, p.position.y)
-                                        }
-                                        if (p.positionChanged()) p.consume()
-                                    } else if (mode == VideoTouchGestureMode.HOLD_2X) {
-                                        if (p.positionChanged()) p.consume()
-                                    } else if (mode == VideoTouchGestureMode.NONE) {
-                                        val dx = p.position.x - startPos.x
-                                        val dy = p.position.y - startPos.y
-                                        if (hypot(dx, dy) > slop) {
-                                            longPressJob.cancel()
-                                            if (abs(dx) > abs(dy) * 1.15f) {
-                                                mode = VideoTouchGestureMode.SWIPE_SEEK
-                                                holder.syncPositionFromPlayer()
-                                                swipeStartMs = holder.positionMs
-                                                swipeTargetMs = swipeStartMs
-                                                swipeAccumDx = 0f
-                                                prevCentroid = p.position
-                                                if (!controlsVisible) {
-                                                    toggleState.value()
-                                                } else {
-                                                    interactionState.value()
-                                                }
-                                            } else {
-                                                mode = VideoTouchGestureMode.PAN_ONLY
-                                                prevCentroid = p.position
-                                            }
-                                        }
-                                    }
-
-                                    if (mode == VideoTouchGestureMode.SWIPE_SEEK) {
-                                        val stepDx = p.position.x - prevCentroid.x
-                                        prevCentroid = p.position
-                                        swipeAccumDx += stepDx
-                                        val dur = holder.durationMs
-                                        val seekRangeMs = if (dur > 0L) {
-                                            (dur / 4L).coerceIn(45_000L, 180_000L)
-                                        } else {
-                                            90_000L
-                                        }
-                                        val deltaMs = ((swipeAccumDx / holder.viewWidthPx.coerceAtLeast(300f)) * seekRangeMs.toFloat()).toLong()
-                                        swipeTargetMs = if (dur > 0L) {
-                                            (swipeStartMs + deltaMs).coerceIn(0L, dur)
-                                        } else {
-                                            (swipeStartMs + deltaMs).coerceAtLeast(0L)
-                                        }
-                                        holder.previewScrubPosition(swipeTargetMs)
-                                        holder.swipeSeekTimeText = formatShortTime(swipeTargetMs)
-                                        interactionState.value()
-                                        val now = System.currentTimeMillis()
-                                        if (now - lastLiveSeekAt >= 90L) {
-                                            lastLiveSeekAt = now
-                                            holder.seekTo(swipeTargetMs, SeekParameters.CLOSEST_SYNC)
-                                        }
-                                        if (p.positionChanged()) p.consume()
-                                    } else if (mode == VideoTouchGestureMode.PAN_ONLY && holder.zoom > 1.01f) {
-                                        val panDx = p.position.x - prevCentroid.x
-                                        val panDy = p.position.y - prevCentroid.y
-                                        prevCentroid = p.position
-                                        holder.applyPinch(1f, panDx, panDy, p.position.x, p.position.y)
-                                        if (p.positionChanged()) p.consume()
-                                    }
-                                }
-                            }
-                        } finally {
-                            longPressJob.cancel()
-                            when (mode) {
-                                VideoTouchGestureMode.NONE -> {
-                                    toggleState.value()
-                                }
-                                VideoTouchGestureMode.HOLD_2X -> {
-                                    holder.stopHold2x()
-                                }
-                                VideoTouchGestureMode.SWIPE_SEEK -> {
-                                    holder.swipeSeekTimeText = null
-                                    holder.seekTo(swipeTargetMs, SeekParameters.CLOSEST_SYNC)
-                                    interactionState.value()
-                                }
-                                else -> {}
-                            }
+                    detectTransformGestures { _, pan, gestureZoom, _ ->
+                        holder.applyPinch(gestureZoom, pan.x, pan.y)
+                        if (gestureZoom != 1f) {
+                            zoomHint = "%" + (holder.zoom * 100f).roundToInt()
                         }
                     }
                 }
         )
-
-        if (holder.isHold2xActive) {
-            Hold2xIndicatorBadge(
+        val hint = zoomHint
+        if (hint != null) {
+            LaunchedEffect(hint) {
+                delay(900)
+                zoomHint = null
+            }
+            Text(
+                text = hint,
+                color = Color.White,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 24.dp)
-            )
-        }
-
-        val seekTimeOverlay = holder.swipeSeekTimeText
-        if (seekTimeOverlay != null) {
-            SwipeSeekTimeOverlay(
-                timeText = seekTimeOverlay,
-                modifier = Modifier.align(Alignment.Center)
+                    .padding(top = 28.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xCC000000))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
             )
         }
 
@@ -3477,7 +3017,6 @@ private fun SingleOrFocusedPlayerContent(
                         scaleMode = holder.scaleMode,
                         onScaleChange = { newScale ->
                             onInteraction()
-                            holder.resetZoom()
                             holder.scaleMode = newScale
                         },
                         onMenuOpen = onMenuOpen,
@@ -3575,164 +3114,18 @@ private fun MultiGridVideoCell(
             videoWpx = holder.videoWpx,
             videoHpx = holder.videoHpx,
             mode = holder.scaleMode,
-            modifier = Modifier.fillMaxSize(),
-            zoomProvider = { holder.zoom },
-            panXProvider = { holder.panX },
-            panYProvider = { holder.panY },
-            onSurfaceMetrics = { vw, vh, bw, bh ->
-                holder.viewWidthPx = vw
-                holder.viewHeightPx = vh
-                holder.baseVideoWidthPx = bw
-                holder.baseVideoHeightPx = bh
-            }
+            modifier = Modifier.fillMaxSize()
         )
 
-        val cellToggleState = rememberUpdatedState(onToggleControls)
-        val cellInteractionState = rememberUpdatedState(onInteraction)
-        val cellScope = rememberCoroutineScope()
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(holder) {
-                    val slop = viewConfiguration.touchSlop
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val startPos = down.position
-                        var mode = VideoTouchGestureMode.NONE
-                        var prevCount = 1
-                        var prevCentroid = down.position
-                        var prevSpan = 0f
-                        var swipeStartMs = 0L
-                        var swipeAccumDx = 0f
-                        var swipeTargetMs = 0L
-                        var lastLiveSeekAt = 0L
-
-                        val longPressJob = cellScope.launch {
-                            delay(240L)
-                            if (mode == VideoTouchGestureMode.NONE) {
-                                mode = VideoTouchGestureMode.HOLD_2X
-                                holder.startHold2x()
-                            }
-                        }
-
-                        try {
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val pressed = event.changes.filter { it.pressed }
-                                if (pressed.isEmpty()) break
-
-                                if (pressed.size >= 2) {
-                                    longPressJob.cancel()
-                                    if (mode == VideoTouchGestureMode.HOLD_2X) holder.stopHold2x()
-                                    if (mode == VideoTouchGestureMode.SWIPE_SEEK) holder.swipeSeekTimeText = null
-                                    val curCentroid = calculateCentroid(pressed)
-                                    val curSpan = calculateAverageSpan(pressed, curCentroid)
-                                    if (mode != VideoTouchGestureMode.PINCH_ZOOM || prevCount != pressed.size) {
-                                        mode = VideoTouchGestureMode.PINCH_ZOOM
-                                        prevCentroid = curCentroid
-                                        prevSpan = curSpan
-                                        prevCount = pressed.size
-                                    } else {
-                                        val factor = if (prevSpan > 8f && curSpan > 8f) (curSpan / prevSpan).coerceIn(0.5f, 2.0f) else 1f
-                                        holder.applyPinch(
-                                            factor,
-                                            curCentroid.x - prevCentroid.x,
-                                            curCentroid.y - prevCentroid.y,
-                                            curCentroid.x,
-                                            curCentroid.y
-                                        )
-                                        prevCentroid = curCentroid
-                                        prevSpan = curSpan
-                                    }
-                                    event.changes.forEach { if (it.positionChanged()) it.consume() }
-                                } else {
-                                    val p = pressed[0]
-                                    if (mode == VideoTouchGestureMode.PINCH_ZOOM) {
-                                        if (prevCount != 1) {
-                                            prevCentroid = p.position
-                                            prevCount = 1
-                                        } else if (holder.zoom > 1.01f) {
-                                            holder.applyPinch(1f, p.position.x - prevCentroid.x, p.position.y - prevCentroid.y, p.position.x, p.position.y)
-                                            prevCentroid = p.position
-                                        }
-                                        if (p.positionChanged()) p.consume()
-                                    } else if (mode == VideoTouchGestureMode.HOLD_2X) {
-                                        if (p.positionChanged()) p.consume()
-                                    } else if (mode == VideoTouchGestureMode.NONE) {
-                                        val dx = p.position.x - startPos.x
-                                        val dy = p.position.y - startPos.y
-                                        if (hypot(dx, dy) > slop) {
-                                            longPressJob.cancel()
-                                            if (abs(dx) > abs(dy) * 1.15f) {
-                                                mode = VideoTouchGestureMode.SWIPE_SEEK
-                                                holder.syncPositionFromPlayer()
-                                                swipeStartMs = holder.positionMs
-                                                swipeTargetMs = swipeStartMs
-                                                swipeAccumDx = 0f
-                                                prevCentroid = p.position
-                                                cellInteractionState.value()
-                                            } else {
-                                                mode = VideoTouchGestureMode.PAN_ONLY
-                                                prevCentroid = p.position
-                                            }
-                                        }
-                                    }
-
-                                    if (mode == VideoTouchGestureMode.SWIPE_SEEK) {
-                                        swipeAccumDx += (p.position.x - prevCentroid.x)
-                                        prevCentroid = p.position
-                                        val dur = holder.durationMs
-                                        val seekRangeMs = if (dur > 0L) (dur / 4L).coerceIn(45_000L, 180_000L) else 90_000L
-                                        val deltaMs = ((swipeAccumDx / holder.viewWidthPx.coerceAtLeast(200f)) * seekRangeMs.toFloat()).toLong()
-                                        swipeTargetMs = if (dur > 0L) (swipeStartMs + deltaMs).coerceIn(0L, dur) else (swipeStartMs + deltaMs).coerceAtLeast(0L)
-                                        holder.previewScrubPosition(swipeTargetMs)
-                                        holder.swipeSeekTimeText = formatShortTime(swipeTargetMs)
-                                        cellInteractionState.value()
-                                        val now = System.currentTimeMillis()
-                                        if (now - lastLiveSeekAt >= 90L) {
-                                            lastLiveSeekAt = now
-                                            holder.seekTo(swipeTargetMs, SeekParameters.CLOSEST_SYNC)
-                                        }
-                                        if (p.positionChanged()) p.consume()
-                                    } else if (mode == VideoTouchGestureMode.PAN_ONLY && holder.zoom > 1.01f) {
-                                        holder.applyPinch(1f, p.position.x - prevCentroid.x, p.position.y - prevCentroid.y, p.position.x, p.position.y)
-                                        prevCentroid = p.position
-                                        if (p.positionChanged()) p.consume()
-                                    }
-                                }
-                            }
-                        } finally {
-                            longPressJob.cancel()
-                            when (mode) {
-                                VideoTouchGestureMode.NONE -> cellToggleState.value()
-                                VideoTouchGestureMode.HOLD_2X -> holder.stopHold2x()
-                                VideoTouchGestureMode.SWIPE_SEEK -> {
-                                    holder.swipeSeekTimeText = null
-                                    holder.seekTo(swipeTargetMs, SeekParameters.CLOSEST_SYNC)
-                                    cellInteractionState.value()
-                                }
-                                else -> {}
-                            }
-                        }
-                    }
-                }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onToggleControls
+                )
         )
-
-        if (holder.isHold2xActive) {
-            Hold2xIndicatorBadge(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 8.dp)
-            )
-        }
-
-        val cellSeekOverlay = holder.swipeSeekTimeText
-        if (cellSeekOverlay != null) {
-            SwipeSeekTimeOverlay(
-                timeText = cellSeekOverlay,
-                modifier = Modifier.align(Alignment.Center)
-            )
-        }
 
         SubtitleOverlay(
             text = holder.cueText,
@@ -3861,7 +3254,6 @@ private fun MultiGridVideoCell(
                             onInteraction()
                             val all = ScaleMode.values()
                             val next = all[(holder.scaleMode.ordinal + 1) % all.size]
-                            holder.resetZoom()
                             holder.scaleMode = next
                             scaleHint = next.label
                         },
