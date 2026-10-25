@@ -109,7 +109,7 @@ object InputAccess {
         for (c in candidates) {
             try {
                 val f = File(c)
-                if (f.isFile && f.canRead() && (expectedSize <= 0L || f.length() == expectedSize)) {
+                if (f.isFile && f.canRead() && f.length() > 0L && (expectedSize <= 0L || f.length() == expectedSize)) {
                     FileInputStream(f).use { it.read() }
                     return f.absolutePath
                 }
@@ -526,12 +526,15 @@ private class SafNativeDataSource(
                 InputAccess.realPath(context, uri).also { p ->
                     if (p != null) realPathCache[key] = p else noRealPath.add(key)
                 }
-            usingDelegate = true
-            return if (local != null) {
-                fallbackDelegate.open(dataSpec.buildUpon().setUri(Uri.fromFile(File(local))).build())
-            } else {
-                fallbackDelegate.open(dataSpec)
+            if (local != null) {
+                usingDelegate = true
+                return fallbackDelegate.open(dataSpec.buildUpon().setUri(Uri.fromFile(File(local))).build())
             }
+            // KÖK NEDEN DÜZELTMESİ: Yerel SAF content:// URI gerçek dosya yoluna çevrilemediğinde
+            // ExoPlayer ContentDataSource çoğu zaman C.LENGTH_UNSET (-1) döndürdüğü için MKV Cues / MP4 moov
+            // okunamıyor ve ileri-geri sarma (seek) tamamen kilitleniyordu. CloudStreamSession (Os.pread +
+            // statSize/OpenableColumns.SIZE) kullanılarak tüm content:// videolarında %100 kesin boyut ve
+            // anında rastgele erişim (random-access seek) garanti altına alınır.
         }
 
         usingDelegate = false

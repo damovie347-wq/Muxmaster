@@ -122,9 +122,17 @@ import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import kotlinx.coroutines.CoroutineScope
@@ -770,6 +778,26 @@ internal fun saveSubtitleSize(ctx: Context, v: Float) {
     ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE).edit().putFloat("subtitle_sp", c).apply()
 }
 
+internal val SKIP_SECOND_OPTIONS = listOf(5, 10, 15, 20, 30)
+internal val skipSecondsState = mutableIntStateOf(10)
+private var skipSecondsLoaded = false
+
+internal fun loadSkipSeconds(ctx: Context): Int {
+    if (!skipSecondsLoaded) {
+        skipSecondsLoaded = true
+        skipSecondsState.intValue = ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
+            .getInt("skip_seconds", 10).coerceIn(5, 60)
+    }
+    return skipSecondsState.intValue
+}
+
+internal fun saveSkipSeconds(ctx: Context, seconds: Int) {
+    val c = seconds.coerceIn(5, 60)
+    skipSecondsState.intValue = c
+    skipSecondsLoaded = true
+    ctx.getSharedPreferences("player_prefs", Context.MODE_PRIVATE).edit().putInt("skip_seconds", c).apply()
+}
+
 @Composable
 internal fun SubtitleOverlay(text: String, modifier: Modifier = Modifier, fontScale: Float = 1f) {
     val ctx = LocalContext.current
@@ -1106,7 +1134,7 @@ internal fun SmoothVideoSlider(
                     val target = newVal.toLong().coerceIn(startMs, safeEnd)
                     dragValueMs = target
                     val now = System.currentTimeMillis()
-                    if (now - lastLiveSeekAt >= 320L) {
+                    if (now - lastLiveSeekAt >= 180L) {
                         lastLiveSeekAt = now
                         lastSentTarget = target
                         onSeekTo(target)
@@ -1116,8 +1144,7 @@ internal fun SmoothVideoSlider(
             onValueChangeFinished = {
                 if (enabled) {
                     val finalTarget = dragValueMs.coerceIn(startMs, safeEnd)
-                    // Tek dokunuşta aynı hedefe ikinci kez seek atılmaz (dekoder iki kez sıfırlanmasın).
-                    if (finalTarget != lastSentTarget) onSeekTo(finalTarget)
+                    onSeekTo(finalTarget)
                     lastSentTarget = -1L
                 }
                 isDragging = false
@@ -1169,7 +1196,12 @@ internal fun PlayerControls(
     leadingBottom: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null
 ) {
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { loadSkipSeconds(ctx) }
+    val skipSec = skipSecondsState.intValue
+    val skipDeltaMs = skipSec * 1000L
     var speedPanel by remember { mutableStateOf(false) }
+    var skipPanel by remember { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (trailing != null) {
@@ -1226,12 +1258,27 @@ internal fun PlayerControls(
                 }
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .height(38.dp)
+                        .widthIn(min = 38.dp)
                         .clip(CircleShape)
-                        .clickable { onSeekBy(-10_000L) },
+                        .combinedClickable(
+                            onClick = { onSeekBy(-skipDeltaMs) },
+                            onLongClick = { skipPanel = true; onMenuOpen(true) }
+                        )
+                        .padding(horizontal = 4.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Replay10, "10 sn geri", tint = textColor, modifier = Modifier.size(23.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (skipSec == 10) Icons.Filled.Replay10 else Icons.Filled.FastRewind,
+                            "$skipSec sn geri (basılı tut: süreyi değiştir)",
+                            tint = textColor,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        if (skipSec != 10) {
+                            Text("-${skipSec}s", color = textColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
                 Box(
                     modifier = Modifier
@@ -1249,12 +1296,27 @@ internal fun PlayerControls(
                 }
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .height(38.dp)
+                        .widthIn(min = 38.dp)
                         .clip(CircleShape)
-                        .clickable { onSeekBy(10_000L) },
+                        .combinedClickable(
+                            onClick = { onSeekBy(skipDeltaMs) },
+                            onLongClick = { skipPanel = true; onMenuOpen(true) }
+                        )
+                        .padding(horizontal = 4.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Forward10, "10 sn ileri", tint = textColor, modifier = Modifier.size(23.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (skipSec == 10) Icons.Filled.Forward10 else Icons.Filled.FastForward,
+                            "$skipSec sn ileri (basılı tut: süreyi değiştir)",
+                            tint = textColor,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        if (skipSec != 10) {
+                            Text("+${skipSec}s", color = textColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
                 if (onRotateScreen != null) {
                     Box(
@@ -1285,6 +1347,20 @@ internal fun PlayerControls(
                 onDismiss = {
                     speedPanel = false
                     lastSpeedPopupDismissAt = System.currentTimeMillis()
+                    onMenuOpen(false)
+                }
+            )
+        }
+        if (skipPanel) {
+            SkipDurationPopup(
+                currentSeconds = skipSec,
+                onSelect = { chosen ->
+                    saveSkipSeconds(ctx, chosen)
+                    skipPanel = false
+                    onMenuOpen(false)
+                },
+                onDismiss = {
+                    skipPanel = false
                     onMenuOpen(false)
                 }
             )
@@ -1478,8 +1554,8 @@ internal fun VideoSurface(
                 with(density) { Pair(videoWpx.toDp(), videoHpx.toDp()) }
             } else fit
         }
-        // Parmakla yakınlaştırma / uzaklaştırma (%30 – %150)
-        val z = zoom.coerceIn(0.3f, 1.5f)
+        // Parmakla yakınlaştırma / uzaklaştırma (%30 – %300)
+        val z = zoom.coerceIn(0.3f, 3.0f)
         val target: Pair<Dp, Dp> = Pair(baseTarget.first * z, baseTarget.second * z)
 
         // Kaydırma sınırları (px): video hücreden ne kadar taşıyorsa o kadar kaydırılabilir
@@ -1487,72 +1563,45 @@ internal fun VideoSurface(
         val maxPanY = with(density) { ((target.second - ch) / 2).coerceAtLeast(0.dp).toPx() }
         if (onPanLimits != null) SideEffect { onPanLimits(maxPanX, maxPanY) }
 
-        // Hücreye sığan her durumda donanım katmanı (SurfaceView / HWC overlay, GPU kopyası yok).
-        // Yalnızca taşan (kırpılması gereken) durumda TextureView kullanılır.
-        val needsCroppedTexture = (target.first > cw + 1.dp || target.second > ch + 1.dp)
+        val fw = fit.first.value.coerceAtLeast(1f)
+        val fh = fit.second.value.coerceAtLeast(1f)
+        val sx = target.first.value / fw
+        val sy = target.second.value / fh
 
-        if (!needsCroppedTexture) {
-            val safeW = target.first.coerceAtMost(cw)
-            val safeH = target.second.coerceAtMost(ch)
-            key("hw_surface") {
-                AndroidView(
-                    factory = { ctx ->
-                        SurfaceView(ctx).also { sv ->
-                            sv.tag = player
-                            player.setVideoSurfaceView(sv)
-                        }
-                    },
-                    update = { sv ->
-                        if (sv.tag !== player) {
-                            sv.tag = player
-                            player.setVideoSurfaceView(sv)
-                        }
-                    },
-                    onRelease = { sv ->
-                        if (sv.tag === player) {
-                            player.clearVideoSurfaceView(sv)
-                        }
-                        sv.tag = null
-                    },
-                    modifier = Modifier.requiredSize(safeW, safeH)
-                )
-            }
-        } else {
-            val fw = fit.first.value.coerceAtLeast(1f)
-            val fh = fit.second.value.coerceAtLeast(1f)
-            val sx = target.first.value / fw
-            val sy = target.second.value / fh
-            key("cropped_texture") {
-                AndroidView(
-                    factory = { ctx ->
-                        TextureView(ctx).also { tv ->
-                            tv.isOpaque = false
-                            tv.tag = player
-                            player.setVideoTextureView(tv)
-                        }
-                    },
-                    update = { tv ->
-                        if (tv.tag !== player) {
-                            tv.tag = player
-                            player.setVideoTextureView(tv)
-                        }
-                    },
-                    onRelease = { tv ->
-                        if (tv.tag === player) {
-                            player.clearVideoTextureView(tv)
-                        }
-                        tv.tag = null
-                    },
-                    modifier = Modifier
-                        .requiredSize(fit.first, fit.second)
-                        .graphicsLayer {
-                            scaleX = sx
-                            scaleY = sy
-                            translationX = panX.coerceIn(-maxPanX, maxPanX)
-                            translationY = panY.coerceIn(-maxPanY, maxPanY)
-                        }
-                )
-            }
+        // KÖK NEDEN DÜZELTMESİ: Zoom sırasında SurfaceView <-> TextureView geçişi yapılmaz ve
+        // requiredSize değiştirilmez. Sabit boyutlu TextureView üzerinde %100 GPU graphicsLayer
+        // matris dönüşümü (scaleX, scaleY, translationX, translationY) kullanılarak 60/120fps
+        // sıfır atlamalı (zero-jitter) yakınlaştırma ve kaydırma sağlanır.
+        key("gpu_video_texture") {
+            AndroidView(
+                factory = { ctx ->
+                    TextureView(ctx).also { tv ->
+                        tv.isOpaque = false
+                        tv.tag = player
+                        player.setVideoTextureView(tv)
+                    }
+                },
+                update = { tv ->
+                    if (tv.tag !== player) {
+                        tv.tag = player
+                        player.setVideoTextureView(tv)
+                    }
+                },
+                onRelease = { tv ->
+                    if (tv.tag === player) {
+                        player.clearVideoTextureView(tv)
+                    }
+                    tv.tag = null
+                },
+                modifier = Modifier
+                    .requiredSize(fit.first, fit.second)
+                    .graphicsLayer {
+                        scaleX = sx
+                        scaleY = sy
+                        translationX = panX.coerceIn(-maxPanX, maxPanX)
+                        translationY = panY.coerceIn(-maxPanY, maxPanY)
+                    }
+            )
         }
     }
 }
@@ -1817,6 +1866,49 @@ internal fun SpeedPanelPopup(
 }
 
 @Composable
+internal fun SkipDurationPopup(
+    currentSeconds: Int,
+    onSelect: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val screenW = LocalConfiguration.current.screenWidthDp
+    val panelWidth = (screenW - 32).coerceIn(240, 460).dp
+    val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+    Popup(
+        popupPositionProvider = remember(gap) { AboveCenterPositionProvider(gap) },
+        onDismissRequest = onDismiss,
+        properties = NonFocusPopup
+    ) {
+        KeepSystemBarsHidden()
+        Column(
+            modifier = Modifier
+                .width(panelWidth)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color(0xFF141418))
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Text(
+                "İleri / Geri Atlama Süresi (Çift Tıklama & Buton): $currentSeconds sn",
+                color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                SKIP_SECOND_OPTIONS.forEach { sec ->
+                    OptionChip("${sec} sn", sec == currentSeconds, Color.White, Color(0xFF2A2A31)) {
+                        onSelect(sec)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun FullscreenPlayerDialog(
     player: ExoPlayer,
     tracks: Tracks,
@@ -1895,13 +1987,26 @@ private fun FullscreenPlayerDialog(
         ) {
             VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
 
+            val toggleControlsState = rememberUpdatedState { controlsVisible = !controlsVisible }
+            val onTogglePlayState = rememberUpdatedState(onTogglePlay)
+            val onSeekByState = rememberUpdatedState(onSeekBy)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { controlsVisible = !controlsVisible }
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { toggleControlsState.value() },
+                            onDoubleTap = { offset ->
+                                val w = size.width.coerceAtLeast(1)
+                                val skipMs = skipSecondsState.intValue * 1000L
+                                when {
+                                    offset.x < w / 3f -> onSeekByState.value(-skipMs)
+                                    offset.x > (w * 2f) / 3f -> onSeekByState.value(skipMs)
+                                    else -> onTogglePlayState.value()
+                                }
+                            }
+                        )
+                    }
             )
 
             SubtitleOverlay(
@@ -2043,19 +2148,20 @@ internal class SlotPlayerHolder(
     /** Bulut (Google Drive) hazırlık / indirme durumu metni; yalnızca yüklenirken dolu. */
     var cloudStatus: String? by mutableStateOf(null)
 
-    /** Parmakla yakınlaştırma: 0.3 (%30) – 1.5 (%150). */
+    /** Parmakla yakınlaştırma: 0.3 (%30) – 3.0 (%300). */
     var zoom: Float by mutableFloatStateOf(1f)
     var panX: Float by mutableFloatStateOf(0f)
     var panY: Float by mutableFloatStateOf(0f)
     private var rawZoom: Float = 1f
     var maxPanX: Float = 0f
     var maxPanY: Float = 0f
+    var isHolding2x: Boolean by mutableStateOf(false)
+    private var savedSpeedBeforeHold: Float = 1f
     @Volatile private var released = false
 
     fun applyPinch(factor: Float, panDx: Float, panDy: Float) {
-        rawZoom = (rawZoom * factor).coerceIn(0.3f, 1.5f)
-        // %100 civarında hafif mıknatıs: tam boyuta kolayca dönülür
-        zoom = if (abs(rawZoom - 1f) < 0.04f) 1f else rawZoom
+        rawZoom = (rawZoom * factor).coerceIn(0.3f, 3.0f)
+        zoom = if (abs(rawZoom - 1f) < 0.03f) 1f else rawZoom
         if (zoom > 1f) {
             panX = (panX + panDx).coerceIn(-maxPanX, maxPanX)
             panY = (panY + panDy).coerceIn(-maxPanY, maxPanY)
@@ -2065,11 +2171,33 @@ internal class SlotPlayerHolder(
         }
     }
 
+    fun applyPan(panDx: Float, panDy: Float) {
+        if (zoom > 1f) {
+            panX = (panX + panDx).coerceIn(-maxPanX, maxPanX)
+            panY = (panY + panDy).coerceIn(-maxPanY, maxPanY)
+        }
+    }
+
     fun resetZoom() {
         rawZoom = 1f
         zoom = 1f
         panX = 0f
         panY = 0f
+    }
+
+    fun setTemporarySpeedHold(holding: Boolean) {
+        if (holding) {
+            if (!isHolding2x) {
+                savedSpeedBeforeHold = speed
+                isHolding2x = true
+                player.setPlaybackSpeed(2.0f)
+            }
+        } else {
+            if (isHolding2x) {
+                isHolding2x = false
+                player.setPlaybackSpeed(savedSpeedBeforeHold)
+            }
+        }
     }
 
     private var pendingSeekTargetMs: Long = -1L
@@ -2250,24 +2378,41 @@ internal class SlotPlayerHolder(
         }
     }
 
-    fun seekTo(targetMs: Long, params: SeekParameters = SeekParameters.CLOSEST_SYNC) {
-        val safe = if (durationMs > 0) targetMs.coerceIn(0L, durationMs) else targetMs.coerceAtLeast(0L)
+    fun currentAccuratePosition(): Long {
+        val d = player.duration
+        if (d != C.TIME_UNSET && d > 0 && durationMs != d) {
+            durationMs = d
+        }
+        return if (System.currentTimeMillis() - pendingSeekTimestamp <= 850L && pendingSeekTargetMs >= 0L) {
+            pendingSeekTargetMs
+        } else {
+            player.currentPosition.coerceAtLeast(0L).also { positionMs = it }
+        }
+    }
+
+    fun seekTo(targetMs: Long, isLiveScrub: Boolean = false) {
+        val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: durationMs
+        if (d > 0L && durationMs != d) durationMs = d
+        val safe = if (d > 0L) targetMs.coerceIn(0L, d) else targetMs.coerceAtLeast(0L)
         pendingSeekTargetMs = safe
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = safe
-        // Anahtar kareye hizalı seek: dekoder hedefe kadar kare çözüp atmaz -> anında oynar, CPU harcamaz.
-        player.setSeekParameters(params)
+        // Canlı parmak sürüklemesinde ±1.2sn toleranslı hızlı seek;
+        // parmak bırakıldığında, slider tamamlandığında veya çift tıklamada ±300ms hassas seek.
+        // Böylece uzun GOP'lu videolarda eski kareye yapışıp ileri/geri gitmeme sorunu %100 ortadan kalkar!
+        player.setSeekParameters(
+            if (isLiveScrub) SeekParameters(1_200_000L, 1_200_000L)
+            else SeekParameters(300_000L, 300_000L)
+        )
+        if (player.playbackState == Player.STATE_IDLE) {
+            player.prepare()
+        }
         player.seekTo(safe)
     }
 
     fun seekBy(deltaMs: Long) {
-        val base = if (System.currentTimeMillis() - pendingSeekTimestamp <= 700L && pendingSeekTargetMs >= 0L) {
-            pendingSeekTargetMs
-        } else {
-            player.currentPosition.coerceAtLeast(0L)
-        }
-        // İleri sarmada sonraki, geri sarmada önceki anahtar kare: yön her zaman doğru, bekleme yok.
-        seekTo(base + deltaMs, if (deltaMs >= 0L) SeekParameters.NEXT_SYNC else SeekParameters.PREVIOUS_SYNC)
+        val base = currentAccuratePosition()
+        seekTo(base + deltaMs, isLiveScrub = false)
     }
 
     fun updateSpeed(newSpeed: Float) {
@@ -2428,11 +2573,10 @@ fun StreamPlayerScreen(
     val anyPlaying = holders.values.any { it.isPlaying }
     val allMuted = holders.values.isNotEmpty() && holders.values.all { it.muted }
 
-    // Yalnızca kontroller açıkken 250ms'de bir konum güncelle (gizliyken %0 recomposition, %0 CPU!)
     LaunchedEffect(controlsVisible, slots.size) {
-        while (controlsVisible) {
+        while (true) {
             holders.values.forEach { it.syncPositionFromPlayer() }
-            delay(250)
+            delay(if (controlsVisible) 200L else 1000L)
         }
     }
 
@@ -2677,7 +2821,7 @@ fun StreamPlayerScreen(
                         IconButton(
                             onClick = {
                                 interactionTick++
-                                holders.values.forEach { it.seekBy(-10_000L) }
+                                holders.values.forEach { it.seekBy(-skipSecondsState.intValue * 1000L) }
                             },
                             modifier = Modifier.size(38.dp)
                         ) {
@@ -2712,7 +2856,7 @@ fun StreamPlayerScreen(
                         IconButton(
                             onClick = {
                                 interactionTick++
-                                holders.values.forEach { it.seekBy(10_000L) }
+                                holders.values.forEach { it.seekBy(skipSecondsState.intValue * 1000L) }
                             },
                             modifier = Modifier.size(38.dp)
                         ) {
@@ -2835,27 +2979,199 @@ private fun SingleOrFocusedPlayerContent(
             )
         }
 
-        // Dokun = kontrolleri aç/kapat, iki parmak = yakınlaştır/uzaklaştır (%30 – %150),
-        // yakınlaştırılmışken tek parmak = kaydır.
+        LaunchedEffect(Unit) { loadSkipSeconds(context) }
         val toggleState = rememberUpdatedState(onToggleControls)
+        val interactionState = rememberUpdatedState(onInteraction)
+
         var zoomHint by remember { mutableStateOf<String?>(null) }
+        var scrubOverlayText by remember { mutableStateOf<String?>(null) }
+        var scrubIsForward by remember { mutableStateOf(true) }
+
+        // 3 Bölgeli Çift Tıklama Geri Bildirimi:
+        // -1 = Sol (-10sn / -15sn), 0 = Orta (Duraklat/Oynat), +1 = Sağ (+10sn / +15sn)
+        var doubleTapZone by remember { mutableStateOf<Int?>(null) }
+        var doubleTapAccumSec by remember { mutableIntStateOf(0) }
+        var doubleTapTick by remember { mutableIntStateOf(0) }
+        var centerPlayState by remember { mutableStateOf(false) }
+
+        DisposableEffect(holder) {
+            onDispose { holder.setTemporarySpeedHold(false) }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures(onTap = { toggleState.value() })
+                .pointerInput(holder) {
+                    detectTapGestures(
+                        onPress = {
+                            try {
+                                awaitRelease()
+                            } finally {
+                                holder.setTemporarySpeedHold(false)
+                            }
+                        },
+                        onTap = {
+                            toggleState.value()
+                        },
+                        onDoubleTap = { offset ->
+                            interactionState.value()
+                            val w = size.width.coerceAtLeast(1)
+                            val skipSec = skipSecondsState.intValue
+                            when {
+                                offset.x < w / 3f -> {
+                                    // Sol 1/3: Geri sar (-10sn / ayarlanan saniye)
+                                    holder.seekBy(-skipSec * 1000L)
+                                    doubleTapAccumSec = if (doubleTapZone == -1) doubleTapAccumSec - skipSec else -skipSec
+                                    doubleTapZone = -1
+                                    doubleTapTick++
+                                }
+                                offset.x > (w * 2f) / 3f -> {
+                                    // Sağ 1/3: İleri sar (+10sn / ayarlanan saniye)
+                                    holder.seekBy(skipSec * 1000L)
+                                    doubleTapAccumSec = if (doubleTapZone == 1) doubleTapAccumSec + skipSec else skipSec
+                                    doubleTapZone = 1
+                                    doubleTapTick++
+                                }
+                                else -> {
+                                    // Orta 1/3: Videoyu Durdur / Oynat
+                                    val willPlay = !holder.isPlaying
+                                    holder.togglePlay()
+                                    centerPlayState = willPlay
+                                    doubleTapAccumSec = 0
+                                    doubleTapZone = 0
+                                    doubleTapTick++
+                                }
+                            }
+                        },
+                        onLongPress = {
+                            interactionState.value()
+                            holder.setTemporarySpeedHold(true)
+                        }
+                    )
                 }
                 .pointerInput(holder) {
-                    detectTransformGestures { _, pan, gestureZoom, _ ->
-                        holder.applyPinch(gestureZoom, pan.x, pan.y)
-                        if (gestureZoom != 1f) {
-                            zoomHint = "%" + (holder.zoom * 100f).roundToInt()
+                    val slop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val startPos = down.position
+                        var isPinching = false
+                        var isHorizontalSeeking = false
+                        var isPanningZoomed = false
+                        var scrubOriginX = startPos.x
+                        var scrubBaseMs = 0L
+                        var scrubTargetMs = 0L
+                        var lastLiveSeekTime = 0L
+
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressedCount = event.changes.count { it.pressed }
+
+                            if (pressedCount >= 2) {
+                                // 2 Parmak: Akıcı GPU Yakınlaştırma / Uzaklaştırma ve Kaydırma
+                                if (isHorizontalSeeking) {
+                                    isHorizontalSeeking = false
+                                    scrubOverlayText = null
+                                }
+                                holder.setTemporarySpeedHold(false)
+                                isPinching = true
+                                val zoomChange = event.calculateZoom()
+                                val panChange = event.calculatePan()
+                                if (zoomChange != 1f || panChange != Offset.Zero) {
+                                    holder.applyPinch(zoomChange, panChange.x, panChange.y)
+                                    if ( abs(zoomChange - 1f) > 0.002f) {
+                                        zoomHint = "%" + (holder.zoom * 100f).roundToInt()
+                                    }
+                                }
+                                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                            } else if (pressedCount == 1 && !isPinching && !holder.isHolding2x) {
+                                val change = event.changes.firstOrNull { it.pressed } ?: continue
+                                val dxTotal = change.position.x - startPos.x
+                                val dyTotal = change.position.y - startPos.y
+
+                                if (holder.zoom > 1.04f) {
+                                    // Yakınlaştırılmışken tek parmakla görüntüyü kaydır
+                                    if (!isPanningZoomed && (abs(dxTotal) > slop || abs(dyTotal) > slop)) {
+                                        isPanningZoomed = true
+                                    }
+                                    if (isPanningZoomed) {
+                                        val panDelta = event.calculatePan()
+                                        holder.applyPan(panDelta.x, panDelta.y)
+                                        if (change.positionChanged()) change.consume()
+                                    }
+                                } else {
+                                    // Normal görünümde tek parmakla sağa/sola kaydırarak ileri/geri sarma
+                                    if (!isHorizontalSeeking) {
+                                        if (abs(dxTotal) > slop * 1.2f && abs(dxTotal) > abs(dyTotal) * 1.15f) {
+                                            isHorizontalSeeking = true
+                                            scrubOriginX = change.position.x
+                                            scrubBaseMs = holder.currentAccuratePosition()
+                                            scrubTargetMs = scrubBaseMs
+                                            interactionState.value()
+                                        }
+                                    }
+                                    if (isHorizontalSeeking) {
+                                        if (change.positionChanged()) change.consume()
+                                        val w = size.width.coerceAtLeast(1).toFloat()
+                                        val dur = holder.durationMs.takeIf { it > 0L }
+                                            ?: holder.player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
+                                            ?: 0L
+                                        // Tam ekran genişliği = 120 saniye (veya kısa videolarda toplam süre)
+                                        val fullSwipeMs = if (dur > 0L) dur.coerceIn(30_000L, 120_000L) else 90_000L
+                                        val deltaX = change.position.x - scrubOriginX
+                                        val deltaMs = ((deltaX / w) * fullSwipeMs.toFloat()).toLong()
+                                        scrubTargetMs = if (dur > 0L) {
+                                            (scrubBaseMs + deltaMs).coerceIn(0L, dur)
+                                        } else {
+                                            (scrubBaseMs + deltaMs).coerceAtLeast(0L)
+                                        }
+                                        val actualDeltaSec = ((scrubTargetMs - scrubBaseMs) / 1000L).toInt()
+                                        scrubIsForward = actualDeltaSec >= 0
+                                        val sign = if (actualDeltaSec >= 0) "+" else "-"
+                                        val absSec = abs(actualDeltaSec)
+                                        val dMin = absSec / 60
+                                        val dSec = absSec % 60
+                                        val deltaFormatted = String.format(Locale.US, "%s%02d:%02d", sign, dMin, dSec)
+                                        scrubOverlayText = "${formatShortTime(scrubTargetMs)} ($deltaFormatted)"
+
+                                        holder.positionMs = scrubTargetMs
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastLiveSeekTime >= 110L) {
+                                            lastLiveSeekTime = now
+                                            holder.seekTo(scrubTargetMs, isLiveScrub = true)
+                                        }
+                                    }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+
+                        if (isHorizontalSeeking) {
+                            holder.seekTo(scrubTargetMs, isLiveScrub = false)
+                            scrubOverlayText = null
                         }
                     }
                 }
         )
+
+        // 1) Basılı Tutunca 2X Hız Göstergesi
+        if (holder.isHolding2x) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 28.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xD9000000))
+                    .padding(horizontal = 16.dp, vertical = 7.dp)
+            ) {
+                Icon(Icons.Filled.FastForward, null, tint = PlayerTurquoise, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("2X Hız", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+
+        // 2) Yakınlaştırma (%) Göstergesi
         val hint = zoomHint
-        if (hint != null) {
+        if (hint != null && !holder.isHolding2x) {
             LaunchedEffect(hint) {
                 delay(900)
                 zoomHint = null
@@ -2872,6 +3188,103 @@ private fun SingleOrFocusedPlayerContent(
                     .background(Color(0xCC000000))
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             )
+        }
+
+        // 3) Parmakla Sağa/Sola Sürükleyerek Sarma Göstergesi
+        val scrubText = scrubOverlayText
+        if (scrubText != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xD9000000))
+                    .padding(horizontal = 18.dp, vertical = 10.dp)
+            ) {
+                Icon(
+                    if (scrubIsForward) Icons.Filled.FastForward else Icons.Filled.FastRewind,
+                    contentDescription = null,
+                    tint = PlayerTurquoise,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = scrubText,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        // 4) 3 Bölgeli Çift Tıklama Göstergesi (Sol: -10sn, Orta: Duraklat/Oynat, Sağ: +10sn)
+        val activeZone = doubleTapZone
+        if (activeZone != null) {
+            LaunchedEffect(doubleTapTick) {
+                delay(750)
+                doubleTapZone = null
+                doubleTapAccumSec = 0
+            }
+            when (activeZone) {
+                -1 -> {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .padding(start = 42.dp)
+                            .clip(RoundedCornerShape(28.dp))
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 20.dp, vertical = 12.dp)
+                    ) {
+                        Icon(Icons.Filled.FastRewind, null, tint = PlayerTurquoise, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "${doubleTapAccumSec} sn",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                1 -> {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 42.dp)
+                            .clip(RoundedCornerShape(28.dp))
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 20.dp, vertical = 12.dp)
+                    ) {
+                        Icon(Icons.Filled.FastForward, null, tint = PlayerTurquoise, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            text = "+${doubleTapAccumSec} sn",
+                            color = Color.White,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                0 -> {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(68.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xCC000000))
+                    ) {
+                        Icon(
+                            if (centerPlayState) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                            contentDescription = null,
+                            tint = PlayerTurquoise,
+                            modifier = Modifier.size(38.dp)
+                        )
+                    }
+                }
+            }
         }
 
         SubtitleOverlay(
@@ -2944,6 +3357,7 @@ private fun SingleOrFocusedPlayerContent(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    var skipMenuOpen by remember { mutableStateOf(false) }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -2952,6 +3366,52 @@ private fun SingleOrFocusedPlayerContent(
                             .background(Color.Black.copy(alpha = 0.65f))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
+                        Box {
+                            Box(
+                                modifier = Modifier
+                                    .height(30.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        onInteraction()
+                                        skipMenuOpen = true
+                                        onMenuOpen(true)
+                                    }
+                                    .padding(horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "±${skipSecondsState.intValue}sn",
+                                    color = PlayerTurquoise,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = skipMenuOpen,
+                                onDismissRequest = {
+                                    skipMenuOpen = false
+                                    onMenuOpen(false)
+                                },
+                                properties = NonFocusPopup
+                            ) {
+                                KeepSystemBarsHidden()
+                                SKIP_SECOND_OPTIONS.forEach { sec ->
+                                    val selected = sec == skipSecondsState.intValue
+                                    DropdownMenuItem(
+                                        text = { Text("±$sec saniye atla") },
+                                        leadingIcon = {
+                                            if (selected) Icon(Icons.Filled.Check, null, modifier = Modifier.size(18.dp))
+                                            else Spacer(Modifier.size(18.dp))
+                                        },
+                                        onClick = {
+                                            saveSkipSeconds(context, sec)
+                                            skipMenuOpen = false
+                                            onMenuOpen(false)
+                                        }
+                                    )
+                                }
+                            }
+                        }
                         TrackMenuButtons(holder.player, holder.tracks, Color.White) { onMenuOpen(it) }
                         IconButton(
                             onClick = {
@@ -3117,14 +3577,26 @@ private fun MultiGridVideoCell(
             modifier = Modifier.fillMaxSize()
         )
 
+        val cellToggleState = rememberUpdatedState(onToggleControls)
+        val cellInteractState = rememberUpdatedState(onInteraction)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onToggleControls
-                )
+                .pointerInput(holder) {
+                    detectTapGestures(
+                        onTap = { cellToggleState.value() },
+                        onDoubleTap = { offset ->
+                            cellInteractState.value()
+                            val w = size.width.coerceAtLeast(1)
+                            val skipMs = skipSecondsState.intValue * 1000L
+                            when {
+                                offset.x < w / 3f -> holder.seekBy(-skipMs)
+                                offset.x > (w * 2f) / 3f -> holder.seekBy(skipMs)
+                                else -> holder.togglePlay()
+                            }
+                        }
+                    )
+                }
         )
 
         SubtitleOverlay(
@@ -3270,7 +3742,7 @@ private fun MultiGridVideoCell(
                     IconButton(
                         onClick = {
                             onInteraction()
-                            holder.seekBy(-10_000L)
+                            holder.seekBy(-skipSecondsState.intValue * 1000L)
                         },
                         modifier = Modifier.size(34.dp)
                     ) {
@@ -3302,7 +3774,7 @@ private fun MultiGridVideoCell(
                     IconButton(
                         onClick = {
                             onInteraction()
-                            holder.seekBy(10_000L)
+                            holder.seekBy(skipSecondsState.intValue * 1000L)
                         },
                         modifier = Modifier.size(34.dp)
                     ) {

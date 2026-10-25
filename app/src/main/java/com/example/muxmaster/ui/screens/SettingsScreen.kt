@@ -10,7 +10,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BatteryChargingFull
@@ -18,12 +20,14 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -49,10 +53,8 @@ fun SettingsScreen(
     val context = LocalContext.current
     val currentLang = LocalConfiguration.current.locales[0].language
 
-    // KOK NEDEN (arka planda islem hala yavas kalabiliyordu): foreground service +
-    // wake lock olsa bile bazi OEM'lerin agresif pil yonetimi CPU'yu kisitlayabiliyor.
-    // Kullaniciya bu istisnayi acikca isteme secenegi sunuyoruz. Ekrana her donuste
-    // (ornegin sistem ayarlarindan geri gelince) durumu tazeliyoruz.
+    LaunchedEffect(Unit) { loadSkipSeconds(context) }
+
     fun isIgnoringBatteryOptimizations(): Boolean {
         val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
         return pm.isIgnoringBatteryOptimizations(context.packageName)
@@ -93,6 +95,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             // ── Dil ──────────────────────────────────────────────────────
@@ -172,6 +175,48 @@ fun SettingsScreen(
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(label, color = TextPrimary, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // ── Video Oynatıcı Atlama Süresi (Çift Tıklama & Sarma) ───────
+            Text(
+                "Video Oynatıcı Atlama Süresi",
+                color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Surface),
+                border = BorderStroke(1.dp, Outline),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text(
+                        "Video oynarken ekranın sağ/sol kısmına çift tıkladığında veya ileri/geri butonlarına bastığında kaç saniye atlanacağını seç (orta kısma çift tıklamak videoyu durdurur/oynatır).",
+                        color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        SKIP_SECOND_OPTIONS.forEach { sec ->
+                            val selected = skipSecondsState.intValue == sec
+                            FilterChip(
+                                selected = selected,
+                                onClick = { saveSkipSeconds(context, sec) },
+                                label = { Text("${sec} sn", fontSize = 11.sp) },
+                                modifier = Modifier.weight(1f),
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Purple,
+                                    selectedLabelColor = Color.White,
+                                    containerColor = SurfaceHigh,
+                                    labelColor = TextSec
+                                )
+                            )
                         }
                     }
                 }
@@ -265,6 +310,8 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
