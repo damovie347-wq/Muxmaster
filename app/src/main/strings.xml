@@ -158,4 +158,5 @@
     <string name="settings_battery_status_restricted">Pil optimizasyonu aktif (yavaşlatabilir)</string>
     <string name="settings_battery_action">Ayarla</string>
     <string name="err_native_tools_missing">mkvmerge/mkvextract uygulamanın içinden çıkarılamadı. Uygulamayı kaldırıp yeniden kurmayı deneyin.</string>
+    <string name="action_hide_background">Gizle (Arka Plana At)</string>
 </resources>

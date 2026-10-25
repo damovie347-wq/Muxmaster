@@ -1,10 +1,8 @@
 package com.example.muxmaster.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Autorenew
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -33,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -287,13 +287,19 @@ fun AudioTrackCard(
     onMoveDown: () -> Unit,
     onExport: () -> Unit,
     onConvertAudio: (() -> Unit)? = null,
+    isConvertingThisTrack: Boolean = false,
+    convertingProgress: Int = 0,
+    onCancelConvert: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
-        border = BorderStroke(1.dp, Outline),
+        border = BorderStroke(1.dp, if (isConvertingThisTrack) Purple else Outline),
         shape = RoundedCornerShape(14.dp),
-        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp)
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
@@ -318,11 +324,41 @@ fun AudioTrackCard(
                 onConvertAudio = onConvertAudio
             )
 
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
+            // Arka plana atılmış yerinde ses dönüştürme ilerleme çubuğu
+            if (isConvertingThisTrack) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .background(SurfaceHigh, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = PurpleLight)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(R.string.converting_label, convertingProgress),
+                        color = PurpleLight,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    LinearProgressIndicator(
+                        progress = { convertingProgress / 100f },
+                        modifier = Modifier.weight(1f).height(5.dp).clip(RoundedCornerShape(3.dp)),
+                        color = Purple,
+                        trackColor = Outline
+                    )
+                    if (onCancelConvert != null) {
+                        Spacer(Modifier.width(6.dp))
+                        IconButton(onClick = onCancelConvert, modifier = Modifier.size(22.dp)) {
+                            Icon(Icons.Filled.Close, stringResource(R.string.cancel_desc), tint = Red, modifier = Modifier.size(15.dp))
+                        }
+                    }
+                }
+            }
+
+            if (expanded) {
                 Column {
                     DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
                     LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
@@ -368,7 +404,10 @@ fun SubtitleTrackCard(
         colors = CardDefaults.cardColors(containerColor = Surface),
         border = BorderStroke(1.dp, Outline),
         shape = RoundedCornerShape(14.dp),
-        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp)
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
     ) {
         Column(Modifier.padding(12.dp)) {
             val title = track.title.ifBlank {
@@ -384,11 +423,7 @@ fun SubtitleTrackCard(
                 onExport = onExport
             )
 
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
+            if (expanded) {
                 Column {
                     DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
                     LanguageRow(track.language) { onUpdate(track.copy(language = it)) }

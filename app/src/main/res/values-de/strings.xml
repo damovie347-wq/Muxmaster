@@ -148,4 +148,5 @@
     <string name="settings_battery_status_restricted">Pil optimizasyonu aktif (yavaşlatabilir)</string>
     <string name="settings_battery_action">Einrichten</string>
     <string name="err_native_tools_missing">mkvmerge/mkvextract konnten nicht aus der App entpackt werden. App deinstallieren und neu installieren.</string>
+    <string name="action_hide_background">Ausblenden (Im Hintergrund)</string>
 </resources>

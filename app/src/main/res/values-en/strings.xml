@@ -148,4 +148,5 @@
     <string name="settings_battery_status_restricted">Battery optimization active (may slow down)</string>
     <string name="settings_battery_action">Set up</string>
     <string name="err_native_tools_missing">Could not extract mkvmerge/mkvextract from the app. Try uninstalling and reinstalling the app.</string>
+    <string name="action_hide_background">Hide (Run in Background)</string>
 </resources>

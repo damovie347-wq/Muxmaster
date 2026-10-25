@@ -69,6 +69,8 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     // ── Yerinde Ses Dönüştürme ("Sesi Dönüştür") durumları ────────────────────
     var isConvertingTrack by mutableStateOf(false)
         private set
+    var convertingTrackId by mutableStateOf<Int?>(null)
+        private set
     var convertingTrackProgress by mutableStateOf(0)
         private set
     var convertingTrackName by mutableStateOf("")
@@ -313,6 +315,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
      * özelliği: sesi dışarı aktarmaya gerek kalmadan doğrudan uygulama içinde seçilen
      * kodek (Opus, xHE-AAC, HE-AAC, HE-AAC v2, MP3) ve bitrate / hedef boyuta dönüştürür
      * ve listedeki mevcut ses parçasını dönüştürülmüş yeni ses parçasıyla yerinde değiştirir.
+     * Kullanıcı "Gizle (Arka Plana At)" butonuna bassa bile işlem kendi kendine devam eder.
      */
     fun convertAudioTrackInPlace(
         track: AudioTrackItem,
@@ -340,8 +343,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
             var acquiredTempSource: String? = null
             try {
                 isConvertingTrack = true
+                convertingTrackId = track.id
                 convertingTrackProgress = 0
-                convertingTrackName = trackDisplayTitle
+                convertingTrackName = "$trackDisplayTitle → ${format.label}"
                 exportMessage = null
 
                 val wd = workDir()
@@ -475,6 +479,7 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.IO) { runCatching { InputAccess.release(acquiredTempSource) } }
                 }
                 isConvertingTrack = false
+                convertingTrackId = null
                 convertingTrackName = ""
                 MuxCancelBus.onCancelRequested = null
                 MuxForegroundService.stop(app, exportMessage, exportIsSuccess)
