@@ -874,7 +874,7 @@ class ConverterViewModel(private val app: Application) : AndroidViewModel(app) {
             app.contentResolver.takePersistableUriPermission(
                 uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-        } catch (_: SecurityException) { }
+        } catch (_: Exception) { }
         prefs.defaultOutputFolder = uri
     }
 

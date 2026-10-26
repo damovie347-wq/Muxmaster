@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
@@ -62,18 +63,20 @@ private fun SourceBadge(source: TrackSource) {
         modifier = Modifier
             .background(color.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
             .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 7.dp, vertical = 3.dp)
+            .padding(horizontal = 6.dp, vertical = 3.dp)
     ) {
         Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
 
 @Composable
-private fun IconBadge(icon: ImageVector, color: Color) {
+private fun IconBadge(icon: ImageVector, color: Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(36.dp)
-            .background(color.copy(alpha = 0.15f), RoundedCornerShape(8.dp)),
+            .size(34.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(color.copy(alpha = 0.15f))
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
@@ -87,14 +90,19 @@ private fun TrackHeaderRow(
     title: String,
     subtitle: String,
     source: TrackSource,
+    isChecked: Boolean,
+    selectionModeActive: Boolean,
+    selectedCount: Int,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     expanded: Boolean,
+    onToggleChecked: () -> Unit,
     onToggleExpand: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onRemove: () -> Unit,
     onExport: () -> Unit,
+    onExportSelected: (() -> Unit)? = null,
     onConvertAudio: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -103,20 +111,36 @@ private fun TrackHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
-        IconBadge(icon, iconColor)
-        Spacer(Modifier.width(10.dp))
+        // Sol taraftaki seçim kutucuğu (Checkbox)
+        Checkbox(
+            checked = isChecked,
+            onCheckedChange = { onToggleChecked() },
+            colors = CheckboxDefaults.colors(
+                checkedColor = Purple,
+                uncheckedColor = TextSec,
+                checkmarkColor = Color.White
+            ),
+            modifier = Modifier.size(32.dp)
+        )
+        Spacer(Modifier.width(4.dp))
+        IconBadge(icon, iconColor, onClick = onToggleChecked)
+        Spacer(Modifier.width(8.dp))
         Box(modifier = Modifier.weight(1f)) {
             Column(
                 Modifier
                     .fillMaxWidth()
                     .combinedClickable(
-                        onClick = onToggleExpand,
+                        onClick = {
+                            // Seçim modundayken (bazı veya tüm kutucuklar kaldırılmışken) satıra tıklamak
+                            // doğrudan o altyazıyı/sesi seçer veya kaldırır; tümü seçiliyken detayları açar.
+                            if (selectionModeActive) onToggleChecked() else onToggleExpand()
+                        },
                         onLongClick = { showMenu = true }
                     )
             ) {
                 Text(
                     text = title,
-                    color = TextPrimary,
+                    color = if (isChecked) TextPrimary else TextSec,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 14.sp,
                     maxLines = 1,
@@ -136,6 +160,13 @@ private fun TrackHeaderRow(
                     text = { Text(stringResource(R.string.action_export)) },
                     onClick = { showMenu = false; onExport() }
                 )
+                if (onExportSelected != null && selectedCount > 0) {
+                    DropdownMenuItem(
+                        leadingIcon = { Icon(Icons.Filled.FileDownload, null, tint = Amber, modifier = Modifier.size(18.dp)) },
+                        text = { Text(stringResource(R.string.action_export_selected, selectedCount), fontWeight = FontWeight.SemiBold) },
+                        onClick = { showMenu = false; onExportSelected() }
+                    )
+                }
                 if (onConvertAudio != null) {
                     DropdownMenuItem(
                         leadingIcon = { Icon(Icons.Filled.Autorenew, null, tint = Green, modifier = Modifier.size(18.dp)) },
@@ -145,7 +176,7 @@ private fun TrackHeaderRow(
                 }
             }
         }
-        IconButton(onClick = onToggleExpand, modifier = Modifier.size(30.dp)) {
+        IconButton(onClick = onToggleExpand, modifier = Modifier.size(28.dp)) {
             Icon(
                 if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                 contentDescription = if (expanded) stringResource(R.string.collapse_desc) else stringResource(R.string.expand_desc),
@@ -154,13 +185,13 @@ private fun TrackHeaderRow(
         }
         SourceBadge(source)
         Spacer(Modifier.width(2.dp))
-        IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(30.dp)) {
+        IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.KeyboardArrowUp, contentDescription = stringResource(R.string.move_up_desc), tint = if (canMoveUp) TextSec else TextMuted)
         }
-        IconButton(onClick = onMoveDown, enabled = canMoveDown, modifier = Modifier.size(30.dp)) {
+        IconButton(onClick = onMoveDown, enabled = canMoveDown, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.KeyboardArrowDown, contentDescription = stringResource(R.string.move_down_desc), tint = if (canMoveDown) TextSec else TextMuted)
         }
-        IconButton(onClick = onRemove, modifier = Modifier.size(30.dp)) {
+        IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.delete_desc), tint = Red)
         }
     }
@@ -306,19 +337,11 @@ private fun LanguageRow(language: String, onLanguageChange: (String) -> Unit) {
     }
 }
 
-/**
- * KÖK NEDEN DÜZELTMESİ ("sesin detaylarını açmak istediğim zaman açılmayanın üstüne yazısı binebiliyor"):
- * - `Card` üzerinde `Modifier.animateContentSize()` kullanıldığında, Compose `SizeAnimationModifierNode`
- *   `Card`'ın iç `Surface` donanım katmanını (`RenderNode`) tam açık boyutta (240dp) ölçerken üst listeye
- *   ara animasyon boyutunu (70dp) bildiriyor; bu da donanım katmanının alttaki açılmamış kartın üstüne
- *   taşmasına (yazıların üst üste binmesine) yol açıyordu.
- * - `animateContentSize` tamamen kaldırıldı ve `clipToBounds()` eklendi; böylece kart açıldığı anda
- *   boyutu ve alttaki kartların konumu aynı karede %100 senkron güncellenir, hiçbir yazı alttaki
- *   kartın üstüne ASLA binmez.
- */
 @Composable
 fun AudioTrackCard(
     track: AudioTrackItem,
+    selectionModeActive: Boolean = false,
+    selectedCount: Int = 0,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     expanded: Boolean,
@@ -328,6 +351,7 @@ fun AudioTrackCard(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onExport: () -> Unit,
+    onExportSelected: (() -> Unit)? = null,
     onConvertAudio: (() -> Unit)? = null,
     isConvertingThisTrack: Boolean = false,
     convertingProgress: Int = 0,
@@ -336,19 +360,27 @@ fun AudioTrackCard(
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
-        border = BorderStroke(1.dp, if (isConvertingThisTrack) Purple else Outline),
+        border = BorderStroke(
+            1.dp,
+            when {
+                isConvertingThisTrack -> Purple
+                track.isEnabled && selectionModeActive -> Purple.copy(alpha = 0.65f)
+                else -> Outline
+            }
+        ),
         shape = RoundedCornerShape(14.dp),
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
+            .padding(vertical = 5.dp)
             .clip(RoundedCornerShape(14.dp))
             .clipToBounds()
+            .alpha(if (track.isEnabled) 1f else 0.65f)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clipToBounds()
-                .padding(12.dp)
+                .padding(horizontal = 10.dp, vertical = 10.dp)
         ) {
             val title = track.title.ifBlank {
                 if (track.source == TrackSource.EXISTING) {
@@ -364,11 +396,24 @@ fun AudioTrackCard(
             }
 
             TrackHeaderRow(
-                icon = Icons.Filled.Audiotrack, iconColor = Blue, title = title, subtitle = subtitle,
-                source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
-                expanded = expanded, onToggleExpand = onToggleExpand,
-                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove,
+                icon = Icons.Filled.Audiotrack,
+                iconColor = Blue,
+                title = title,
+                subtitle = subtitle,
+                source = track.source,
+                isChecked = track.isEnabled,
+                selectionModeActive = selectionModeActive,
+                selectedCount = selectedCount,
+                canMoveUp = canMoveUp,
+                canMoveDown = canMoveDown,
+                expanded = expanded,
+                onToggleChecked = { onUpdate(track.copy(isEnabled = !track.isEnabled)) },
+                onToggleExpand = onToggleExpand,
+                onMoveUp = onMoveUp,
+                onMoveDown = onMoveDown,
+                onRemove = onRemove,
                 onExport = onExport,
+                onExportSelected = onExportSelected,
                 onConvertAudio = onConvertAudio
             )
 
@@ -477,6 +522,8 @@ fun AudioTrackCard(
 @Composable
 fun SubtitleTrackCard(
     track: SubtitleTrackItem,
+    selectionModeActive: Boolean = false,
+    selectedCount: Int = 0,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     expanded: Boolean,
@@ -486,23 +533,28 @@ fun SubtitleTrackCard(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onExport: () -> Unit,
+    onExportSelected: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
-        border = BorderStroke(1.dp, Outline),
+        border = BorderStroke(
+            1.dp,
+            if (track.isEnabled && selectionModeActive) Purple.copy(alpha = 0.65f) else Outline
+        ),
         shape = RoundedCornerShape(14.dp),
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
+            .padding(vertical = 5.dp)
             .clip(RoundedCornerShape(14.dp))
             .clipToBounds()
+            .alpha(if (track.isEnabled) 1f else 0.65f)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clipToBounds()
-                .padding(12.dp)
+                .padding(horizontal = 10.dp, vertical = 10.dp)
         ) {
             val title = track.title.ifBlank {
                 if (track.source == TrackSource.EXISTING) stringResource(R.string.subtitle_track_fallback_title, track.existingStreamIndex) else track.fileDisplayName
@@ -510,11 +562,24 @@ fun SubtitleTrackCard(
             val subtitle = if (track.source == TrackSource.EXISTING) track.existingCodec.uppercase() else track.fileDisplayName
 
             TrackHeaderRow(
-                icon = Icons.Filled.Subtitles, iconColor = PurpleLight, title = title, subtitle = subtitle,
-                source = track.source, canMoveUp = canMoveUp, canMoveDown = canMoveDown,
-                expanded = expanded, onToggleExpand = onToggleExpand,
-                onMoveUp = onMoveUp, onMoveDown = onMoveDown, onRemove = onRemove,
-                onExport = onExport
+                icon = Icons.Filled.Subtitles,
+                iconColor = PurpleLight,
+                title = title,
+                subtitle = subtitle,
+                source = track.source,
+                isChecked = track.isEnabled,
+                selectionModeActive = selectionModeActive,
+                selectedCount = selectedCount,
+                canMoveUp = canMoveUp,
+                canMoveDown = canMoveDown,
+                expanded = expanded,
+                onToggleChecked = { onUpdate(track.copy(isEnabled = !track.isEnabled)) },
+                onToggleExpand = onToggleExpand,
+                onMoveUp = onMoveUp,
+                onMoveDown = onMoveDown,
+                onRemove = onRemove,
+                onExport = onExport,
+                onExportSelected = onExportSelected
             )
 
             if (expanded) {
@@ -527,8 +592,6 @@ fun SubtitleTrackCard(
                     DelayRow(track.delayMs) { onUpdate(track.copy(delayMs = it)) }
                     LanguageRow(track.language) { onUpdate(track.copy(language = it)) }
 
-                    // 4 adet Switch tek satıra sıkıştırıldığında dar ekranlarda yazılar üst üste biniyordu;
-                    // 2x2 düzenli ızgara satırına ayrılarak taşma ve üst üste binme %100 engellendi.
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),

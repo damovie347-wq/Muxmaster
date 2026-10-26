@@ -149,4 +149,8 @@
     <string name="settings_battery_action">Einrichten</string>
     <string name="err_native_tools_missing">mkvmerge/mkvextract konnten nicht aus der App entpackt werden. App deinstallieren und neu installieren.</string>
     <string name="action_hide_background">Ausblenden (Im Hintergrund)</string>
+    <string name="action_select_all">Alle auswählen</string>
+    <string name="action_export_selected">Ausgewählte exportieren (%1$d)</string>
+    <string name="export_none_selected">Bitte zuerst mindestens eine Spur zum Exportieren auswählen.</string>
+    <string name="export_batch_success">✅ %1$d/%2$d ausgewählte Spuren erfolgreich exportiert.</string>
 </resources>

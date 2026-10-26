@@ -8,6 +8,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
@@ -112,16 +113,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Uygulama içinden "Video Oynatıcı" ile video seçme. */
-    private val pickPlayVideoLauncher = registerForActivityResult(object : ActivityResultContracts.OpenDocument() {
-        override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
-            super.createIntent(context, input).apply {
-                putExtra(
-                    android.provider.DocumentsContract.EXTRA_INITIAL_URI,
-                    android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
-                )
-            }
-    }) { uri ->
+    /** Uygulama içinden "Video Oynatıcı" ile video seçme (tüm 3. parti dosya yöneticileri dahil). */
+    private val pickPlayVideoLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
         val addMode = pickingToAddSlot
         pickingToAddSlot = false
         if (uri != null) {
@@ -153,22 +146,22 @@ class MainActivity : AppCompatActivity() {
     /** Depolama (Tüm dosyalara erişim) izni sorulsun mu? */
     private val askStorage = mutableStateOf(false)
 
-    private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickVideoLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
         if (uri != null) muxViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
     }
     private val pickMuxFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) muxViewModel.onFolderSelected(uri)
     }
-    private val pickMuxAudioLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickMuxAudioLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
         if (uri != null) muxViewModel.addAudioFile(uri, queryDisplayName(uri) ?: "audio_track")
     }
-    private val pickSubtitleLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickSubtitleLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
         if (uri != null) muxViewModel.addSubtitleFile(uri, queryDisplayName(uri) ?: "subtitle_track")
     }
     private val pickMuxOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) muxViewModel.setOutputFolder(uri)
     }
-    private val pickConverterAudioLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    private val pickConverterAudioLauncher = registerForActivityResult(UniversalOpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             converterViewModel.onAudioFilesSelected(uris.map { u -> u to (queryDisplayName(u) ?: "audio") })
         }
@@ -176,7 +169,7 @@ class MainActivity : AppCompatActivity() {
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
     }
-    private val pickTrimVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val pickTrimVideoLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
         if (uri != null) trimViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
     }
     private val pickTrimFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -185,7 +178,7 @@ class MainActivity : AppCompatActivity() {
     private val pickTrimOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) trimViewModel.setOutputFolder(uri)
     }
-    private val pickMergeVideosLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    private val pickMergeVideosLauncher = registerForActivityResult(UniversalOpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             mergeViewModel.onVideosSelected(uris.map { u -> u to (queryDisplayName(u) ?: "video.mkv") })
         }
@@ -478,10 +471,15 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 33) getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
         else getParcelableExtra(Intent.EXTRA_STREAM)
 
-    private fun queryDisplayName(uri: Uri): String? = try {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null }
-    } catch (_: Exception) { null }
+    private fun queryDisplayName(uri: Uri): String? {
+        val queried = try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null }
+        } catch (_: Exception) { null }
+        if (!queried.isNullOrBlank()) return queried
+        val fromPath = uri.path?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+        return fromPath ?: uri.lastPathSegment
+    }
 }
 
 @Composable
@@ -547,4 +545,61 @@ private fun OpenWithChooser(
         confirmButton = {},
         dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
     )
+}
+
+/**
+ * Cihazdaki TÜM üçüncü parti dosya yöneticisi uygulamalarını (ZArchiver, Solid Explorer,
+ * MiXplorer, CX Dosya Gezgini, Samsung Dosyalarım, X-plore, Total Commander vb.) ve
+ * Google Drive / yerel depolama sağlayıcılarını sistem dosya seçicisinin sol üst
+ * "Şuradan aç:" menüsünde eksiksiz listeler.
+ *
+ * KÖK NEDEN: Android DocumentsUI, `ACTION_OPEN_DOCUMENT` ile açıldığında yalnızca SAF
+ * `DocumentsProvider` köklerini gösterir ve telefona kurulan diğer dosya yöneticisi
+ * uygulamalarını gizler. `ACTION_GET_CONTENT` + `CATEGORY_OPENABLE` + `type = "*/*"`
+ * kullanıldığında ise "Şuradan aç:" menüsünde hem cihaz depolaması ve Google Drive
+ * hesapları hem de kurulu tüm dosya yöneticisi uygulamaları görünür.
+ */
+private class UniversalOpenSingleDocument : ActivityResultContract<Array<String>, Uri?>() {
+    override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
+        Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+            putExtra(
+                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Uri? =
+        if (resultCode == android.app.Activity.RESULT_OK) intent?.data else null
+}
+
+private class UniversalOpenMultipleDocuments : ActivityResultContract<Array<String>, List<Uri>>() {
+    override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
+        Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+            putExtra(
+                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): List<Uri> {
+        if (resultCode != android.app.Activity.RESULT_OK || intent == null) return emptyList()
+        val uris = LinkedHashSet<Uri>()
+        intent.data?.let { uris.add(it) }
+        val clip = intent.clipData
+        if (clip != null) {
+            for (i in 0 until clip.itemCount) {
+                clip.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        }
+        return uris.toList()
+    }
 }

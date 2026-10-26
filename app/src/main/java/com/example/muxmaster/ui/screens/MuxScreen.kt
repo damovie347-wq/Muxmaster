@@ -22,6 +22,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.Close
@@ -111,8 +114,8 @@ fun MuxScreen(
     //    değiştirmeden saf GPU `slideInVertically / slideOutVertically` katmanı (overlay) olarak
     //    histerezis korumasıyla kayıp gizleniyor.
     var isBottomBarVisible by remember { mutableStateOf(true) }
-    val audioScrollState = rememberScrollState()
-    val subtitleScrollState = rememberScrollState()
+    val audioListState = rememberLazyListState()
+    val subtitleListState = rememberLazyListState()
 
     // Yerinde "Sesi Dönüştür" diyalogu için seçilen ses parçası:
     var trackToConvert by remember { mutableStateOf<AudioTrackItem?>(null) }
@@ -250,106 +253,136 @@ fun MuxScreen(
                             .fillMaxWidth()
                     ) { page ->
                         if (page == 0) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .verticalScroll(audioScrollState)
-                                    .padding(
-                                        start = 16.dp,
-                                        end = 16.dp,
-                                        top = 8.dp,
-                                        bottom = 220.dp
-                                    )
+                            val allAudioSel = viewModel.allAudioSelected
+                            val selAudioCnt = viewModel.selectedAudioCount
+                            LazyColumn(
+                                state = audioListState,
+                                contentPadding = PaddingValues(
+                                    start = 16.dp,
+                                    end = 16.dp,
+                                    top = 8.dp,
+                                    bottom = 220.dp
+                                ),
+                                modifier = Modifier.fillMaxSize()
                             ) {
-                                TopVideoAndFolderSection(
-                                    viewModel = viewModel,
-                                    busy = busy,
-                                    onPickFolder = onPickFolder,
-                                    onPickVideo = onPickVideo
-                                )
-                                Spacer(Modifier.height(12.dp))
-                                TrackTabsAndAddRow(
-                                    currentPage = pagerState.currentPage,
-                                    audioCount = viewModel.audioTracks.size,
-                                    subtitleCount = viewModel.subtitleTracks.size,
-                                    onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
-                                    onAddClick = onPickAudio
-                                )
+                                item(key = "header_audio") {
+                                    TopVideoAndFolderSection(
+                                        viewModel = viewModel,
+                                        busy = busy,
+                                        onPickFolder = onPickFolder,
+                                        onPickVideo = onPickVideo
+                                    )
+                                    Spacer(Modifier.height(12.dp))
+                                    TrackTabsAndAddRow(
+                                        currentPage = pagerState.currentPage,
+                                        audioCount = viewModel.audioTracks.size,
+                                        subtitleCount = viewModel.subtitleTracks.size,
+                                        totalInTab = viewModel.audioTracks.size,
+                                        selectedInTab = selAudioCnt,
+                                        allSelectedInTab = allAudioSel,
+                                        isExporting = viewModel.isExporting,
+                                        onToggleSelectAll = viewModel::toggleSelectAllAudio,
+                                        onExportSelected = viewModel::exportSelectedAudioTracks,
+                                        onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
+                                        onAddClick = onPickAudio
+                                    )
+                                }
                                 if (viewModel.audioTracks.isEmpty()) {
-                                    EmptyHint(stringResource(R.string.empty_audio_hint))
+                                    item(key = "empty_audio") {
+                                        EmptyHint(stringResource(R.string.empty_audio_hint))
+                                    }
                                 } else {
-                                    viewModel.audioTracks.forEachIndexed { idx, track ->
-                                        key("audio_${track.id}") {
-                                            val isExpanded = viewModel.expandedAudioIds[track.id] ?: false
-                                            AudioTrackCard(
-                                                track = track,
-                                                canMoveUp = idx > 0,
-                                                canMoveDown = idx < viewModel.audioTracks.size - 1,
-                                                expanded = isExpanded,
-                                                onToggleExpand = {
-                                                    viewModel.expandedAudioIds[track.id] = !isExpanded
-                                                },
-                                                onUpdate = viewModel::updateAudio,
-                                                onRemove = { viewModel.removeAudio(track.id) },
-                                                onMoveUp = { viewModel.moveAudioUp(track.id) },
-                                                onMoveDown = { viewModel.moveAudioDown(track.id) },
-                                                onExport = { viewModel.exportAudioTrack(track) },
-                                                onConvertAudio = { trackToConvert = track },
-                                                isConvertingThisTrack = viewModel.isConvertingTrack && viewModel.convertingTrackId == track.id,
-                                                convertingProgress = viewModel.convertingTrackProgress,
-                                                onCancelConvert = viewModel::cancelTrackConvert
-                                            )
-                                        }
+                                    itemsIndexed(
+                                        items = viewModel.audioTracks,
+                                        key = { _, t -> "audio_${t.id}" }
+                                    ) { idx, track ->
+                                        val isExpanded = viewModel.expandedAudioIds[track.id] ?: false
+                                        AudioTrackCard(
+                                            track = track,
+                                            selectionModeActive = !allAudioSel,
+                                            selectedCount = selAudioCnt,
+                                            canMoveUp = idx > 0,
+                                            canMoveDown = idx < viewModel.audioTracks.size - 1,
+                                            expanded = isExpanded,
+                                            onToggleExpand = {
+                                                viewModel.expandedAudioIds[track.id] = !isExpanded
+                                            },
+                                            onUpdate = viewModel::updateAudio,
+                                            onRemove = { viewModel.removeAudio(track.id) },
+                                            onMoveUp = { viewModel.moveAudioUp(track.id) },
+                                            onMoveDown = { viewModel.moveAudioDown(track.id) },
+                                            onExport = { viewModel.exportAudioTrack(track) },
+                                            onExportSelected = viewModel::exportSelectedAudioTracks,
+                                            onConvertAudio = { trackToConvert = track },
+                                            isConvertingThisTrack = viewModel.isConvertingTrack && viewModel.convertingTrackId == track.id,
+                                            convertingProgress = viewModel.convertingTrackProgress,
+                                            onCancelConvert = viewModel::cancelTrackConvert
+                                        )
                                     }
                                 }
                             }
                         } else {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .verticalScroll(subtitleScrollState)
-                                    .padding(
-                                        start = 16.dp,
-                                        end = 16.dp,
-                                        top = 8.dp,
-                                        bottom = 220.dp
-                                    )
+                            val allSubSel = viewModel.allSubtitlesSelected
+                            val selSubCnt = viewModel.selectedSubtitleCount
+                            LazyColumn(
+                                state = subtitleListState,
+                                contentPadding = PaddingValues(
+                                    start = 16.dp,
+                                    end = 16.dp,
+                                    top = 8.dp,
+                                    bottom = 220.dp
+                                ),
+                                modifier = Modifier.fillMaxSize()
                             ) {
-                                TopVideoAndFolderSection(
-                                    viewModel = viewModel,
-                                    busy = busy,
-                                    onPickFolder = onPickFolder,
-                                    onPickVideo = onPickVideo
-                                )
-                                Spacer(Modifier.height(12.dp))
-                                TrackTabsAndAddRow(
-                                    currentPage = pagerState.currentPage,
-                                    audioCount = viewModel.audioTracks.size,
-                                    subtitleCount = viewModel.subtitleTracks.size,
-                                    onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
-                                    onAddClick = onPickSubtitle
-                                )
+                                item(key = "header_subtitle") {
+                                    TopVideoAndFolderSection(
+                                        viewModel = viewModel,
+                                        busy = busy,
+                                        onPickFolder = onPickFolder,
+                                        onPickVideo = onPickVideo
+                                    )
+                                    Spacer(Modifier.height(12.dp))
+                                    TrackTabsAndAddRow(
+                                        currentPage = pagerState.currentPage,
+                                        audioCount = viewModel.audioTracks.size,
+                                        subtitleCount = viewModel.subtitleTracks.size,
+                                        totalInTab = viewModel.subtitleTracks.size,
+                                        selectedInTab = selSubCnt,
+                                        allSelectedInTab = allSubSel,
+                                        isExporting = viewModel.isExporting,
+                                        onToggleSelectAll = viewModel::toggleSelectAllSubtitles,
+                                        onExportSelected = viewModel::exportSelectedSubtitleTracks,
+                                        onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
+                                        onAddClick = onPickSubtitle
+                                    )
+                                }
                                 if (viewModel.subtitleTracks.isEmpty()) {
-                                    EmptyHint(stringResource(R.string.empty_subtitle_hint))
+                                    item(key = "empty_subtitle") {
+                                        EmptyHint(stringResource(R.string.empty_subtitle_hint))
+                                    }
                                 } else {
-                                    viewModel.subtitleTracks.forEachIndexed { idx, track ->
-                                        key("sub_${track.id}") {
-                                            val isExpanded = viewModel.expandedSubtitleIds[track.id] ?: false
-                                            SubtitleTrackCard(
-                                                track = track,
-                                                canMoveUp = idx > 0,
-                                                canMoveDown = idx < viewModel.subtitleTracks.size - 1,
-                                                expanded = isExpanded,
-                                                onToggleExpand = {
-                                                    viewModel.expandedSubtitleIds[track.id] = !isExpanded
-                                                },
-                                                onUpdate = viewModel::updateSubtitle,
-                                                onRemove = { viewModel.removeSubtitle(track.id) },
-                                                onMoveUp = { viewModel.moveSubtitleUp(track.id) },
-                                                onMoveDown = { viewModel.moveSubtitleDown(track.id) },
-                                                onExport = { viewModel.exportSubtitleTrack(track) }
-                                            )
-                                        }
+                                    itemsIndexed(
+                                        items = viewModel.subtitleTracks,
+                                        key = { _, t -> "sub_${t.id}" }
+                                    ) { idx, track ->
+                                        val isExpanded = viewModel.expandedSubtitleIds[track.id] ?: false
+                                        SubtitleTrackCard(
+                                            track = track,
+                                            selectionModeActive = !allSubSel,
+                                            selectedCount = selSubCnt,
+                                            canMoveUp = idx > 0,
+                                            canMoveDown = idx < viewModel.subtitleTracks.size - 1,
+                                            expanded = isExpanded,
+                                            onToggleExpand = {
+                                                viewModel.expandedSubtitleIds[track.id] = !isExpanded
+                                            },
+                                            onUpdate = viewModel::updateSubtitle,
+                                            onRemove = { viewModel.removeSubtitle(track.id) },
+                                            onMoveUp = { viewModel.moveSubtitleUp(track.id) },
+                                            onMoveDown = { viewModel.moveSubtitleDown(track.id) },
+                                            onExport = { viewModel.exportSubtitleTrack(track) },
+                                            onExportSelected = viewModel::exportSelectedSubtitleTracks
+                                        )
                                     }
                                 }
                             }
@@ -533,6 +566,12 @@ private fun TrackTabsAndAddRow(
     currentPage: Int,
     audioCount: Int,
     subtitleCount: Int,
+    totalInTab: Int,
+    selectedInTab: Int,
+    allSelectedInTab: Boolean,
+    isExporting: Boolean,
+    onToggleSelectAll: () -> Unit,
+    onExportSelected: () -> Unit,
     onSelectPage: (Int) -> Unit,
     onAddClick: () -> Unit
 ) {
@@ -550,24 +589,99 @@ private fun TrackTabsAndAddRow(
     }
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            stringResource(R.string.long_press_track_hint),
-            color = TextMuted,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
+        if (totalInTab > 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                // "Tümünü Seç" (hepsi seçiliyse tekrar basınca tüm seçimleri kaldırır)
+                Surface(
+                    onClick = onToggleSelectAll,
+                    color = if (allSelectedInTab) Purple.copy(alpha = 0.18f) else SurfaceHigh,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, if (allSelectedInTab) Purple else Outline)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            if (allSelectedInTab) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
+                            contentDescription = null,
+                            tint = if (allSelectedInTab) PurpleLight else TextSec,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "${stringResource(R.string.action_select_all)} ($selectedInTab/$totalInTab)",
+                            color = if (allSelectedInTab) PurpleLight else TextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                // Yalnızca seçili kutucukları dışa aktarma butonu
+                if (selectedInTab > 0) {
+                    Surface(
+                        onClick = { if (!isExporting) onExportSelected() },
+                        color = Amber.copy(alpha = 0.16f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, Amber.copy(alpha = 0.5f))
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)
+                        ) {
+                            if (isExporting) {
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Amber)
+                            } else {
+                                Icon(
+                                    Icons.Filled.FileDownload,
+                                    contentDescription = null,
+                                    tint = Amber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "${stringResource(R.string.action_export)} ($selectedInTab)",
+                                color = Amber,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            Text(
+                stringResource(R.string.long_press_track_hint),
+                color = TextMuted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
         TextButton(onClick = onAddClick) {
             Icon(Icons.Filled.Add, null, tint = Purple, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(4.dp))
             Text(
                 if (currentPage == 0) stringResource(R.string.add_audio_button) else stringResource(R.string.add_subtitle_button),
-                color = Purple, fontSize = 13.sp
+                color = Purple,
+                fontSize = 12.sp,
+                maxLines = 1
             )
         }
     }

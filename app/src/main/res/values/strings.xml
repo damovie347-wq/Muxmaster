@@ -159,4 +159,8 @@
     <string name="settings_battery_action">Ayarla</string>
     <string name="err_native_tools_missing">mkvmerge/mkvextract uygulamanın içinden çıkarılamadı. Uygulamayı kaldırıp yeniden kurmayı deneyin.</string>
     <string name="action_hide_background">Gizle (Arka Plana At)</string>
+    <string name="action_select_all">Tümünü Seç</string>
+    <string name="action_export_selected">Seçilenleri Dışa Aktar (%1$d)</string>
+    <string name="export_none_selected">Önce dışa aktarılacak en az bir parça seçin.</string>
+    <string name="export_batch_success">✅ Seçilen %1$d/%2$d parça başarıyla dışa aktarıldı.</string>
 </resources>

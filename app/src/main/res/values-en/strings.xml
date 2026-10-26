@@ -149,4 +149,8 @@
     <string name="settings_battery_action">Set up</string>
     <string name="err_native_tools_missing">Could not extract mkvmerge/mkvextract from the app. Try uninstalling and reinstalling the app.</string>
     <string name="action_hide_background">Hide (Run in Background)</string>
+    <string name="action_select_all">Select All</string>
+    <string name="action_export_selected">Export Selected (%1$d)</string>
+    <string name="export_none_selected">Please select at least one track to export first.</string>
+    <string name="export_batch_success">✅ Successfully exported %1$d/%2$d selected tracks.</string>
 </resources>

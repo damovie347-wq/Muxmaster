@@ -263,14 +263,14 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun addAudioFile(uri: Uri, displayName: String) {
         try { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        catch (_: SecurityException) {}
+        catch (_: Exception) {}
         val nextId = (audioTracks.maxOfOrNull { it.id } ?: 0) + 1
         audioTracks.add(AudioTrackItem(id = nextId, source = TrackSource.NEW_FILE, fileUri = uri, fileDisplayName = displayName, language = "und"))
     }
 
     fun addSubtitleFile(uri: Uri, displayName: String) {
         try { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        catch (_: SecurityException) {}
+        catch (_: Exception) {}
         val nextId = (subtitleTracks.maxOfOrNull { it.id } ?: 0) + 1
         subtitleTracks.add(SubtitleTrackItem(id = nextId, source = TrackSource.NEW_FILE, fileUri = uri, fileDisplayName = displayName, language = "und"))
     }
@@ -302,10 +302,244 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
     fun moveSubtitleUp(id: Int) { val i = subtitleTracks.indexOfFirst { it.id == id }; if (i > 0) { val t = subtitleTracks[i]; subtitleTracks[i] = subtitleTracks[i-1]; subtitleTracks[i-1] = t } }
     fun moveSubtitleDown(id: Int) { val i = subtitleTracks.indexOfFirst { it.id == id }; if (i in 0 until subtitleTracks.size-1) { val t = subtitleTracks[i]; subtitleTracks[i] = subtitleTracks[i+1]; subtitleTracks[i+1] = t } }
 
+    // ── Toplu Seçim ("Tümünü Seç" / "Seçimi Kaldır") ve Toplu İşlemler ─────────
+    val allAudioSelected: Boolean
+        get() = audioTracks.isNotEmpty() && audioTracks.all { it.isEnabled }
+
+    val selectedAudioCount: Int
+        get() = audioTracks.count { it.isEnabled }
+
+    val allSubtitlesSelected: Boolean
+        get() = subtitleTracks.isNotEmpty() && subtitleTracks.all { it.isEnabled }
+
+    val selectedSubtitleCount: Int
+        get() = subtitleTracks.count { it.isEnabled }
+
+    fun toggleSelectAllAudio() {
+        val target = !allAudioSelected
+        for (i in audioTracks.indices) {
+            if (audioTracks[i].isEnabled != target) {
+                audioTracks[i] = audioTracks[i].copy(isEnabled = target)
+            }
+        }
+    }
+
+    fun toggleSelectAllSubtitles() {
+        val target = !allSubtitlesSelected
+        for (i in subtitleTracks.indices) {
+            if (subtitleTracks[i].isEnabled != target) {
+                subtitleTracks[i] = subtitleTracks[i].copy(isEnabled = target)
+            }
+        }
+    }
+
+    fun toggleAudioEnabled(id: Int) {
+        val idx = audioTracks.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            val cur = audioTracks[idx]
+            audioTracks[idx] = cur.copy(isEnabled = !cur.isEnabled)
+        }
+    }
+
+    fun toggleSubtitleEnabled(id: Int) {
+        val idx = subtitleTracks.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            val cur = subtitleTracks[idx]
+            subtitleTracks[idx] = cur.copy(isEnabled = !cur.isEnabled)
+        }
+    }
+
+    fun exportSelectedSubtitleTracks() {
+        val folder = outputFolderUri
+        if (folder == null) {
+            exportMessage = app.getString(R.string.export_no_output_folder)
+            exportIsSuccess = false
+            return
+        }
+        if (isExporting || isMuxing || isConvertingTrack) return
+        val selected = subtitleTracks.filter { it.isEnabled }
+        if (selected.isEmpty()) {
+            exportMessage = app.getString(R.string.export_none_selected)
+            exportIsSuccess = false
+            return
+        }
+        if (selected.size == 1) {
+            exportSubtitleTrack(selected.first())
+            return
+        }
+
+        viewModelScope.launch {
+            isExporting = true
+            exportMessage = null
+            MuxForegroundService.start(app)
+            try {
+                val exportedCount = withContext(Dispatchers.IO) {
+                    var okCount = 0
+                    val video = videoFile
+                    val existingTracks = selected.filter { it.source == TrackSource.EXISTING }
+                    val newTracks = selected.filter { it.source == TrackSource.NEW_FILE }
+
+                    // MKV kapsayıcısında seçilen tüm mevcut altyazıları TEK GEÇİŞTE (single pass) çıkar
+                    if (video != null && existingTracks.isNotEmpty() && isMatroskaContainer(video.cachePath) && NativeTools.ensureInstalled(app)) {
+                        val tempSpecs = existingTracks.map { track ->
+                            val codec = track.existingCodec.lowercase()
+                            val ext = when (codec) {
+                                "subrip", "srt" -> "srt"
+                                "ass" -> "ass"
+                                "ssa" -> "ssa"
+                                "mov_text" -> "srt"
+                                else -> "mks"
+                            }
+                            val mime = when (ext) {
+                                "srt" -> "application/x-subrip"
+                                "ass", "ssa" -> "text/x-ssa"
+                                else -> "application/x-matroska"
+                            }
+                            val rawTitle = track.title.ifBlank { "subtitle_${track.existingStreamIndex}" }
+                            val langSuffix = track.language.takeIf { it.isNotBlank() && it != "und" }?.let { "_$it" } ?: ""
+                            val baseName = sanitizeFileName("${rawTitle}${langSuffix}_#${track.existingStreamIndex}")
+                            val tmp = File(workDir(), "batch_sub_${track.id}_${System.currentTimeMillis()}.$ext")
+                            Triple(track, tmp, Pair("$baseName.$ext", mime))
+                        }
+                        val args = mutableListOf(video.cachePath, "tracks")
+                        tempSpecs.forEach { (track, tmp, _) ->
+                            args.add("${track.existingStreamIndex}:${tmp.absolutePath}")
+                        }
+                        val res = NativeTools.run(app, NativeTools.mkvextractPath(app), args)
+                        if (res.exitCode == 0 || res.exitCode == 1) {
+                            tempSpecs.forEach { (_, tmp, nameAndMime) ->
+                                if (tmp.exists() && tmp.length() > 0L) {
+                                    if (copyFileToTree(tmp, folder, nameAndMime.first, nameAndMime.second) != null) {
+                                        okCount++
+                                    }
+                                }
+                                runCatching { tmp.delete() }
+                            }
+                        } else {
+                            tempSpecs.forEach { (_, tmp, _) -> runCatching { tmp.delete() } }
+                        }
+                    } else if (video != null && existingTracks.isNotEmpty()) {
+                        for (track in existingTracks) {
+                            val codec = track.existingCodec.lowercase()
+                            val ext = when (codec) {
+                                "subrip", "srt" -> "srt"
+                                "ass" -> "ass"
+                                "ssa" -> "ssa"
+                                "mov_text" -> "srt"
+                                else -> "mks"
+                            }
+                            val mime = when (ext) {
+                                "srt" -> "application/x-subrip"
+                                "ass", "ssa" -> "text/x-ssa"
+                                else -> "application/x-matroska"
+                            }
+                            val rawTitle = track.title.ifBlank { "subtitle_${track.existingStreamIndex}" }
+                            val langSuffix = track.language.takeIf { it.isNotBlank() && it != "und" }?.let { "_$it" } ?: ""
+                            val baseName = sanitizeFileName("${rawTitle}${langSuffix}_#${track.existingStreamIndex}")
+                            val tmp = File(workDir(), "batch_sub_${track.id}_${System.currentTimeMillis()}.$ext")
+                            if (extractExistingTrack(video.cachePath, track.existingStreamIndex, tmp)) {
+                                if (copyFileToTree(tmp, folder, "$baseName.$ext", mime) != null) okCount++
+                            }
+                            runCatching { tmp.delete() }
+                        }
+                    }
+
+                    for (track in newTracks) {
+                        val uri = track.fileUri ?: continue
+                        val baseName = sanitizeFileName(track.fileDisplayName.substringBeforeLast('.', track.fileDisplayName))
+                        val ext = extensionFromName(track.fileDisplayName).ifBlank { "srt" }
+                        if (copyUriToTree(uri, folder, "$baseName.$ext") != null) okCount++
+                    }
+                    okCount
+                }
+                exportIsSuccess = exportedCount > 0
+                exportMessage = if (exportedCount > 0) {
+                    app.getString(R.string.export_batch_success, exportedCount, selected.size)
+                } else {
+                    app.getString(R.string.export_failed)
+                }
+            } finally {
+                isExporting = false
+                MuxForegroundService.stop(app, exportMessage, exportIsSuccess)
+            }
+        }
+    }
+
+    fun exportSelectedAudioTracks() {
+        val folder = outputFolderUri
+        if (folder == null) {
+            exportMessage = app.getString(R.string.export_no_output_folder)
+            exportIsSuccess = false
+            return
+        }
+        if (isExporting || isMuxing || isConvertingTrack) return
+        val selected = audioTracks.filter { it.isEnabled }
+        if (selected.isEmpty()) {
+            exportMessage = app.getString(R.string.export_none_selected)
+            exportIsSuccess = false
+            return
+        }
+        if (selected.size == 1) {
+            exportAudioTrack(selected.first())
+            return
+        }
+
+        viewModelScope.launch {
+            isExporting = true
+            exportMessage = null
+            MuxForegroundService.start(app)
+            try {
+                val exportedCount = withContext(Dispatchers.IO) {
+                    var okCount = 0
+                    val video = videoFile
+                    for (track in selected) {
+                        val rawTitle = track.title.ifBlank {
+                            if (track.source == TrackSource.EXISTING) "audio_${track.existingStreamIndex}"
+                            else track.fileDisplayName.substringBeforeLast('.', track.fileDisplayName)
+                        }
+                        val langSuffix = track.language.takeIf { it.isNotBlank() && it != "und" }?.let { "_$it" } ?: ""
+                        val baseName = sanitizeFileName("${rawTitle}${langSuffix}_#${track.id}")
+                        if (track.source == TrackSource.EXISTING && video != null) {
+                            val (ext, mime) = audioExportContainerFor(track.existingCodec)
+                            val tmp = File(workDir(), "batch_audio_${track.id}_${System.currentTimeMillis()}.$ext")
+                            if (extractExistingTrack(video.cachePath, track.existingStreamIndex, tmp)) {
+                                if (copyFileToTree(tmp, folder, "$baseName.$ext", mime) != null) okCount++
+                            }
+                            runCatching { tmp.delete() }
+                        } else if (track.fileCachePath.isNotBlank() && File(track.fileCachePath).exists()) {
+                            val srcFile = File(track.fileCachePath)
+                            val ext = srcFile.extension.ifBlank { extensionFromName(track.fileDisplayName).ifBlank { "m4a" } }
+                            val mime = when (ext.lowercase()) {
+                                "opus" -> "audio/opus"
+                                "m4a" -> "audio/mp4"
+                                "mp3" -> "audio/mpeg"
+                                else -> "application/octet-stream"
+                            }
+                            if (copyFileToTree(srcFile, folder, "$baseName.$ext", mime) != null) okCount++
+                        } else if (track.fileUri != null) {
+                            val ext = extensionFromName(track.fileDisplayName).ifBlank { "bin" }
+                            if (copyUriToTree(track.fileUri, folder, "$baseName.$ext") != null) okCount++
+                        }
+                    }
+                    okCount
+                }
+                exportIsSuccess = exportedCount > 0
+                exportMessage = if (exportedCount > 0) {
+                    app.getString(R.string.export_batch_success, exportedCount, selected.size)
+                } else {
+                    app.getString(R.string.export_failed)
+                }
+            } finally {
+                isExporting = false
+                MuxForegroundService.stop(app, exportMessage, exportIsSuccess)
+            }
+        }
+    }
+
     fun setOutputFolder(uri: Uri) {
         outputFolderUri = uri
         try { app.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-        catch (_: SecurityException) {}
+        catch (_: Exception) {}
         prefs.defaultOutputFolder = uri
     }
     fun updateOutputFileName(name: String) { outputFileName = name }
