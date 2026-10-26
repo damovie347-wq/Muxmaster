@@ -386,15 +386,17 @@ fun MuxScreen(
                     outputFolderUri = viewModel.outputFolderUri,
                     outputFileName = viewModel.outputFileName,
                     isMuxing = viewModel.isMuxing,
-                    progress = viewModel.muxProgress,
+                    muxProgress = viewModel.muxProgress,
                     resultMessage = viewModel.resultMessage,
                     isSuccess = viewModel.isSuccess,
-                    enabled = viewModel.videoFile != null && !viewModel.isLoading && !viewModel.isConvertingTrack,
-                    onPickOutputFolder = onPickOutputFolder,
+                    canStartMux = viewModel.videoFile != null && viewModel.outputFolderUri != null && !viewModel.isConvertingTrack,
+                    onPickFolder = onPickOutputFolder,
                     onFileNameChange = viewModel::updateOutputFileName,
-                    onStartMux = viewModel::startMux,
-                    onCancelMux = viewModel::cancelMux,
-                    onDismissAndReset = viewModel::dismissAndReset
+                    onStart = viewModel::startMux,
+                    onCancel = viewModel::cancelMux,
+                    onDismissResult = {
+                        if (viewModel.isSuccess) viewModel.dismissAndReset() else viewModel.clearResult()
+                    }
                 )
             }
 
@@ -455,7 +457,12 @@ fun MuxScreen(
                     targetMode = mode,
                     bitrateKbps = bitrateKbps,
                     targetSizeBytes = targetSizeBytes,
-                    channelMode = chMode
+                    channelMode = chMode,
+                    onComplete = {
+                        if (trackToConvert?.id == activeTrack.id) {
+                            trackToConvert = null
+                        }
+                    }
                 )
             }
         )
@@ -541,7 +548,7 @@ private fun TopVideoAndFolderSection(
     }
 
     VideoCard(
-        videoFile = viewModel.videoFile,
+        video = viewModel.videoFile,
         isLoading = viewModel.isLoading,
         loadingMessage = viewModel.loadingMessage,
         onPickVideo = onPickVideo,
