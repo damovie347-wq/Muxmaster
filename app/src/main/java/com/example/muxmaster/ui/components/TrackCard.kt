@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.example.muxmaster.ui.components
 
 import androidx.compose.foundation.BorderStroke

@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+
 package com.example.muxmaster.ui.screens
 
 import android.os.SystemClock
@@ -561,6 +563,7 @@ private fun TopVideoAndFolderSection(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TrackTabsAndAddRow(
     currentPage: Int,
