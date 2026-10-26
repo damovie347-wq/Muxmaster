@@ -78,26 +78,5 @@ data class VideoFile(
     val videoCodec: String = "",
     val resolution: String = "",
     val durationMs: Long = 0L,
-    val fileSizeMb: Float = 0f,
-    val videoStreamIndex: Int = 0, // mkvmerge -d için: kaynaktaki gerçek video track id'si
-    val isAudioOnly: Boolean = false, // true ise dosyada video akışı yok (sadece ses)
-    val pixFmt: String = "" // ffprobe pix_fmt (örn. yuv420p); hassas kesim için 8-bit kontrolü
-)
-
-/**
- * Video Birleştirme (Merge) özelliğindeki kuyruğa eklenmiş tek bir video.
- * Liste içindeki sırası, çıktıdaki birleşme sırasını belirler.
- */
-@Immutable
-data class MergeItem(
-    val id: Int,
-    val uri: Uri,
-    val displayName: String,
-    val cachePath: String = "",
-    val videoCodec: String = "",
-    val resolution: String = "",
-    val durationMs: Long = 0L,
-    val fileSizeMb: Float = 0f,
-    val hasAudio: Boolean = false,
-    val audioCodec: String = ""
+    val fileSizeMb: Float = 0f
 )

@@ -8,7 +8,6 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
@@ -65,44 +64,41 @@ class MainActivity : AppCompatActivity() {
     private val trimViewModel: TrimViewModel by viewModels()
     private val mergeViewModel: MergeViewModel by viewModels()
 
-    private var screenState: MutableState<Int>? = null
+    /** Dışarıdan (dosya yöneticisi "Birlikte aç" / "Paylaş") gelen bekleyen medya. */
+    private val pendingExternal = mutableStateOf<Pair<Uri, String>?>(null)
 
-    /** Çoklu video oynatıcıdaki aktif video yuvaları (en fazla 4 video aynı anda). */
+    /** Video Oynatıcı ekranı (screen=5) için aktif video yuvaları (1..4). */
     private val playSlots = mutableStateListOf<PlayerVideoSlot>()
     private var nextSlotId = 1L
-
-    /** Sistem seçicisinden yeni video ekleme mi yapılıyor, yoksa tekli video mu açılıyor? */
+    /** Oynatıcı dışarıdan (Birlikte Aç) mı açıldı? Geri basınca uygulamadan çıkılsın. */
+    private val playFromExternal = mutableStateOf(false)
+    /** Oynatıcı zaten açıkken yeni bir video geldiğinde "Tek mi Çoklu mu?" sorusu. */
+    private val pendingSingleOrMulti = mutableStateOf<Pair<Uri, String?>?>(null)
+    /** Oynatıcı içindeki "+" butonuyla mı dosya seçiliyor? */
     private var pickingToAddSlot = false
 
-    /** "Birlikte aç" ile gelen video: kullanıcıya ne yapmak istediği sorulur. */
-    private val pendingOpen = mutableStateOf<Pair<Uri, String>?>(null)
+    private var screenState: MutableState<Int>? = null
 
-    /** Uygulama içinden zaten video oynarken yeni bir video seçildiğinde tekli mi çoklu mu sorulur. */
-    private val pendingSingleOrMulti = mutableStateOf<Pair<Uri, String?>?>(null)
-
-    /** Video başka bir uygulamadan (dosya yöneticisi vb.) mı açıldı? Öyleyse geri = o uygulamaya dön. */
-    private val playFromExternal = mutableStateOf(false)
-
-    private fun openSingleInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean = false) {
-        playFromExternal.value = fromExternal
+    private fun openSingleInPlayer(uri: Uri, title: String?, fromExternal: Boolean) {
         DriveStreamResolver.releaseAllSessions()
         playSlots.clear()
         playSlots.add(PlayerVideoSlot(nextSlotId++, uri, title))
+        playFromExternal.value = fromExternal
         screenState?.value = 5
     }
 
-    private fun addSlotInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean? = null) {
-        if (fromExternal != null && playSlots.isEmpty()) {
-            playFromExternal.value = fromExternal
-        }
-        if (playSlots.size < 4) {
+    private fun addSlotInPlayer(uri: Uri, title: String?, fromExternal: Boolean = false) {
+        if (playSlots.isEmpty()) {
+            openSingleInPlayer(uri, title, fromExternal)
+        } else if (playSlots.size < 4) {
             playSlots.add(PlayerVideoSlot(nextSlotId++, uri, title))
+            screenState?.value = 5
         } else {
             val removed = playSlots.lastOrNull()
             DriveStreamResolver.releaseSession(removed?.uri)
             playSlots[playSlots.lastIndex] = PlayerVideoSlot(nextSlotId++, uri, title)
+            screenState?.value = 5
         }
-        screenState?.value = 5
     }
 
     private fun handleInternalPlayerOpen(uri: Uri, title: String?) {
@@ -113,8 +109,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Cihazdaki TÜM üçüncü parti dosya yöneticisi uygulamalarını (ZArchiver, Solid Explorer,
+     * MiXplorer, CX Dosya Gezgini, Samsung Dosyalarım vb.) ve Google Drive / yerel depolama
+     * sağlayıcılarını sistem dosya seçicisinin sol üst "Şuradan aç:" menüsünde eksiksiz listeler.
+     */
+    private fun createUniversalSingleDocumentContract() = object : ActivityResultContracts.OpenDocument() {
+        override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
+            super.createIntent(context, input).apply {
+                action = Intent.ACTION_GET_CONTENT
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                removeExtra(Intent.EXTRA_MIME_TYPES)
+                putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+                putExtra(
+                    android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
+                )
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+    }
+
+    private fun createUniversalMultipleDocumentsContract() = object : ActivityResultContracts.OpenMultipleDocuments() {
+        override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
+            super.createIntent(context, input).apply {
+                action = Intent.ACTION_GET_CONTENT
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                removeExtra(Intent.EXTRA_MIME_TYPES)
+                putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                putExtra(Intent.EXTRA_LOCAL_ONLY, false)
+                putExtra(
+                    android.provider.DocumentsContract.EXTRA_INITIAL_URI,
+                    android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
+                )
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+    }
+
     /** Uygulama içinden "Video Oynatıcı" ile video seçme (tüm 3. parti dosya yöneticileri dahil). */
-    private val pickPlayVideoLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
+    private val pickPlayVideoLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
         val addMode = pickingToAddSlot
         pickingToAddSlot = false
         if (uri != null) {
@@ -146,22 +180,22 @@ class MainActivity : AppCompatActivity() {
     /** Depolama (Tüm dosyalara erişim) izni sorulsun mu? */
     private val askStorage = mutableStateOf(false)
 
-    private val pickVideoLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
+    private val pickVideoLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
         if (uri != null) muxViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
     }
     private val pickMuxFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) muxViewModel.onFolderSelected(uri)
     }
-    private val pickMuxAudioLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
+    private val pickMuxAudioLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
         if (uri != null) muxViewModel.addAudioFile(uri, queryDisplayName(uri) ?: "audio_track")
     }
-    private val pickSubtitleLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
+    private val pickSubtitleLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
         if (uri != null) muxViewModel.addSubtitleFile(uri, queryDisplayName(uri) ?: "subtitle_track")
     }
     private val pickMuxOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) muxViewModel.setOutputFolder(uri)
     }
-    private val pickConverterAudioLauncher = registerForActivityResult(UniversalOpenMultipleDocuments()) { uris ->
+    private val pickConverterAudioLauncher = registerForActivityResult(createUniversalMultipleDocumentsContract()) { uris ->
         if (uris.isNotEmpty()) {
             converterViewModel.onAudioFilesSelected(uris.map { u -> u to (queryDisplayName(u) ?: "audio") })
         }
@@ -169,7 +203,7 @@ class MainActivity : AppCompatActivity() {
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
     }
-    private val pickTrimVideoLauncher = registerForActivityResult(UniversalOpenSingleDocument()) { uri ->
+    private val pickTrimVideoLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
         if (uri != null) trimViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
     }
     private val pickTrimFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -178,7 +212,7 @@ class MainActivity : AppCompatActivity() {
     private val pickTrimOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) trimViewModel.setOutputFolder(uri)
     }
-    private val pickMergeVideosLauncher = registerForActivityResult(UniversalOpenMultipleDocuments()) { uris ->
+    private val pickMergeVideosLauncher = registerForActivityResult(createUniversalMultipleDocumentsContract()) { uris ->
         if (uris.isNotEmpty()) {
             mergeViewModel.onVideosSelected(uris.map { u -> u to (queryDisplayName(u) ?: "video.mkv") })
         }
@@ -200,7 +234,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
 
     private fun requestStorageAccess() {
-        if (Build.VERSION.SDK_INT >= 30) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
                 manageStorageLauncher.launch(
                     Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
@@ -217,95 +251,106 @@ class MainActivity : AppCompatActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
-    private val appPrefs by lazy { AppPreferences(applicationContext) }
-
-    private fun ThemeMode.toPrefValue(): String = when (this) {
-        ThemeMode.LIGHT -> "light"; ThemeMode.DARK -> "dark"; ThemeMode.AMOLED -> "amoled"; ThemeMode.SYSTEM -> "system"
-    }
-    private fun String.toThemeMode(): ThemeMode = when (this) {
-        "light" -> ThemeMode.LIGHT; "system" -> ThemeMode.SYSTEM; "amoled" -> ThemeMode.AMOLED; else -> ThemeMode.DARK
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        if (savedInstanceState == null &&
-            !muxViewModel.isMuxing && !trimViewModel.isTrimming &&
-            !converterViewModel.isConverting && !mergeViewModel.isMerging
-        ) {
-            Thread { com.example.muxmaster.data.InputAccess.clearWorkCache(applicationContext) }.start()
-        }
+        // İlk açılışta (henüz dosya izni yokken) kullanıcıya sor
         if (!com.example.muxmaster.data.InputAccess.hasStorageAccess(this)) {
-            if (Build.VERSION.SDK_INT >= 30) askStorage.value = true
-            else requestStorageAccess()
-        } else if (Build.VERSION.SDK_INT >= 33) {
-            notifAsked = true
-            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            val prefs = getSharedPreferences("perm_prefs", MODE_PRIVATE)
+            if (!prefs.getBoolean("storage_asked", false)) {
+                prefs.edit().putBoolean("storage_asked", true).apply()
+                askStorage.value = true
+            }
         }
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
+
+        // Video oynatıcı dışarıdan (Birlikte Aç) açılmadıysa arka planda bildirim iznini kontrol et;
+        // doğrudan video oynatıcıya girildiyse sistem izin diyaloğu videonun üstünü kapatmasın.
+        if (playSlots.isEmpty()) {
+            requestNotificationPermissionIfNeeded()
+        }
+
+        // Medya kodeklerini (video/ses çözücülerini) uygulama açılır açılmaz arka planda ısıt;
+        // böylece kullanıcı bir videoya tıkladığında ilk kare anında açılır.
         Thread { prewarmVideoDecoders() }.start()
+
+        val appPrefs = AppPreferences(this)
+
         setContent {
-            var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
+            var themeMode by remember { mutableStateOf(ThemeMode.fromPrefValue(appPrefs.themeMode)) }
+
             MuxMasterTheme(themeMode = themeMode) {
-                val screenHolder = rememberSaveable { mutableStateOf(0) }
-                screenState = screenHolder
-                var screen by screenHolder
+                // 0 = Mux, 1 = Ses Dönüştürücü, 2 = Kırp, 3 = Ayarlar, 4 = Birleştir, 5 = Video Oynatıcı (aktif), 6 = Video Oynatıcı (ana ekran)
+                val screenStateLocal = rememberSaveable { mutableStateOf(if (playSlots.isNotEmpty()) 5 else 0) }
+                screenState = screenStateLocal
+                var screen by screenStateLocal
 
                 BackHandler(enabled = screen != 0) {
                     if (screen == 5) exitPlayer() else screen = 0
                 }
 
-                LaunchedEffect(Unit) { handleIncomingIntent(intent) }
-
-                if (askStorage.value) {
+                if (askStorage.value && screen != 5) {
                     AlertDialog(
                         onDismissRequest = { askStorage.value = false },
-                        title = { Text("Depolama izni") },
+                        title = { Text("Dosya Erişim İzni") },
                         text = {
                             Text(
-                                "Videoların önbelleğe kopyalanmadan, beklemeden doğrudan açılması için " +
-                                    "\"Tüm dosyalara erişim\" iznini açın."
+                                "Videoları doğrudan ve anında (kopyalamadan, tam hızda) " +
+                                    "oynatabilmek ve işleyebilmek için 'Tüm dosyalara erişim' " +
+                                    "iznini açmanız önerilir."
                             )
                         },
                         confirmButton = {
-                            TextButton(onClick = { askStorage.value = false; requestStorageAccess() }) { Text("İzin ver") }
+                            TextButton(onClick = {
+                                askStorage.value = false
+                                requestStorageAccess()
+                            }) { Text("İzni Aç") }
                         },
                         dismissButton = {
-                            TextButton(onClick = { askStorage.value = false }) { Text("Şimdi değil") }
+                            TextButton(onClick = { askStorage.value = false }) { Text("Daha Sonra") }
                         }
                     )
                 }
 
-                pendingSingleOrMulti.value?.let { (uri, title) ->
+                // Oynatıcı zaten açıkken yeni video seçildiğinde: "Tek video mu, Çoklu videoya ekle mi?"
+                val singleOrMulti = pendingSingleOrMulti.value
+                if (singleOrMulti != null) {
+                    val (u, t) = singleOrMulti
                     SingleOrMultiPlayDialog(
-                        fileName = title ?: uri.lastPathSegment ?: "Video",
+                        fileName = t ?: (u.lastPathSegment ?: "Medya"),
                         onDismiss = { pendingSingleOrMulti.value = null },
                         onPlaySingle = {
                             pendingSingleOrMulti.value = null
-                            openSingleInPlayer(uri, title, fromExternal = false)
+                            openSingleInPlayer(u, t, fromExternal = false)
                         },
                         onPlayMulti = {
                             pendingSingleOrMulti.value = null
-                            addSlotInPlayer(uri, title, fromExternal = false)
+                            addSlotInPlayer(u, t, fromExternal = false)
                         }
                     )
                 }
 
-                pendingOpen.value?.let { (uri, name) ->
+                // Dışarıdan yalnızca "Paylaş (SEND)" ile geldiğinde ne yapılacağını soran seçici
+                val ext = pendingExternal.value
+                if (ext != null) {
+                    val (uri, name) = ext
                     OpenWithChooser(
                         fileName = name,
-                        onDismiss = { pendingOpen.value = null },
+                        onDismiss = { pendingExternal.value = null },
                         onPlaySingle = {
-                            pendingOpen.value = null
+                            pendingExternal.value = null
                             openSingleInPlayer(uri, name, fromExternal = true)
                         },
                         onPlayMulti = {
-                            pendingOpen.value = null
+                            pendingExternal.value = null
                             addSlotInPlayer(uri, name, fromExternal = true)
                         },
-                        onMux = { pendingOpen.value = null; muxViewModel.onVideoSelected(uri, name); screen = 0 },
-                        onTrim = { pendingOpen.value = null; trimViewModel.onVideoSelected(uri, name); screen = 2 },
-                        onMerge = { pendingOpen.value = null; mergeViewModel.onVideosSelected(listOf(uri to name)); screen = 4 },
-                        onConvert = { pendingOpen.value = null; converterViewModel.onAudioFilesSelected(listOf(uri to name)); screen = 1 }
+                        onMux = { pendingExternal.value = null; muxViewModel.onVideoSelected(uri, name); screen = 0 },
+                        onTrim = { pendingExternal.value = null; trimViewModel.onVideoSelected(uri, name); screen = 2 },
+                        onMerge = { pendingExternal.value = null; mergeViewModel.onVideosSelected(listOf(uri to name)); screen = 4 },
+                        onConvert = { pendingExternal.value = null; converterViewModel.onAudioFilesSelected(listOf(uri to name)); screen = 1 }
                     )
                 }
 
@@ -411,54 +456,42 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        screenState?.let { handleIncomingIntent(intent) }
+        handleIncomingIntent(intent)
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
-        val uri = when (intent.action) {
+        val action = intent.action
+        val uri: Uri? = when (action) {
             Intent.ACTION_VIEW -> intent.data
             Intent.ACTION_SEND -> intent.getStreamUriCompat()
             else -> null
-        } ?: return
-
-        val scheme = uri.scheme?.lowercase()
-        if (scheme == "http" || scheme == "https") {
-            if (playSlots.isNotEmpty()) {
-                pendingOpen.value = uri to (uri.lastPathSegment ?: uri.toString())
+        }
+        if (uri != null) {
+            if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: Exception) { }
+            }
+            val name = queryDisplayName(uri) ?: (uri.lastPathSegment ?: "video.mp4")
+            if (action == Intent.ACTION_VIEW) {
+                pendingExternal.value = null
+                if (playSlots.isNotEmpty() && screenState?.value == 5) {
+                    playFromExternal.value = true
+                    pendingSingleOrMulti.value = uri to name
+                } else {
+                    openSingleInPlayer(uri, name, fromExternal = true)
+                }
             } else {
-                openSingleInPlayer(uri, fromExternal = true)
-            }
-            intent.action = null
-            return
-        }
-
-        if (!DriveStreamResolver.isGoogleDriveSafUri(uri)) {
-            try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            catch (_: Exception) { }
-        }
-
-        val displayName = queryDisplayName(uri) ?: "file"
-        val mimeType = intent.type ?: contentResolver.getType(uri).orEmpty()
-
-        when {
-            mimeType.startsWith("video/") || displayName.substringAfterLast('.', "").lowercase() in
-                setOf("mkv", "mp4", "avi", "mov", "webm", "ts", "m2ts", "m4v", "3gp", "flv", "wmv") -> {
-                pendingOpen.value = uri to displayName
-            }
-            mimeType.startsWith("audio/") -> {
-                converterViewModel.onAudioFilesSelected(listOf(uri to displayName))
-                screenState?.value = 1
+                pendingExternal.value = uri to name
             }
         }
-
-        intent.action = null
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (!notifAsked && com.example.muxmaster.data.InputAccess.hasStorageAccess(this) && Build.VERSION.SDK_INT >= 33) {
-            notifAsked = true
+    private fun requestNotificationPermissionIfNeeded() {
+        if (notifAsked) return
+        notifAsked = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
                 android.content.pm.PackageManager.PERMISSION_GRANTED
             ) notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
@@ -545,61 +578,4 @@ private fun OpenWithChooser(
         confirmButton = {},
         dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
     )
-}
-
-/**
- * Cihazdaki TÜM üçüncü parti dosya yöneticisi uygulamalarını (ZArchiver, Solid Explorer,
- * MiXplorer, CX Dosya Gezgini, Samsung Dosyalarım, X-plore, Total Commander vb.) ve
- * Google Drive / yerel depolama sağlayıcılarını sistem dosya seçicisinin sol üst
- * "Şuradan aç:" menüsünde eksiksiz listeler.
- *
- * KÖK NEDEN: Android DocumentsUI, `ACTION_OPEN_DOCUMENT` ile açıldığında yalnızca SAF
- * `DocumentsProvider` köklerini gösterir ve telefona kurulan diğer dosya yöneticisi
- * uygulamalarını gizler. `ACTION_GET_CONTENT` + `CATEGORY_OPENABLE` + `type = "*/*"`
- * kullanıldığında ise "Şuradan aç:" menüsünde hem cihaz depolaması ve Google Drive
- * hesapları hem de kurulu tüm dosya yöneticisi uygulamaları görünür.
- */
-private class UniversalOpenSingleDocument : ActivityResultContract<Array<String>, Uri?>() {
-    override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
-        Intent(Intent.ACTION_GET_CONTENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
-            putExtra(
-                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
-                android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
-            )
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-        }
-
-    override fun parseResult(resultCode: Int, intent: Intent?): Uri? =
-        if (resultCode == android.app.Activity.RESULT_OK) intent?.data else null
-}
-
-private class UniversalOpenMultipleDocuments : ActivityResultContract<Array<String>, List<Uri>>() {
-    override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
-        Intent(Intent.ACTION_GET_CONTENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-            putExtra(Intent.EXTRA_LOCAL_ONLY, false)
-            putExtra(
-                android.provider.DocumentsContract.EXTRA_INITIAL_URI,
-                android.provider.DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:")
-            )
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-        }
-
-    override fun parseResult(resultCode: Int, intent: Intent?): List<Uri> {
-        if (resultCode != android.app.Activity.RESULT_OK || intent == null) return emptyList()
-        val uris = LinkedHashSet<Uri>()
-        intent.data?.let { uris.add(it) }
-        val clip = intent.clipData
-        if (clip != null) {
-            for (i in 0 until clip.itemCount) {
-                clip.getItemAt(i)?.uri?.let { uris.add(it) }
-            }
-        }
-        return uris.toList()
-    }
 }

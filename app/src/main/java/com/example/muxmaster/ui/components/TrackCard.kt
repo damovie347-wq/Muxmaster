@@ -1,5 +1,3 @@
-@file:OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
-
 package com.example.muxmaster.ui.components
 
 import androidx.compose.foundation.BorderStroke
@@ -113,7 +111,6 @@ private fun TrackHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
-        // Sol taraftaki seçim kutucuğu (Checkbox)
         Checkbox(
             checked = isChecked,
             onCheckedChange = { onToggleChecked() },
@@ -133,8 +130,6 @@ private fun TrackHeaderRow(
                     .fillMaxWidth()
                     .combinedClickable(
                         onClick = {
-                            // Seçim modundayken (bazı veya tüm kutucuklar kaldırılmışken) satıra tıklamak
-                            // doğrudan o altyazıyı/sesi seçer veya kaldırır; tümü seçiliyken detayları açar.
                             if (selectionModeActive) onToggleChecked() else onToggleExpand()
                         },
                         onLongClick = { showMenu = true }
@@ -199,7 +194,7 @@ private fun TrackHeaderRow(
     }
 }
 
-private const val DELAY_BASE_RANGE_MS = 10000f
+private const val DELAY_BASE_RANGE_MS = 10_000f
 
 @Composable
 private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
@@ -243,9 +238,10 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
 
         OutlinedTextField(
             value = text,
-            onValueChange = { newVal ->
-                text = newVal
-                newVal.toLongOrNull()?.let { parsed ->
+            onValueChange = { newText ->
+                text = newText
+                val parsed = newText.toLongOrNull()
+                if (parsed != null) {
                     sliderValue = parsed.toFloat()
                     onDelayChange(parsed)
                 }
@@ -254,18 +250,23 @@ private fun DelayRow(delayMs: Long, onDelayChange: (Long) -> Unit) {
             singleLine = true,
             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
             suffix = { Text("ms", fontSize = 10.sp, color = TextMuted) },
-            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = Purple, unfocusedBorderColor = Outline)
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Purple,
+                unfocusedBorderColor = Outline,
+                focusedTextColor = TextPrimary,
+                unfocusedTextColor = TextPrimary
+            )
         )
     }
 }
 
-private const val GAIN_MAX_DB = 15f
+private const val GAIN_MAX_DB = 20f
 
 private fun dbToBoostPercent(db: Float): Float =
-    (100.0 * Math.pow(10.0, db / 20.0) - 100.0).toFloat()
+    ((Math.pow(10.0, db.toDouble() / 20.0) - 1.0) * 100.0).toFloat().coerceAtLeast(0f)
 
-private fun percentToDb(percent: Float): Float =
-    (20.0 * Math.log10(1.0 + percent / 100.0)).toFloat()
+private fun percentToDb(pct: Float): Float =
+    (20.0 * kotlin.math.log10(1.0 + pct.coerceAtLeast(0f).toDouble() / 100.0)).toFloat().coerceIn(0f, GAIN_MAX_DB)
 
 @Composable
 private fun GainRow(gainDb: Float, onGainChange: (Float) -> Unit) {
@@ -324,8 +325,9 @@ private fun LanguageRow(language: String, onLanguageChange: (String) -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         items(LANGUAGE_CHOICES, key = { it.first }) { (code, label) ->
+            val selected = language == code
             FilterChip(
-                selected = language == code,
+                selected = selected,
                 onClick = { onLanguageChange(code) },
                 label = { Text(label, fontSize = 11.sp) },
                 colors = FilterChipDefaults.filterChipColors(
@@ -387,12 +389,15 @@ fun AudioTrackCard(
             val title = track.title.ifBlank {
                 if (track.source == TrackSource.EXISTING) {
                     stringResource(R.string.audio_track_fallback_title, track.existingStreamIndex)
-                } else {
-                    track.fileDisplayName
-                }
+                } else track.fileDisplayName
             }
-            val subtitle = if (track.existingCodec.isNotBlank()) {
-                "${track.existingCodec.uppercase()} · ${channelLabel(track.existingChannels)} · ${track.existingBitrate}"
+            val subtitle = if (track.source == TrackSource.EXISTING) {
+                buildString {
+                    append(track.existingCodec.uppercase())
+                    append(" • ")
+                    append("${track.existingChannels}ch")
+                    if (track.existingBitrate.isNotBlank()) append(" • ${track.existingBitrate}")
+                }
             } else {
                 track.fileDisplayName
             }
@@ -450,7 +455,7 @@ fun AudioTrackCard(
                     if (onCancelConvert != null) {
                         Spacer(Modifier.width(6.dp))
                         IconButton(onClick = onCancelConvert, modifier = Modifier.size(22.dp)) {
-                            Icon(Icons.Filled.Close, stringResource(R.string.cancel_desc), tint = Red, modifier = Modifier.size(15.dp))
+                            Icon(Icons.Filled.Close, stringResource(R.string.cancel_desc), tint = Red, modifier = Modifier.size(14.dp))
                         }
                     }
                 }
@@ -695,13 +700,4 @@ fun SubtitleTrackCard(
             }
         }
     }
-}
-
-@Composable
-private fun channelLabel(channels: Int): String = when (channels) {
-    1 -> stringResource(R.string.channel_mono)
-    2 -> stringResource(R.string.channel_stereo)
-    6 -> stringResource(R.string.channel_51)
-    8 -> stringResource(R.string.channel_71)
-    else -> stringResource(R.string.channel_generic, channels)
 }

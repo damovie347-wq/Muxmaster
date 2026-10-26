@@ -1,5 +1,3 @@
-@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-
 package com.example.muxmaster.ui.screens
 
 import android.os.SystemClock
@@ -11,6 +9,8 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -24,14 +24,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
-import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayCircle
@@ -107,17 +105,9 @@ fun MuxScreen(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // KÖK NEDEN DÜZELTMESİ (Kaydırma sırasında titreme, ses dosyalarının kaybolması ve iç içe geçmesi):
-    // 1) Önceden üstteki VideoCard `expandVertically/shrinkVertically` ile küçülüp büyüdüğü için
-    //    altındaki LazyColumn her karede yukarı-aşağı zıplıyor, bu da parmak sabitken bile ters
-    //    yönde sahte scroll deltası üretip sonsuz titreme (feedback loop) yaratıyordu.
-    // 2) Artık LazyColumn'un boyutu ve konumu %100 SABİT (tam ekran); VideoCard doğrudan listenin
-    //    kendi doğal üst başlığı (item) olarak kayıyor ve alttaki BottomMuxBar ise boyutu hiç
-    //    değiştirmeden saf GPU `slideInVertically / slideOutVertically` katmanı (overlay) olarak
-    //    histerezis korumasıyla kayıp gizleniyor.
     var isBottomBarVisible by remember { mutableStateOf(true) }
-    val audioListState = rememberLazyListState()
-    val subtitleListState = rememberLazyListState()
+    val audioScrollState = rememberScrollState()
+    val subtitleScrollState = rememberScrollState()
 
     // Yerinde "Sesi Dönüştür" diyalogu için seçilen ses parçası:
     var trackToConvert by remember { mutableStateOf<AudioTrackItem?>(null) }
@@ -257,134 +247,126 @@ fun MuxScreen(
                         if (page == 0) {
                             val allAudioSel = viewModel.allAudioSelected
                             val selAudioCnt = viewModel.selectedAudioCount
-                            LazyColumn(
-                                state = audioListState,
-                                contentPadding = PaddingValues(
-                                    start = 16.dp,
-                                    end = 16.dp,
-                                    top = 8.dp,
-                                    bottom = 220.dp
-                                ),
-                                modifier = Modifier.fillMaxSize()
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(audioScrollState)
+                                    .padding(
+                                        start = 16.dp,
+                                        end = 16.dp,
+                                        top = 8.dp,
+                                        bottom = 220.dp
+                                    )
                             ) {
-                                item(key = "header_audio") {
-                                    TopVideoAndFolderSection(
-                                        viewModel = viewModel,
-                                        busy = busy,
-                                        onPickFolder = onPickFolder,
-                                        onPickVideo = onPickVideo
-                                    )
-                                    Spacer(Modifier.height(12.dp))
-                                    TrackTabsAndAddRow(
-                                        currentPage = pagerState.currentPage,
-                                        audioCount = viewModel.audioTracks.size,
-                                        subtitleCount = viewModel.subtitleTracks.size,
-                                        totalInTab = viewModel.audioTracks.size,
-                                        selectedInTab = selAudioCnt,
-                                        allSelectedInTab = allAudioSel,
-                                        isExporting = viewModel.isExporting,
-                                        onToggleSelectAll = viewModel::toggleSelectAllAudio,
-                                        onExportSelected = viewModel::exportSelectedAudioTracks,
-                                        onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
-                                        onAddClick = onPickAudio
-                                    )
-                                }
+                                TopVideoAndFolderSection(
+                                    viewModel = viewModel,
+                                    busy = busy,
+                                    onPickFolder = onPickFolder,
+                                    onPickVideo = onPickVideo
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                TrackTabsAndAddRow(
+                                    currentPage = pagerState.currentPage,
+                                    audioCount = viewModel.audioTracks.size,
+                                    subtitleCount = viewModel.subtitleTracks.size,
+                                    totalInTab = viewModel.audioTracks.size,
+                                    selectedInTab = selAudioCnt,
+                                    allSelectedInTab = allAudioSel,
+                                    isExporting = viewModel.isExporting,
+                                    onToggleSelectAll = viewModel::toggleSelectAllAudio,
+                                    onExportSelected = viewModel::exportSelectedAudioTracks,
+                                    onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
+                                    onAddClick = onPickAudio
+                                )
                                 if (viewModel.audioTracks.isEmpty()) {
-                                    item(key = "empty_audio") {
-                                        EmptyHint(stringResource(R.string.empty_audio_hint))
-                                    }
+                                    EmptyHint(stringResource(R.string.empty_audio_hint))
                                 } else {
-                                    itemsIndexed(
-                                        items = viewModel.audioTracks,
-                                        key = { _, t -> "audio_${t.id}" }
-                                    ) { idx, track ->
-                                        val isExpanded = viewModel.expandedAudioIds[track.id] ?: false
-                                        AudioTrackCard(
-                                            track = track,
-                                            selectionModeActive = !allAudioSel,
-                                            selectedCount = selAudioCnt,
-                                            canMoveUp = idx > 0,
-                                            canMoveDown = idx < viewModel.audioTracks.size - 1,
-                                            expanded = isExpanded,
-                                            onToggleExpand = {
-                                                viewModel.expandedAudioIds[track.id] = !isExpanded
-                                            },
-                                            onUpdate = viewModel::updateAudio,
-                                            onRemove = { viewModel.removeAudio(track.id) },
-                                            onMoveUp = { viewModel.moveAudioUp(track.id) },
-                                            onMoveDown = { viewModel.moveAudioDown(track.id) },
-                                            onExport = { viewModel.exportAudioTrack(track) },
-                                            onExportSelected = viewModel::exportSelectedAudioTracks,
-                                            onConvertAudio = { trackToConvert = track },
-                                            isConvertingThisTrack = viewModel.isConvertingTrack && viewModel.convertingTrackId == track.id,
-                                            convertingProgress = viewModel.convertingTrackProgress,
-                                            onCancelConvert = viewModel::cancelTrackConvert
-                                        )
+                                    viewModel.audioTracks.forEachIndexed { idx, track ->
+                                        key("audio_${track.id}") {
+                                            val isExpanded = viewModel.expandedAudioIds[track.id] ?: false
+                                            AudioTrackCard(
+                                                track = track,
+                                                selectionModeActive = !allAudioSel,
+                                                selectedCount = selAudioCnt,
+                                                canMoveUp = idx > 0,
+                                                canMoveDown = idx < viewModel.audioTracks.size - 1,
+                                                expanded = isExpanded,
+                                                onToggleExpand = {
+                                                    viewModel.expandedAudioIds[track.id] = !isExpanded
+                                                },
+                                                onUpdate = viewModel::updateAudio,
+                                                onRemove = { viewModel.removeAudio(track.id) },
+                                                onMoveUp = { viewModel.moveAudioUp(track.id) },
+                                                onMoveDown = { viewModel.moveAudioDown(track.id) },
+                                                onExport = { viewModel.exportAudioTrack(track) },
+                                                onExportSelected = viewModel::exportSelectedAudioTracks,
+                                                onConvertAudio = { trackToConvert = track },
+                                                isConvertingThisTrack = viewModel.isConvertingTrack && viewModel.convertingTrackId == track.id,
+                                                convertingProgress = viewModel.convertingTrackProgress,
+                                                onCancelConvert = viewModel::cancelTrackConvert
+                                            )
+                                        }
                                     }
                                 }
                             }
                         } else {
                             val allSubSel = viewModel.allSubtitlesSelected
                             val selSubCnt = viewModel.selectedSubtitleCount
-                            LazyColumn(
-                                state = subtitleListState,
-                                contentPadding = PaddingValues(
-                                    start = 16.dp,
-                                    end = 16.dp,
-                                    top = 8.dp,
-                                    bottom = 220.dp
-                                ),
-                                modifier = Modifier.fillMaxSize()
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .verticalScroll(subtitleScrollState)
+                                    .padding(
+                                        start = 16.dp,
+                                        end = 16.dp,
+                                        top = 8.dp,
+                                        bottom = 220.dp
+                                    )
                             ) {
-                                item(key = "header_subtitle") {
-                                    TopVideoAndFolderSection(
-                                        viewModel = viewModel,
-                                        busy = busy,
-                                        onPickFolder = onPickFolder,
-                                        onPickVideo = onPickVideo
-                                    )
-                                    Spacer(Modifier.height(12.dp))
-                                    TrackTabsAndAddRow(
-                                        currentPage = pagerState.currentPage,
-                                        audioCount = viewModel.audioTracks.size,
-                                        subtitleCount = viewModel.subtitleTracks.size,
-                                        totalInTab = viewModel.subtitleTracks.size,
-                                        selectedInTab = selSubCnt,
-                                        allSelectedInTab = allSubSel,
-                                        isExporting = viewModel.isExporting,
-                                        onToggleSelectAll = viewModel::toggleSelectAllSubtitles,
-                                        onExportSelected = viewModel::exportSelectedSubtitleTracks,
-                                        onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
-                                        onAddClick = onPickSubtitle
-                                    )
-                                }
+                                TopVideoAndFolderSection(
+                                    viewModel = viewModel,
+                                    busy = busy,
+                                    onPickFolder = onPickFolder,
+                                    onPickVideo = onPickVideo
+                                )
+                                Spacer(Modifier.height(12.dp))
+                                TrackTabsAndAddRow(
+                                    currentPage = pagerState.currentPage,
+                                    audioCount = viewModel.audioTracks.size,
+                                    subtitleCount = viewModel.subtitleTracks.size,
+                                    totalInTab = viewModel.subtitleTracks.size,
+                                    selectedInTab = selSubCnt,
+                                    allSelectedInTab = allSubSel,
+                                    isExporting = viewModel.isExporting,
+                                    onToggleSelectAll = viewModel::toggleSelectAllSubtitles,
+                                    onExportSelected = viewModel::exportSelectedSubtitleTracks,
+                                    onSelectPage = { target -> scope.launch { pagerState.animateScrollToPage(target) } },
+                                    onAddClick = onPickSubtitle
+                                )
                                 if (viewModel.subtitleTracks.isEmpty()) {
-                                    item(key = "empty_subtitle") {
-                                        EmptyHint(stringResource(R.string.empty_subtitle_hint))
-                                    }
+                                    EmptyHint(stringResource(R.string.empty_subtitle_hint))
                                 } else {
-                                    itemsIndexed(
-                                        items = viewModel.subtitleTracks,
-                                        key = { _, t -> "sub_${t.id}" }
-                                    ) { idx, track ->
-                                        val isExpanded = viewModel.expandedSubtitleIds[track.id] ?: false
-                                        SubtitleTrackCard(
-                                            track = track,
-                                            selectionModeActive = !allSubSel,
-                                            selectedCount = selSubCnt,
-                                            canMoveUp = idx > 0,
-                                            canMoveDown = idx < viewModel.subtitleTracks.size - 1,
-                                            expanded = isExpanded,
-                                            onToggleExpand = {
-                                                viewModel.expandedSubtitleIds[track.id] = !isExpanded
-                                            },
-                                            onUpdate = viewModel::updateSubtitle,
-                                            onRemove = { viewModel.removeSubtitle(track.id) },
-                                            onMoveUp = { viewModel.moveSubtitleUp(track.id) },
-                                            onMoveDown = { viewModel.moveSubtitleDown(track.id) },
-                                            onExport = { viewModel.exportSubtitleTrack(track) },
-                                            onExportSelected = viewModel::exportSelectedSubtitleTracks
-                                        )
+                                    viewModel.subtitleTracks.forEachIndexed { idx, track ->
+                                        key("sub_${track.id}") {
+                                            val isExpanded = viewModel.expandedSubtitleIds[track.id] ?: false
+                                            SubtitleTrackCard(
+                                                track = track,
+                                                selectionModeActive = !allSubSel,
+                                                selectedCount = selSubCnt,
+                                                canMoveUp = idx > 0,
+                                                canMoveDown = idx < viewModel.subtitleTracks.size - 1,
+                                                expanded = isExpanded,
+                                                onToggleExpand = {
+                                                    viewModel.expandedSubtitleIds[track.id] = !isExpanded
+                                                },
+                                                onUpdate = viewModel::updateSubtitle,
+                                                onRemove = { viewModel.removeSubtitle(track.id) },
+                                                onMoveUp = { viewModel.moveSubtitleUp(track.id) },
+                                                onMoveDown = { viewModel.moveSubtitleDown(track.id) },
+                                                onExport = { viewModel.exportSubtitleTrack(track) },
+                                                onExportSelected = viewModel::exportSelectedSubtitleTracks
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -393,7 +375,7 @@ fun MuxScreen(
                 }
             }
 
-            // Alt panel (BottomMuxBar): LazyColumn boyutunu hiç değiştirmeden saf katman olarak kayar
+            // Alt panel: Düzeni (layout yüksekliğini) hiç değiştirmeden GPU katmanı olarak açılır/kapanır
             AnimatedVisibility(
                 visible = showBottomBar,
                 enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -404,17 +386,15 @@ fun MuxScreen(
                     outputFolderUri = viewModel.outputFolderUri,
                     outputFileName = viewModel.outputFileName,
                     isMuxing = viewModel.isMuxing,
-                    muxProgress = viewModel.muxProgress,
+                    progress = viewModel.muxProgress,
                     resultMessage = viewModel.resultMessage,
                     isSuccess = viewModel.isSuccess,
-                    canStartMux = viewModel.videoFile != null && viewModel.outputFolderUri != null && !viewModel.isConvertingTrack,
-                    onPickFolder = onPickOutputFolder,
+                    enabled = viewModel.videoFile != null && !viewModel.isLoading && !viewModel.isConvertingTrack,
+                    onPickOutputFolder = onPickOutputFolder,
                     onFileNameChange = viewModel::updateOutputFileName,
-                    onStart = viewModel::startMux,
-                    onCancel = viewModel::cancelMux,
-                    onDismissResult = {
-                        if (viewModel.isSuccess) viewModel.dismissAndReset() else viewModel.clearResult()
-                    }
+                    onStartMux = viewModel::startMux,
+                    onCancelMux = viewModel::cancelMux,
+                    onDismissAndReset = viewModel::dismissAndReset
                 )
             }
 
@@ -462,7 +442,6 @@ fun MuxScreen(
             progress = viewModel.convertingTrackProgress,
             convertingName = viewModel.convertingTrackName,
             onDismiss = {
-                // Dönüştürme sürerken bile pencere gizlenebilir; işlem arka planda kendi kendine devam eder!
                 trackToConvert = null
             },
             onCancelConvert = {
@@ -476,12 +455,7 @@ fun MuxScreen(
                     targetMode = mode,
                     bitrateKbps = bitrateKbps,
                     targetSizeBytes = targetSizeBytes,
-                    channelMode = chMode,
-                    onComplete = {
-                        if (trackToConvert?.id == activeTrack.id) {
-                            trackToConvert = null
-                        }
-                    }
+                    channelMode = chMode
                 )
             }
         )
@@ -495,7 +469,13 @@ private fun TopVideoAndFolderSection(
     onPickFolder: () -> Unit,
     onPickVideo: () -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+    ) {
         OutlinedButton(
             onClick = onPickFolder,
             enabled = !busy,
@@ -504,58 +484,64 @@ private fun TopVideoAndFolderSection(
         ) {
             Icon(Icons.Filled.FolderOpen, null, tint = PurpleLight, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Klasör Seç", color = PurpleLight, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text("Klasör Seç", color = TextPrimary, fontSize = 13.sp)
         }
-        Spacer(Modifier.weight(1f))
         if (viewModel.folderQueue.isNotEmpty()) {
-            IconButton(onClick = viewModel::prevInQueue, enabled = viewModel.hasPrevInQueue && !busy) {
-                Icon(
-                    Icons.Filled.SkipPrevious, "Önceki video",
-                    tint = if (viewModel.hasPrevInQueue && !busy) TextPrimary else TextMuted
-                )
-            }
-            Spacer(Modifier.width(4.dp))
-            Button(
-                onClick = viewModel::nextInQueue,
-                enabled = viewModel.hasNextInQueue && !busy,
-                shape = RoundedCornerShape(10.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Purple, disabledContainerColor = SurfaceHigh)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .weight(1f)
+                    .background(Surface, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
-                Icon(Icons.Filled.ArrowForward, "Sonraki video", modifier = Modifier.size(22.dp))
+                Icon(Icons.Filled.Folder, null, tint = PurpleLight, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        viewModel.folderName.ifBlank { "Klasör" },
+                        color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${viewModel.queueIndex + 1} / ${viewModel.folderQueue.size} video",
+                        color = TextSec, fontSize = 11.sp
+                    )
+                }
+                IconButton(
+                    onClick = { viewModel.prevInQueue() },
+                    enabled = viewModel.hasPrevInQueue && !busy,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.SkipPrevious, "Önceki video",
+                        tint = if (viewModel.hasPrevInQueue && !busy) TextPrimary else TextMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(
+                    onClick = { viewModel.nextInQueue() },
+                    enabled = viewModel.hasNextInQueue && !busy,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.ArrowForward, "Sonraki video",
+                        tint = if (viewModel.hasNextInQueue && !busy) PurpleLight else TextMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(
+                    onClick = { viewModel.clearFolderQueue() },
+                    enabled = !busy,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(Icons.Filled.Close, "Kuyruğu kapat", tint = TextMuted, modifier = Modifier.size(16.dp))
+                }
             }
         }
     }
-    if (viewModel.folderQueue.isNotEmpty()) {
-        Spacer(Modifier.height(8.dp))
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(SurfaceHigh, RoundedCornerShape(10.dp))
-                .padding(start = 12.dp, end = 4.dp)
-        ) {
-            Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(
-                viewModel.folderName.ifBlank { "Klasör" },
-                color = TextPrimary, fontSize = 13.sp, maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                "${viewModel.queueIndex + 1}/${viewModel.folderQueue.size}",
-                color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.Medium
-            )
-            IconButton(onClick = viewModel::clearFolderQueue) {
-                Icon(Icons.Filled.Close, "Klasörü kapat", tint = TextSec, modifier = Modifier.size(20.dp))
-            }
-        }
-    }
-    Spacer(Modifier.height(10.dp))
 
     VideoCard(
-        video = viewModel.videoFile,
+        videoFile = viewModel.videoFile,
         isLoading = viewModel.isLoading,
         loadingMessage = viewModel.loadingMessage,
         onPickVideo = onPickVideo,
@@ -605,64 +591,64 @@ private fun TrackTabsAndAddRow(
                 modifier = Modifier.weight(1f)
             ) {
                 // "Tümünü Seç" (hepsi seçiliyse tekrar basınca tüm seçimleri kaldırır)
-                Surface(
-                    onClick = onToggleSelectAll,
-                    color = if (allSelectedInTab) Purple.copy(alpha = 0.18f) else SurfaceHigh,
-                    shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, if (allSelectedInTab) Purple else Outline)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (allSelectedInTab) Purple.copy(alpha = 0.18f) else SurfaceHigh)
+                        .border(1.dp, if (allSelectedInTab) Purple else Outline, RoundedCornerShape(8.dp))
+                        .clickable(onClick = onToggleSelectAll)
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Icon(
-                            if (allSelectedInTab) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
-                            contentDescription = null,
-                            tint = if (allSelectedInTab) PurpleLight else TextSec,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "${stringResource(R.string.action_select_all)} ($selectedInTab/$totalInTab)",
-                            color = if (allSelectedInTab) PurpleLight else TextPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1
-                        )
-                    }
+                    Checkbox(
+                        checked = allSelectedInTab,
+                        onCheckedChange = null,
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = Purple,
+                            uncheckedColor = TextSec,
+                            checkmarkColor = Color.White
+                        ),
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "${stringResource(R.string.action_select_all)} ($selectedInTab/$totalInTab)",
+                        color = if (allSelectedInTab) PurpleLight else TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1
+                    )
                 }
 
                 // Yalnızca seçili kutucukları dışa aktarma butonu
                 if (selectedInTab > 0) {
-                    Surface(
-                        onClick = { if (!isExporting) onExportSelected() },
-                        color = Amber.copy(alpha = 0.16f),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, Amber.copy(alpha = 0.5f))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Amber.copy(alpha = 0.16f))
+                            .border(1.dp, Amber.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                            .clickable(enabled = !isExporting, onClick = onExportSelected)
+                            .padding(horizontal = 9.dp, vertical = 6.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)
-                        ) {
-                            if (isExporting) {
-                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Amber)
-                            } else {
-                                Icon(
-                                    Icons.Filled.FileDownload,
-                                    contentDescription = null,
-                                    tint = Amber,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = "${stringResource(R.string.action_export)} ($selectedInTab)",
-                                color = Amber,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
+                        if (isExporting) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Amber)
+                        } else {
+                            Icon(
+                                Icons.Filled.FileDownload,
+                                contentDescription = null,
+                                tint = Amber,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "${stringResource(R.string.action_export)} ($selectedInTab)",
+                            color = Amber,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
                     }
                 }
             }
