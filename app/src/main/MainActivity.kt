@@ -117,7 +117,7 @@ class MainActivity : AppCompatActivity() {
      * MiXplorer, CX Dosya Gezgini, Samsung Dosyalarım vb.) ve Google Drive / yerel depolama
      * sağlayıcılarını sistem dosya seçicisinin sol üst "Şuradan aç:" menüsünde eksiksiz listeler.
      */
-    private fun createUniversalSingleDocumentContract() = object : ActivityResultContracts.OpenDocument() {
+    private fun createUniversalSingleDocumentContract(): ActivityResultContracts.OpenDocument = object : ActivityResultContracts.OpenDocument() {
         override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
             super.createIntent(context, input).apply {
                 action = Intent.ACTION_GET_CONTENT
@@ -133,7 +133,7 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    private fun createUniversalMultipleDocumentsContract() = object : ActivityResultContracts.OpenMultipleDocuments() {
+    private fun createUniversalMultipleDocumentsContract(): ActivityResultContracts.OpenMultipleDocuments = object : ActivityResultContracts.OpenMultipleDocuments() {
         override fun createIntent(context: android.content.Context, input: Array<String>): Intent =
             super.createIntent(context, input).apply {
                 action = Intent.ACTION_GET_CONTENT
