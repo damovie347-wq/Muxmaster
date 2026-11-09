@@ -134,3 +134,39 @@ yüklerken atlanabilir; bu durumda GitHub'da `.github/workflows/build.yml` dosya
 - Klasör kuyruğu için kapat (✕) düğmesi.
 - Geri tuşu alt ekranlardan ana ekrana döner.
 - Girdi dosyaları artık önbelleğe KOPYALANMAZ (fd üzerinden okunur); olmazsa otomatik eski yönteme düşer. Açılışta önbellek temizlenir.
+
+## Güncelleme 4 — Çoklu kesim (makas), kaydırma düzeltmesi, yeni ana ekran
+
+### 1) Çoklu kesim (makas) — birden fazla aralığı sil, kalanı birleştir
+- Kırp ekranının sağ üstüne **makas** düğmesi eklendi. Basınca oynatıcının bulunduğu yerden
+  yeni bir "kesilecek aralık" eklenir (varsayılan 10 sn). Her aralığın başlangıç/bitişi
+  dakika · saniye · salise alanlarından elle de düzeltilebilir.
+- İstenildiği kadar aralık eklenebilir (2, 3, 10…). Zaman çizelgesinde **kırmızı** = çıkarılacak,
+  **mor** = korunacak bölge; kalan toplam süre canlı gösterilir.
+- "ÇOKLU KESİMİ UYGULA" → her korunacak parça ayrı ayrı **kayıpsız (`-c copy`)** kesilir,
+  sonra ffmpeg `concat` demuxer'ı ile tek dosyada birleştirilir. Yeniden kodlama yoktur.
+  Parça başlangıçları (tek aralık modundaki gibi) ffprobe ile ileriye doğru en yakın
+  keyframe'e hizalanır (bkz. `TrimViewModel.buildMultiCut`).
+- "Tek aralığa dön" ile klasik tek aralık kırpmaya dönülür.
+
+### 2) Video kaydırma (seek) slider'ı düzeltmesi
+- Material3'ün hazır `Slider` / `RangeSlider` bileşenleri bırakıldı. `ui/components/Sliders.kt`
+  içindeki `MuxSeekSlider` ve `MuxRangeSlider`, dokunma + sürükleme jestini tek bir
+  `pointerInput` + `awaitEachGesture` bloğunda kendileri yönetir: parmak inince konum uygulanır,
+  kaydıkça takip eder, kalkınca kesin hedefe oturur. Böylece sağa/sola kaydırma her cihazda
+  çalışır (tek dokunuş da çalışmaya devam eder).
+
+### 3) Yeni ana ekran (kart menüsü)
+- `ui/screens/HomeScreen.kt`: büyük kartlar (Mux · Kes · Birleştir · Oynatıcı), tam genişlikte
+  "Ses Dönüştürme" kartı ve "Son Dosyalar" listesi (küçük önizleme + tarih + süre).
+  Kartlara dokununca ilgili ekran, hiçbir ayar bozulmadan açılır; geri tuşu ana ekrana döner.
+- `data/RecentFiles.kt`: son açılan dosyalar SharedPreferences içinde JSON olarak saklanır
+  (en fazla 12 kayıt, en son açılan en üstte).
+
+### Temizlik
+- Derlemeye girmeyen eski kopyalar silindi: `app/src/main/*.kt`, `app/app/...`,
+  `app/src/main/{strings,styles,locales_config}.xml`.
+
+### Doğrulama
+Bu sürüm; JDK 17 + Android SDK 34 + Gradle 8.5 ile `gradle :app:assembleRelease`
+(minify/R8 açık) çalıştırılarak derlendi — hatasız tamamlandı.

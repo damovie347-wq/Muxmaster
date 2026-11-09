@@ -58,7 +58,7 @@ fun ConverterScreen(
     viewModel: ConverterViewModel,
     onPickAudio: () -> Unit,
     onPickOutputFolder: () -> Unit,
-    onNavigateToMux: () -> Unit
+    onNavigateBack: () -> Unit
 ) {
     Scaffold(
         containerColor = BgDark,
@@ -66,7 +66,7 @@ fun ConverterScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.converter_title), fontWeight = FontWeight.Bold, color = TextPrimary) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateToMux) {
+                    IconButton(onClick = onNavigateBack) {
                         Icon(Icons.Filled.ArrowBack, stringResource(R.string.nav_back_to_mux_desc), tint = TextSec)
                     }
                 },

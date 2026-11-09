@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
@@ -114,7 +115,11 @@ import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.mp4.Mp4Extractor
 import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.data.InputAccess
+import com.example.muxmaster.model.TimeRange
 import com.example.muxmaster.model.VideoFile
+import com.example.muxmaster.ui.components.CutTimelineBar
+import com.example.muxmaster.ui.components.MuxRangeSlider
+import com.example.muxmaster.ui.components.MuxSeekSlider
 import com.example.muxmaster.ui.components.VideoCard
 import com.example.muxmaster.ui.theme.*
 import com.example.muxmaster.viewmodel.TrimViewModel
@@ -174,6 +179,10 @@ fun TrimScreen(
     val durationMs = video?.durationMs?.coerceAtLeast(1L) ?: 1L
     val busy = viewModel.isTrimming || viewModel.isLoading
 
+    // Oynatıcının anlık konumu. Sadece makas düğmesi ve zaman çizelgesi okur;
+    // her saniye tüm ekranın yeniden çizilmemesi için State olarak tutulur.
+    val playheadRef = remember { mutableLongStateOf(0L) }
+
     Scaffold(
         containerColor = BgDark,
         topBar = {
@@ -182,6 +191,21 @@ fun TrimScreen(
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.Filled.ArrowBack, "Geri", tint = TextSec)
+                    }
+                },
+                actions = {
+                    if (video != null) {
+                        // MAKAS: oynatıcının bulunduğu yerden yeni bir kesim aralığı ekler.
+                        IconButton(
+                            onClick = { viewModel.addCutRange(playheadRef.longValue) },
+                            enabled = !busy
+                        ) {
+                            Icon(
+                                Icons.Filled.ContentCut,
+                                "Makasla kesim aralığı ekle",
+                                tint = if (busy) TextMuted else Amber
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark)
@@ -198,9 +222,12 @@ fun TrimScreen(
             if (video != null) {
                 TrimPlayer(
                     video = video,
-                    startMs = viewModel.trimStartMs,
-                    endMs = viewModel.trimEndMs,
-                    isTrimming = viewModel.isTrimming
+                    // Çoklu kesim modunda oynatıcı TÜM videoyu kapsar (tek aralık sınırı uygulanmaz).
+                    startMs = if (viewModel.isMultiCut) 0L else viewModel.trimStartMs,
+                    endMs = if (viewModel.isMultiCut) durationMs else viewModel.trimEndMs,
+                    isTrimming = viewModel.isTrimming,
+                    followRangeChange = !viewModel.isMultiCut,
+                    playheadRef = playheadRef
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -279,89 +306,160 @@ fun TrimScreen(
 
             if (video != null) {
                 Spacer(Modifier.height(20.dp))
-                Text("Kırpma Aralığı", color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                // ── Kırpma / kesim başlığı ──────────────────────────────────
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        if (viewModel.isMultiCut) "Çoklu kesim (makas)" else "Kırpma Aralığı",
+                        color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.weight(1f))
+                    if (viewModel.isMultiCut) {
+                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
+                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
+                        }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(formatClock(viewModel.trimStartMs), color = Purple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                    Text("Süre: " + formatClock(viewModel.trimEndMs - viewModel.trimStartMs), color = TextMuted, fontSize = 11.sp)
-                    Text(formatClock(viewModel.trimEndMs), color = Purple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                }
-
-                RangeSlider(
-                    value = viewModel.trimStartMs.toFloat()..viewModel.trimEndMs.toFloat(),
-                    onValueChange = { range ->
-                        val newStart = range.start.toLong()
-                        val newEnd = range.endInclusive.toLong()
-                        val finalStart = if (abs(newStart - viewModel.trimStartMs) <= 25L && abs(newEnd - viewModel.trimEndMs) > 25L) {
-                            viewModel.trimStartMs
-                        } else {
-                            newStart
-                        }
-                        val finalEnd = if (abs(newEnd - viewModel.trimEndMs) <= 25L && abs(newStart - viewModel.trimStartMs) > 25L) {
-                            viewModel.trimEndMs
-                        } else {
-                            newEnd
-                        }
-                        viewModel.setTrimRange(finalStart, finalEnd)
-                    },
-                    valueRange = 0f..durationMs.toFloat(),
-                    enabled = !viewModel.isTrimming,
-                    colors = SliderDefaults.colors(
-                        thumbColor = Purple, activeTrackColor = Purple, inactiveTrackColor = SurfaceHigh
+                if (viewModel.isMultiCut) {
+                    // ── ÇOKLU KESİM: birden fazla aralık silinir, kalanlar birleştirilir ──
+                    CutTimelineBar(
+                        durationMs = durationMs,
+                        cutRanges = viewModel.cutRanges,
+                        playheadMs = { playheadRef.longValue },
+                        keepColor = Purple,
+                        modifier = Modifier.fillMaxWidth()
                     )
-                )
+                    Text(
+                        "Kırmızı: videodan çıkarılacak · Mor: korunacak. Kalan süre: " +
+                            formatClock(viewModel.keptDurationMs),
+                        color = TextMuted, fontSize = 10.sp
+                    )
+                    Spacer(Modifier.height(10.dp))
 
-                Text(
-                    if (video.isAudioOnly)
-                        "Not: Ses dosyası yeniden kodlanmadan (kalite kaybı olmadan) kırpılır."
-                    else
-                        "Not: Kalite kaybı olmaması için yeniden kodlama yapılmaz; bu yüzden başlangıç noktası videonun en yakın kare (keyframe) sınırına hizalanabilir.",
-                    color = TextMuted, fontSize = 10.sp
-                )
+                    viewModel.cutRanges.forEachIndexed { index, range ->
+                        key(index) {
+                            CutRangeCard(
+                                index = index,
+                                range = range,
+                                enabled = !viewModel.isTrimming,
+                                onStartChange = { viewModel.updateCutRange(index, it, range.endMs) },
+                                onEndChange = { viewModel.updateCutRange(index, range.startMs, it) },
+                                onRemove = { viewModel.removeCutRange(index) }
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
 
-                if (!video.isAudioOnly) {
+                    OutlinedButton(
+                        onClick = { viewModel.addCutRange(playheadRef.longValue) },
+                        enabled = !viewModel.isTrimming,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Amber)
+                    ) {
+                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "MAKASLA KESİM ARALIĞI EKLE",
+                            color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Her aralık ayrı ayrı kayıpsız kesilir, kalan parçalar sırayla birleştirilir. " +
+                            "Parça başlangıçları en yakın kare (keyframe) sınırına hizalanabilir.",
+                        color = TextMuted, fontSize = 10.sp
+                    )
+                } else {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(formatClock(viewModel.trimStartMs), color = Purple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Text("Süre: " + formatClock(viewModel.trimEndMs - viewModel.trimStartMs), color = TextMuted, fontSize = 11.sp)
+                        Text(formatClock(viewModel.trimEndMs), color = Purple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+
+                    MuxRangeSlider(
+                        startMs = viewModel.trimStartMs,
+                        endMs = viewModel.trimEndMs,
+                        durationMs = durationMs,
+                        onRangeChange = { s, e -> viewModel.setTrimRange(s, e) },
+                        enabled = !viewModel.isTrimming,
+                        activeColor = Purple,
+                        inactiveColor = SurfaceHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Text(
+                        if (video.isAudioOnly)
+                            "Not: Ses dosyası yeniden kodlanmadan (kalite kaybı olmadan) kırpılır."
+                        else
+                            "Not: Kalite kaybı olmaması için yeniden kodlama yapılmaz; bu yüzden başlangıç noktası videonun en yakın kare (keyframe) sınırına hizalanabilir.",
+                        color = TextMuted, fontSize = 10.sp
+                    )
+
+                    // Çoklu kesim moduna geçiş ipucu (aynı zamanda tıklanabilir kısayol).
                     Spacer(Modifier.height(10.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Surface, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(enabled = !viewModel.isTrimming) {
+                                viewModel.addCutRange(playheadRef.longValue)
+                            }
+                            .padding(horizontal = 4.dp, vertical = 6.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Başlangıcı tam hassas kes", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "Başlangıç ile ilk keyframe arası (birkaç sn) yeniden kodlanır, kalanı kayıpsız kopyalanır. İlk saniyeler atlanmaz, donma olmaz.",
-                                color = TextMuted, fontSize = 10.sp
-                            )
-                        }
-                        Switch(
-                            checked = viewModel.preciseCut,
-                            onCheckedChange = viewModel::updatePreciseCut,
-                            enabled = !viewModel.isTrimming,
-                            colors = SwitchDefaults.colors(checkedTrackColor = Purple)
+                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Birden fazla aralığı kesmek için makas (sağ üst) — kalanlar birleştirilir.",
+                            color = Amber, fontSize = 11.sp
                         )
                     }
+
+                    if (!video.isAudioOnly) {
+                        Spacer(Modifier.height(4.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Surface, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Başlangıcı tam hassas kes", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Başlangıç ile ilk keyframe arası (birkaç sn) yeniden kodlanır, kalanı kayıpsız kopyalanır. İlk saniyeler atlanmaz, donma olmaz.",
+                                    color = TextMuted, fontSize = 10.sp
+                                )
+                            }
+                            Switch(
+                                checked = viewModel.preciseCut,
+                                onCheckedChange = viewModel::updatePreciseCut,
+                                enabled = !viewModel.isTrimming,
+                                colors = SwitchDefaults.colors(checkedTrackColor = Purple)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    TimeInputGroup(
+                        label = "Başlangıç",
+                        totalMs = viewModel.trimStartMs,
+                        enabled = !viewModel.isTrimming,
+                        onChange = viewModel::setTrimStart
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    TimeInputGroup(
+                        label = "Bitiş",
+                        totalMs = viewModel.trimEndMs,
+                        enabled = !viewModel.isTrimming,
+                        onChange = viewModel::setTrimEnd
+                    )
                 }
-
-                Spacer(Modifier.height(16.dp))
-
-                TimeInputGroup(
-                    label = "Başlangıç",
-                    totalMs = viewModel.trimStartMs,
-                    enabled = !viewModel.isTrimming,
-                    onChange = viewModel::setTrimStart
-                )
-
-                Spacer(Modifier.height(12.dp))
-
-                TimeInputGroup(
-                    label = "Bitiş",
-                    totalMs = viewModel.trimEndMs,
-                    enabled = !viewModel.isTrimming,
-                    onChange = viewModel::setTrimEnd
-                )
 
                 Spacer(Modifier.height(20.dp))
                 Text("Çıktı", color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -462,14 +560,19 @@ fun TrimScreen(
                 } else {
                     Button(
                         onClick = viewModel::startTrim,
-                        enabled = viewModel.outputFolderUri != null && viewModel.trimEndMs > viewModel.trimStartMs,
+                        enabled = viewModel.outputFolderUri != null &&
+                            if (viewModel.isMultiCut) viewModel.keptDurationMs > 0L
+                            else viewModel.trimEndMs > viewModel.trimStartMs,
                         modifier = Modifier.fillMaxWidth().height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Purple, disabledContainerColor = SurfaceHigh)
                     ) {
                         Icon(Icons.Filled.ContentCut, null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("KIRPMAYA BAŞLA", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (viewModel.isMultiCut) "ÇOKLU KESİMİ UYGULA" else "KIRPMAYA BAŞLA",
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
 
@@ -478,6 +581,87 @@ fun TrimScreen(
                 Spacer(Modifier.height(24.dp))
             }
         }
+    }
+}
+
+/**
+ * Çoklu kesim listesindeki tek bir "kesilecek aralık" kartı: başlangıç ve bitiş
+ * zamanı dakika/saniye/salise alanlarıyla düzenlenebilir.
+ */
+@Composable
+private fun CutRangeCard(
+    index: Int,
+    range: TimeRange,
+    enabled: Boolean,
+    onStartChange: (Long) -> Unit,
+    onEndChange: (Long) -> Unit,
+    onRemove: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Surface, RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.ContentCut, null, tint = Red, modifier = Modifier.size(15.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Kesilecek ${index + 1}",
+                color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(formatClock(range.durationMs), color = TextMuted, fontSize = 11.sp)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = onRemove, enabled = enabled, modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Filled.Delete, "Aralığı sil", tint = Red, modifier = Modifier.size(18.dp))
+            }
+        }
+        CompactTimeRow("Başlangıç", range.startMs, enabled, onStartChange)
+        Spacer(Modifier.height(6.dp))
+        CompactTimeRow("Bitiş", range.endMs, enabled, onEndChange)
+    }
+}
+
+/** Tek satırda "etiket + dk + sn + ms" alanları (çoklu kesim kartları için). */
+@Composable
+private fun CompactTimeRow(
+    label: String,
+    totalMs: Long,
+    enabled: Boolean,
+    onChange: (Long) -> Unit
+) {
+    val minutes = totalMs / 60000
+    val seconds = (totalMs % 60000) / 1000
+    val millis = totalMs % 1000
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(label, color = TextMuted, fontSize = 11.sp, modifier = Modifier.width(62.dp))
+        TimeField(
+            value = minutes,
+            label = "dk",
+            enabled = enabled,
+            maxDigits = 4,
+            modifier = Modifier.weight(1f)
+        ) { onChange(it * 60000 + seconds * 1000 + millis) }
+        TimeField(
+            value = seconds,
+            label = "sn",
+            enabled = enabled,
+            maxDigits = 2,
+            modifier = Modifier.weight(1f)
+        ) { onChange(minutes * 60000 + it.coerceAtMost(59) * 1000 + millis) }
+        TimeField(
+            value = millis,
+            label = "ms",
+            enabled = enabled,
+            maxDigits = 3,
+            modifier = Modifier.weight(1f)
+        ) { onChange(minutes * 60000 + seconds * 1000 + it.coerceAtMost(999)) }
     }
 }
 
@@ -822,7 +1006,9 @@ private fun TrimPlayer(
     video: VideoFile,
     startMs: Long,
     endMs: Long,
-    isTrimming: Boolean
+    isTrimming: Boolean,
+    followRangeChange: Boolean,
+    playheadRef: androidx.compose.runtime.MutableLongState
 ) {
     val context = LocalContext.current
     val player = remember { buildFastPlayer(context, isMultiView = false) }
@@ -916,7 +1102,12 @@ private fun TrimPlayer(
             player.seekTo(startMs)
         }
     }
-    LaunchedEffect(endMs) {
+    LaunchedEffect(endMs, followRangeChange) {
+        if (!followRangeChange) {
+            // Mod değişiminde (tek aralık <-> çoklu kesim) oynatıcı zıplamasın.
+            lastAppliedEndMs = endMs
+            return@LaunchedEffect
+        }
         if (abs(endMs - lastAppliedEndMs) > 30L) {
             lastAppliedEndMs = endMs
             val target = (endMs - 1500L).coerceAtLeast(startState.value)
@@ -928,6 +1119,9 @@ private fun TrimPlayer(
         }
     }
     LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
+
+    // Anlık konumu (makas düğmesi için) dışarıya yayınla.
+    LaunchedEffect(positionMs) { playheadRef.longValue = positionMs }
 
     LaunchedEffect(isTrimming) {
         if (isTrimming) player.pause()
@@ -1075,11 +1269,12 @@ private fun TrimPlayer(
 }
 
 /**
- * Parmakla sağa/sola sürüklenirken ASLA iptal olmayan, geri sıçramayan ve dekoderi kilitlemeyen
- * akıcı Turkuaz Video Slider bileşeni:
- * - Sürükleme boyunca (isDragging == true) yalnızca yerel dragValueMs güncellenir; ExoPlayer'a
- *   saniyede 20 kez flush() gönderilmez (veya en fazla 300ms'de bir hafif önizleme gönderilir).
- * - Parmak bırakıldığında (onValueChangeFinished) kesin hedef saniyeye tek seferde atlanır.
+ * Video zaman çizelgesi slider'ı.
+ *
+ * Sürükleme (drag) davranışı Material'in hazır `Slider` bileşenine bırakılmaz: dar yükseklikte
+ * ve dikey kaydırılabilir bir sütunun içinde sürükleme hareketi bazı cihazlarda yutuluyor,
+ * sadece dokunma çalışıyordu. Burada jest baştan sona [MuxSeekSlider] içinde yönetilir;
+ * parmak aşağı indiği an konum uygulanır, kaydıkça takip eder, kalkınca kesin hedefe oturur.
  */
 @Composable
 internal fun SmoothVideoSlider(
@@ -1094,20 +1289,7 @@ internal fun SmoothVideoSlider(
 ) {
     val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     val enabled = endMs > startMs
-
-    var isDragging by remember { mutableStateOf(false) }
-    var dragValueMs by remember { mutableLongStateOf(positionMs.coerceIn(startMs, safeEnd)) }
-    var lastLiveSeekAt by remember { mutableLongStateOf(0L) }
-    var lastSentTarget by remember { mutableLongStateOf(-1L) }
-
-    // Yalnızca sürüklenmiyorken dışarıdan gelen positionMs değerini takip et
-    LaunchedEffect(positionMs, isDragging, startMs, safeEnd) {
-        if (!isDragging) {
-            dragValueMs = positionMs.coerceIn(startMs, safeEnd)
-        }
-    }
-
-    val shownMs = (if (isDragging) dragValueMs else positionMs).coerceIn(startMs, safeEnd)
+    val shownMs = positionMs.coerceIn(startMs, safeEnd)
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -1123,46 +1305,17 @@ internal fun SmoothVideoSlider(
             fontWeight = FontWeight.Medium,
             maxLines = 1
         )
-        Slider(
-            value = shownMs.toFloat(),
-            onValueChange = { newVal ->
-                if (enabled) {
-                    if (!isDragging) {
-                        isDragging = true
-                        onDragStateChange(true)
-                    }
-                    val target = newVal.toLong().coerceIn(startMs, safeEnd)
-                    dragValueMs = target
-                    val now = System.currentTimeMillis()
-                    if (now - lastLiveSeekAt >= 180L) {
-                        lastLiveSeekAt = now
-                        lastSentTarget = target
-                        onSeekTo(target)
-                    }
-                }
-            },
-            onValueChangeFinished = {
-                if (enabled) {
-                    val finalTarget = dragValueMs.coerceIn(startMs, safeEnd)
-                    onSeekTo(finalTarget)
-                    lastSentTarget = -1L
-                }
-                isDragging = false
-                onDragStateChange(false)
-            },
-            valueRange = startMs.toFloat()..safeEnd.toFloat(),
-            enabled = enabled,
+        MuxSeekSlider(
+            positionMs = positionMs,
+            startMs = startMs,
+            endMs = safeEnd,
+            onSeek = { if (enabled) onSeekTo(it) },
+            onScrubChange = onDragStateChange,
+            activeColor = PlayerTurquoise,
+            inactiveColor = Color(0x55FFFFFF),
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 6.dp),
-            colors = SliderDefaults.colors(
-                thumbColor = PlayerTurquoise,
-                activeTrackColor = PlayerTurquoise,
-                inactiveTrackColor = Color(0x55FFFFFF),
-                disabledThumbColor = PlayerTurquoise.copy(alpha = 0.5f),
-                disabledActiveTrackColor = PlayerTurquoise.copy(alpha = 0.5f),
-                disabledInactiveTrackColor = Color(0xFF2A2A31)
-            )
+                .padding(horizontal = 6.dp)
         )
         Text(
             text = formatShortTime(if (endMs > 0L) endMs else 0L),

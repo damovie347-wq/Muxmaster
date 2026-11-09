@@ -40,8 +40,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.RecentFiles
 import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.ui.screens.ConverterScreen
+import com.example.muxmaster.ui.screens.HomeScreen
 import com.example.muxmaster.ui.screens.MergeScreen
 import com.example.muxmaster.ui.screens.MuxScreen
 import com.example.muxmaster.ui.screens.PlayerHomeScreen
@@ -83,6 +85,7 @@ class MainActivity : AppCompatActivity() {
     private val playFromExternal = mutableStateOf(false)
 
     private fun openSingleInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean = false) {
+        rememberRecent(uri, title)
         playFromExternal.value = fromExternal
         DriveStreamResolver.releaseAllSessions()
         playSlots.clear()
@@ -91,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addSlotInPlayer(uri: Uri, title: String? = null, fromExternal: Boolean? = null) {
+        rememberRecent(uri, title)
         if (fromExternal != null && playSlots.isEmpty()) {
             playFromExternal.value = fromExternal
         }
@@ -102,6 +106,15 @@ class MainActivity : AppCompatActivity() {
             playSlots[playSlots.lastIndex] = PlayerVideoSlot(nextSlotId++, uri, title)
         }
         screenState?.value = 5
+    }
+
+    /** Açılan dosyayı ana ekrandaki "Son Dosyalar" listesine ekler (arka planda, sessizce). */
+    private fun rememberRecent(uri: Uri, name: String?) {
+        if (name.isNullOrBlank()) return
+        val appContext = applicationContext
+        Thread {
+            runCatching { RecentFiles.add(appContext, uri, name) }
+        }.start()
     }
 
     private fun handleInternalPlayerOpen(uri: Uri, title: String?) {
@@ -174,7 +187,7 @@ class MainActivity : AppCompatActivity() {
         playFromExternal.value = false
         DriveStreamResolver.releaseAllSessions()
         playSlots.clear()
-        screenState?.value = if (external) 0 else 6
+        screenState?.value = if (external) HOME_SCREEN else 6
         if (external) {
             if (!moveTaskToBack(true)) finish()
         }
@@ -184,7 +197,11 @@ class MainActivity : AppCompatActivity() {
     private val askStorage = mutableStateOf(false)
 
     private val pickVideoLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
-        if (uri != null) muxViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
+        if (uri != null) {
+            val name = queryDisplayName(uri) ?: "video.mkv"
+            rememberRecent(uri, name)
+            muxViewModel.onVideoSelected(uri, name)
+        }
     }
     private val pickMuxFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) muxViewModel.onFolderSelected(uri)
@@ -200,14 +217,20 @@ class MainActivity : AppCompatActivity() {
     }
     private val pickConverterAudioLauncher = registerForActivityResult(createUniversalMultipleDocumentsContract()) { uris ->
         if (uris.isNotEmpty()) {
-            converterViewModel.onAudioFilesSelected(uris.map { u -> u to (queryDisplayName(u) ?: "audio") })
+            val pairs = uris.map { u -> u to (queryDisplayName(u) ?: "audio") }
+            pairs.forEach { (u, n) -> rememberRecent(u, n) }
+            converterViewModel.onAudioFilesSelected(pairs)
         }
     }
     private val pickConverterOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) converterViewModel.setOutputFolder(uri)
     }
     private val pickTrimVideoLauncher = registerForActivityResult(createUniversalSingleDocumentContract()) { uri ->
-        if (uri != null) trimViewModel.onVideoSelected(uri, queryDisplayName(uri) ?: "video.mkv")
+        if (uri != null) {
+            val name = queryDisplayName(uri) ?: "video.mkv"
+            rememberRecent(uri, name)
+            trimViewModel.onVideoSelected(uri, name)
+        }
     }
     private val pickTrimFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) trimViewModel.onFolderSelected(uri)
@@ -217,7 +240,9 @@ class MainActivity : AppCompatActivity() {
     }
     private val pickMergeVideosLauncher = registerForActivityResult(createUniversalMultipleDocumentsContract()) { uris ->
         if (uris.isNotEmpty()) {
-            mergeViewModel.onVideosSelected(uris.map { u -> u to (queryDisplayName(u) ?: "video.mkv") })
+            val pairs = uris.map { u -> u to (queryDisplayName(u) ?: "video.mkv") }
+            pairs.forEach { (u, n) -> rememberRecent(u, n) }
+            mergeViewModel.onVideosSelected(pairs)
         }
     }
     private val pickMergeOutputFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -283,12 +308,12 @@ class MainActivity : AppCompatActivity() {
         setContent {
             var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
             MuxMasterTheme(themeMode = themeMode) {
-                val screenHolder = rememberSaveable { mutableStateOf(0) }
+                val screenHolder = rememberSaveable { mutableStateOf(HOME_SCREEN) }
                 screenState = screenHolder
                 var screen by screenHolder
 
-                BackHandler(enabled = screen != 0) {
-                    if (screen == 5) exitPlayer() else screen = 0
+                BackHandler(enabled = screen != HOME_SCREEN) {
+                    if (screen == 5) exitPlayer() else screen = HOME_SCREEN
                 }
 
                 LaunchedEffect(Unit) { handleIncomingIntent(intent) }
@@ -358,20 +383,21 @@ class MainActivity : AppCompatActivity() {
                         onNavigateToTrim = { screen = 2 },
                         onNavigateToMerge = { screen = 4 },
                         onNavigateToSettings = { screen = 3 },
-                        onOpenPlayer = { screen = 6 }
+                        onOpenPlayer = { screen = 6 },
+                        onNavigateHome = { screen = HOME_SCREEN }
                     )
                     1 -> ConverterScreen(
                         viewModel = converterViewModel,
                         onPickAudio = { pickConverterAudioLauncher.launch(arrayOf("audio/*", "video/*", "*/*")) },
                         onPickOutputFolder = { pickConverterOutputFolderLauncher.launch(null) },
-                        onNavigateToMux = { screen = 0 }
+                        onNavigateBack = { screen = HOME_SCREEN }
                     )
                     2 -> TrimScreen(
                         viewModel = trimViewModel,
                         onPickVideo = { pickTrimVideoLauncher.launch(arrayOf("video/*", "audio/*", "*/*")) },
                         onPickFolder = { pickTrimFolderLauncher.launch(null) },
                         onPickOutputFolder = { pickTrimOutputFolderLauncher.launch(null) },
-                        onNavigateBack = { screen = 0 }
+                        onNavigateBack = { screen = HOME_SCREEN }
                     )
                     5 -> {
                         if (playSlots.isEmpty()) {
@@ -406,7 +432,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                     6 -> PlayerHomeScreen(
-                        onBack = { screen = 0 },
+                        onBack = { screen = HOME_SCREEN },
                         onOpenUrl = { text ->
                             val u = if (text.contains("://")) text else "https://$text"
                             handleInternalPlayerOpen(Uri.parse(u), null)
@@ -428,12 +454,27 @@ class MainActivity : AppCompatActivity() {
                         viewModel = mergeViewModel,
                         onPickVideos = { pickMergeVideosLauncher.launch(arrayOf("video/*", "*/*")) },
                         onPickOutputFolder = { pickMergeOutputFolderLauncher.launch(null) },
-                        onNavigateBack = { screen = 0 }
+                        onNavigateBack = { screen = HOME_SCREEN }
+                    )
+                    7 -> HomeScreen(
+                        onOpenMux = { screen = 0 },
+                        onOpenTrim = { screen = 2 },
+                        onOpenMerge = { screen = 4 },
+                        onOpenPlayer = { screen = 6 },
+                        onOpenConverter = { screen = 1 },
+                        onOpenSettings = { screen = 3 },
+                        onOpenFile = { media ->
+                            val uri = runCatching { Uri.parse(media.uriString) }.getOrNull()
+                            if (uri != null) {
+                                openSingleInPlayer(uri, media.name, fromExternal = false)
+                            }
+                        },
+                        onShowAllFiles = { screen = 6 }
                     )
                     else -> SettingsScreen(
                         outputFolderUri = muxViewModel.outputFolderUri,
                         onPickOutputFolder = { pickDefaultOutputFolderLauncher.launch(null) },
-                        onNavigateBack = { screen = 0 },
+                        onNavigateBack = { screen = HOME_SCREEN },
                         themeMode = themeMode,
                         onThemeModeChange = { mode ->
                             themeMode = mode
@@ -502,6 +543,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private var notifAsked = false
+
+    companion object {
+        /** Ana ekran (kart menüsü) ekran numarası. */
+        private const val HOME_SCREEN = 7
+    }
 
     @Suppress("DEPRECATION")
     private fun Intent.getStreamUriCompat(): Uri? =

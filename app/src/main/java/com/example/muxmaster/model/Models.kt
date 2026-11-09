@@ -101,3 +101,18 @@ data class MergeItem(
     val hasAudio: Boolean = false,
     val audioCodec: String = ""
 )
+
+/**
+ * Video zaman çizelgesindeki bir aralık (milisaniye).
+ *
+ * Kırpma ekranında iki farklı anlamda kullanılır:
+ * - "Tek aralık" modunda tutulacak (keep) aralık,
+ * - "Çoklu kesim" modunda silinecek (cut) aralıklardan biri.
+ */
+@Immutable
+data class TimeRange(
+    val startMs: Long,
+    val endMs: Long
+) {
+    val durationMs: Long get() = (endMs - startMs).coerceAtLeast(0L)
+}

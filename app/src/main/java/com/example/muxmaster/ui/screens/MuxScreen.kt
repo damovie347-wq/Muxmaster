@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CallMerge
@@ -99,6 +100,7 @@ fun MuxScreen(
     onNavigateToTrim: () -> Unit,
     onNavigateToMerge: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateHome: () -> Unit,
     onOpenPlayer: () -> Unit = {}
 ) {
     val pagerState = rememberPagerState(pageCount = { 2 })
@@ -163,7 +165,12 @@ fun MuxScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("MuxMaster", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                title = { Text("Mux Master", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateHome) {
+                        Icon(Icons.Filled.ArrowBack, "Ana ekran", tint = TextSec)
+                    }
+                },
                 actions = {
                     IconButton(onClick = onOpenPlayer) {
                         Icon(Icons.Filled.PlayCircle, "Video Oynatıcı", tint = TextSec)

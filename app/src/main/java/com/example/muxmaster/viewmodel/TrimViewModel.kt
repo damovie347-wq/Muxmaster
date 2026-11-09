@@ -13,6 +13,7 @@ import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.TrackProber
+import com.example.muxmaster.model.TimeRange
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
@@ -85,6 +86,115 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     private var x264Checked = false
     private var x264Available = false
 
+    // ── ÇOKLU KESİM (MAKAS) ─────────────────────────────────────────────────
+    /**
+     * Videodan SİLİNECEK aralıklar (milisaniye, videonun kendi zaman çizelgesinde).
+     *
+     * Liste boşsa klasik "tek aralık" kırpma modu geçerlidir: trimStart..trimEnd
+     * arası TUTULUR. Liste doluysa "çoklu kesim" modu geçerlidir: bu aralıklar
+     * videodan çıkarılır, kalan parçalar sırayla birleştirilir.
+     */
+    var cutRanges by mutableStateOf<List<TimeRange>>(emptyList())
+        private set
+
+    val isMultiCut: Boolean get() = cutRanges.isNotEmpty()
+
+    /** Çoklu kesim modunda videoda KALACAK parçalar (kesim aralıklarının tersi). */
+    fun keepSegments(): List<TimeRange> {
+        val dur = videoFile?.durationMs ?: 0L
+        if (dur <= 0L) return emptyList()
+        val merged = mergedCutRanges(dur)
+        val out = mutableListOf<TimeRange>()
+        var cursor = 0L
+        merged.forEach { r ->
+            if (r.startMs > cursor) out += TimeRange(cursor, r.startMs)
+            if (r.endMs > cursor) cursor = r.endMs
+        }
+        if (cursor < dur) out += TimeRange(cursor, dur)
+        return out.filter { it.durationMs >= MIN_SEGMENT_MS }
+    }
+
+    /** Çoklu kesimden sonra kalacak toplam süre. */
+    val keptDurationMs: Long get() = keepSegments().sumOf { it.durationMs }
+
+    /** Üst üste binen/taşan kesim aralıklarını süreye göre kırpıp birleştirir. */
+    private fun mergedCutRanges(dur: Long): List<TimeRange> {
+        val clamped = cutRanges.mapNotNull {
+            val s = it.startMs.coerceIn(0L, dur)
+            val e = it.endMs.coerceIn(0L, dur)
+            if (e > s) TimeRange(s, e) else null
+        }.sortedBy { it.startMs }
+        val out = mutableListOf<TimeRange>()
+        clamped.forEach { r ->
+            val last = out.lastOrNull()
+            if (last != null && r.startMs <= last.endMs) {
+                out[out.lastIndex] = TimeRange(last.startMs, maxOf(last.endMs, r.endMs))
+            } else {
+                out += r
+            }
+        }
+        return out
+    }
+
+    /**
+     * Yeni bir kesim aralığı ekler. Varsayılan olarak oynatıcının bulunduğu yerden
+     * [DEFAULT_CUT_LENGTH_MS] kadarını keser; orası doluysa en yakın boş bölüme taşınır.
+     */
+    fun addCutRange(playheadMs: Long) {
+        val dur = videoFile?.durationMs ?: return
+        if (dur <= MIN_CUT_MS || isTrimming) return
+        val window = findFreeWindow(dur, playheadMs.coerceIn(0L, dur)) ?: return
+        cutRanges = (cutRanges + window).sortedBy { it.startMs }
+    }
+
+    private fun findFreeWindow(dur: Long, preferredStart: Long): TimeRange? {
+        val merged = mergedCutRanges(dur)
+        var start = preferredStart.coerceIn(0L, dur)
+        merged.forEach { r ->
+            if (start < r.endMs && start + MIN_CUT_MS > r.startMs) start = r.endMs
+        }
+        if (start + MIN_CUT_MS <= dur) {
+            return TimeRange(start, minOf(start + DEFAULT_CUT_LENGTH_MS, dur))
+        }
+        // Sonda yer kalmadı: sondan geriye doğru son 10 saniyeyi dene.
+        val tailStart = (dur - DEFAULT_CUT_LENGTH_MS).coerceAtLeast(0L)
+        val tailBlocked = merged.any { tailStart < it.endMs && dur > it.startMs }
+        if (!tailBlocked) return TimeRange(tailStart, dur)
+        // O da doluysa en geniş boş bölümü bul.
+        var cursor = 0L
+        var best: TimeRange? = null
+        var bestLen = -1L
+        merged.forEach { r ->
+            val len = r.startMs - cursor
+            if (len >= MIN_CUT_MS && len > bestLen) { bestLen = len; best = TimeRange(cursor, r.startMs) }
+            if (r.endMs > cursor) cursor = r.endMs
+        }
+        val tailLen = dur - cursor
+        if (tailLen >= MIN_CUT_MS && tailLen > bestLen) { bestLen = tailLen; best = TimeRange(cursor, dur) }
+        val b = best ?: return null
+        return TimeRange(b.startMs, minOf(b.startMs + DEFAULT_CUT_LENGTH_MS, b.endMs))
+    }
+
+    fun updateCutRange(index: Int, startMs: Long, endMs: Long) {
+        val dur = videoFile?.durationMs ?: return
+        if (index !in cutRanges.indices) return
+        var s = startMs.coerceIn(0L, dur)
+        var e = endMs.coerceIn(0L, dur)
+        if (e - s < MIN_CUT_MS) {
+            if (s + MIN_CUT_MS <= dur) e = s + MIN_CUT_MS else s = (dur - MIN_CUT_MS).coerceAtLeast(0L)
+        }
+        val list = cutRanges.toMutableList()
+        list[index] = TimeRange(s, e)
+        cutRanges = list
+    }
+
+    fun removeCutRange(index: Int) {
+        if (index !in cutRanges.indices) return
+        cutRanges = cutRanges.filterIndexed { i, _ -> i != index }
+    }
+
+    fun clearCutRanges() { cutRanges = emptyList() }
+
     /** Klasör kuyruğunu kapatır (çarpı düğmesi). Açık olan video etkilenmez. */
     fun clearFolderQueue() {
         folderQueue = emptyList(); queueIndex = -1; folderName = ""
@@ -120,6 +230,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         val old = videoFile?.cachePath
         videoFile = null
         trimStartMs = 0L; trimEndMs = 0L
+        cutRanges = emptyList()
         resultMessage = null; isSuccess = false; trimProgress = 0
         viewModelScope.launch(Dispatchers.IO) {
             if (old != null) runCatching { InputAccess.release(old) }
@@ -226,6 +337,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             )
             trimStartMs = 0L
             trimEndMs = probe.durationMs
+            cutRanges = emptyList()
 
             val rawName = displayName.substringBeforeLast('.', displayName)
             outputFileName = "${rawName}_kirpilmis.$ext"
@@ -266,7 +378,15 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         val outFolder = outputFolderUri
         if (video == null) { resultMessage = "Önce bir video seç."; isSuccess = false; return }
         if (outFolder == null) { resultMessage = "Önce çıktı klasörü seç."; isSuccess = false; return }
-        if (trimEndMs <= trimStartMs) { resultMessage = "Bitiş noktası başlangıçtan sonra olmalı."; isSuccess = false; return }
+        if (isMultiCut) {
+            if (keepSegments().isEmpty()) {
+                resultMessage = "Kesilecek aralıklar videonun tamamını kapsıyor; en az bir bölüm kalmalı."
+                isSuccess = false
+                return
+            }
+        } else if (trimEndMs <= trimStartMs) {
+            resultMessage = "Bitiş noktası başlangıçtan sonra olmalı."; isSuccess = false; return
+        }
         if (isTrimming) return
 
         trimJob = viewModelScope.launch {
@@ -280,68 +400,79 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 val tempOutput = File(workDir(), "trim_out_${System.currentTimeMillis()}.$outExt")
                 tempOutput.delete()
 
-                val startSec = trimStartMs / 1000.0
-                val endSec = trimEndMs / 1000.0
-
-                // "-c copy" (kalite kaybı olmadan) kesimde başlangıç noktası MUTLAKA bir
-                // video keyframe'ine denk gelmek zorundadır; aksi halde çıktı decode
-                // edilemez. Müdahale etmezsek ffmpeg kendi "-ss" (girdi seeği) davranışıyla
-                // istenen noktadan ÖNCEKİ en yakın keyframe'e atlar. Keyframe aralığı (GOP)
-                // geniş olan bazı videolarda bu, kullanıcının istediği saniyeden 20-30
-                // saniye hatta daha fazla ERKEN başlayan yanlış kesimlere yol açıyordu.
-                // Bunun yerine, istenen noktadan İTİBAREN SONRAKİ ilk keyframe'i ffprobe ile
-                // bulup kesimi tam olarak oradan başlatıyoruz; böylece kesim hiçbir zaman
-                // istenenden daha erken başlamaz (en kötüsü, genelde çok kısa süren bir
-                // sonraki keyframe'e kadar birazcık geç başlar - bu çok daha az sorunludur).
-                // Sadece-ses dosyalarında keyframe kavramı yok (her ses karesi kesilebilir).
-                val keyframeSec: Double? = if (video.isAudioOnly) null else {
-                    withContext(Dispatchers.IO) {
-                        TrackProber.findForwardKeyframeSec(video.cachePath, video.videoStreamIndex, startSec, endSec)
-                    }
-                }
-                val snappedStartSec = keyframeSec ?: startSec
-
-                // HASSAS KESİM (smart cut): başlangıç keyframe'e denk gelmiyorsa, başlangıç ile
-                // sonraki keyframe arasındaki kısa parça (en fazla bir GOP) yeniden kodlanır,
-                // kalan kısım kayıpsız kopyalanıp birleştirilir. Böylece kesim tam istenen
-                // karede başlar; ilk saniyeler atlanmaz, donma/kasma olmaz.
                 var usedSmart = false
                 var smartFailed = false
                 var rc: Int? = null
-                val wantSmart = preciseCut && !video.isAudioOnly &&
-                    video.pixFmt == "yuv420p" && video.videoCodec.equals("H264", ignoreCase = true) &&
-                    ((keyframeSec != null && keyframeSec - startSec > 0.040) ||
-                        (keyframeSec == null && endSec - startSec <= 90.0))
-                if (wantSmart) {
-                    val canEncode = withContext(Dispatchers.IO) { hasLibx264() }
-                    if (canEncode) {
-                        MuxForegroundService.update(app, 0, "Hassas kesim yapılıyor…")
-                        val smartOk = smartCut(video, startSec, keyframeSec ?: endSec, endSec, tempOutput) { pct ->
-                            trimProgress = pct
-                            MuxForegroundService.update(app, pct, "Hassas kesim… %$pct")
-                        }
-                        if (smartOk) { usedSmart = true; rc = 0 }
-                        else { smartFailed = true; runCatching { tempOutput.delete() }; trimProgress = 0 }
-                    } else {
-                        smartFailed = true
-                    }
-                }
+                var multiParts = 0
 
-                if (!usedSmart) {
-                    val durationSec = (endSec - snappedStartSec).coerceAtLeast(0.001)
-                    val args = arrayOf(
-                        "-y",
-                        "-ss", String.format(Locale.US, "%.3f", snappedStartSec),
-                        "-i", video.cachePath,
-                        "-t", String.format(Locale.US, "%.3f", durationSec),
-                        "-map", if (video.isAudioOnly) "0:a" else "0",
-                        "-c", "copy",
-                        "-avoid_negative_ts", "make_zero",
-                        tempOutput.absolutePath
-                    )
-                    rc = runFfmpegAsync(args, (durationSec * 1000).toLong()) { pct ->
-                        trimProgress = pct
-                        MuxForegroundService.update(app, pct, "Kırpılıyor… %$pct")
+                if (isMultiCut) {
+                    // Çoklu kesim: her korunacak parça ayrı ayrı kayıpsız kesilir,
+                    // ardından hepsi tek dosyada birleştirilir.
+                    val keep = keepSegments()
+                    multiParts = keep.size
+                    MuxForegroundService.update(app, 0, "Çoklu kesim başlıyor…")
+                    rc = if (buildMultiCut(video, keep, tempOutput)) 0 else 1
+                } else {
+                    val startSec = trimStartMs / 1000.0
+                    val endSec = trimEndMs / 1000.0
+
+                    // "-c copy" (kalite kaybı olmadan) kesimde başlangıç noktası MUTLAKA bir
+                    // video keyframe'ine denk gelmek zorundadır; aksi halde çıktı decode
+                    // edilemez. Müdahale etmezsek ffmpeg kendi "-ss" (girdi seeği) davranışıyla
+                    // istenen noktadan ÖNCEKİ en yakın keyframe'e atlar. Keyframe aralığı (GOP)
+                    // geniş olan bazı videolarda bu, kullanıcının istediği saniyeden 20-30
+                    // saniye hatta daha fazla ERKEN başlayan yanlış kesimlere yol açıyordu.
+                    // Bunun yerine, istenen noktadan İTİBAREN SONRAKİ ilk keyframe'i ffprobe ile
+                    // bulup kesimi tam olarak oradan başlatıyoruz; böylece kesim hiçbir zaman
+                    // istenenden daha erken başlamaz (en kötüsü, genelde çok kısa süren bir
+                    // sonraki keyframe'e kadar birazcık geç başlar - bu çok daha az sorunludur).
+                    // Sadece-ses dosyalarında keyframe kavramı yok (her ses karesi kesilebilir).
+                    val keyframeSec: Double? = if (video.isAudioOnly) null else {
+                        withContext(Dispatchers.IO) {
+                            TrackProber.findForwardKeyframeSec(video.cachePath, video.videoStreamIndex, startSec, endSec)
+                        }
+                    }
+                    val snappedStartSec = keyframeSec ?: startSec
+
+                    // HASSAS KESİM (smart cut): başlangıç keyframe'e denk gelmiyorsa, başlangıç ile
+                    // sonraki keyframe arasındaki kısa parça (en fazla bir GOP) yeniden kodlanır,
+                    // kalan kısım kayıpsız kopyalanıp birleştirilir. Böylece kesim tam istenen
+                    // karede başlar; ilk saniyeler atlanmaz, donma/kasma olmaz.
+                    val wantSmart = preciseCut && !video.isAudioOnly &&
+                        video.pixFmt == "yuv420p" && video.videoCodec.equals("H264", ignoreCase = true) &&
+                        ((keyframeSec != null && keyframeSec - startSec > 0.040) ||
+                            (keyframeSec == null && endSec - startSec <= 90.0))
+                    if (wantSmart) {
+                        val canEncode = withContext(Dispatchers.IO) { hasLibx264() }
+                        if (canEncode) {
+                            MuxForegroundService.update(app, 0, "Hassas kesim yapılıyor…")
+                            val smartOk = smartCut(video, startSec, keyframeSec ?: endSec, endSec, tempOutput) { pct ->
+                                trimProgress = pct
+                                MuxForegroundService.update(app, pct, "Hassas kesim… %$pct")
+                            }
+                            if (smartOk) { usedSmart = true; rc = 0 }
+                            else { smartFailed = true; runCatching { tempOutput.delete() }; trimProgress = 0 }
+                        } else {
+                            smartFailed = true
+                        }
+                    }
+
+                    if (!usedSmart) {
+                        val durationSec = (endSec - snappedStartSec).coerceAtLeast(0.001)
+                        val args = arrayOf(
+                            "-y",
+                            "-ss", String.format(Locale.US, "%.3f", snappedStartSec),
+                            "-i", video.cachePath,
+                            "-t", String.format(Locale.US, "%.3f", durationSec),
+                            "-map", if (video.isAudioOnly) "0:a" else "0",
+                            "-c", "copy",
+                            "-avoid_negative_ts", "make_zero",
+                            tempOutput.absolutePath
+                        )
+                        rc = runFfmpegAsync(args, (durationSec * 1000).toLong()) { pct ->
+                            trimProgress = pct
+                            MuxForegroundService.update(app, pct, "Kırpılıyor… %$pct")
+                        }
                     }
                 }
 
@@ -368,12 +499,21 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
                     trimProgress = 100
                     resultMessage = if (copyOk) {
-                        String.format(Locale.getDefault(), "Kırpma tamamlandı (%.1f MB).", finalSizeBytes / (1024f * 1024f)) +
-                            when {
-                                usedSmart -> " Başlangıç tam hassas."
-                                smartFailed -> " (Hassas kesim yapılamadı; başlangıç en yakın keyframe'e hizalandı.)"
-                                else -> ""
-                            }
+                        if (isMultiCut) {
+                            String.format(
+                                Locale.getDefault(),
+                                "Çoklu kesim tamamlandı: %d parça birleştirildi (%.1f MB).",
+                                multiParts,
+                                finalSizeBytes / (1024f * 1024f)
+                            )
+                        } else {
+                            String.format(Locale.getDefault(), "Kırpma tamamlandı (%.1f MB).", finalSizeBytes / (1024f * 1024f)) +
+                                when {
+                                    usedSmart -> " Başlangıç tam hassas."
+                                    smartFailed -> " (Hassas kesim yapılamadı; başlangıç en yakın keyframe'e hizalandı.)"
+                                    else -> ""
+                                }
+                        }
                     } else {
                         "Dosya kaydedilemedi."
                     }
@@ -403,6 +543,105 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     private fun fmt3(v: Double): String = String.format(Locale.US, "%.3f", v)
+
+    /**
+     * ÇOKLU KESİM.
+     *
+     * [keep] listesindeki her parçayı ayrı ayrı, yeniden kodlamadan (-c copy) keser;
+     * sonra parçaları "concat" demuxer'ı ile tek dosyada birleştirir. Parçalar Matroska
+     * (.mkv) olarak yazılır çünkü mkv her tür kodeği kabul eder; son birleştirme adımı
+     * çıktı uzantısına (mp4/mkv/...) remux eder. Kalite kaybı yoktur.
+     *
+     * Video parçalarının başlangıcı, "-c copy" gereği bir keyframe'e oturmak zorundadır;
+     * bu yüzden her parça başlangıcı ffprobe ile İLERİYE doğru en yakın keyframe'e
+     * hizalanır (kullanıcının istediğinden önce başlamaz).
+     */
+    private suspend fun buildMultiCut(
+        video: VideoFile,
+        keep: List<TimeRange>,
+        tempOutput: File
+    ): Boolean {
+        if (keep.isEmpty()) return false
+        val dir = workDir()
+        val stamp = System.currentTimeMillis()
+        val parts = mutableListOf<File>()
+        val totalMs = keep.sumOf { it.durationMs }.coerceAtLeast(1L)
+        var doneMs = 0L
+        try {
+            keep.forEachIndexed { index, range ->
+                val part = File(dir, "part_${stamp}_$index.mkv")
+                part.delete()
+
+                var startSec = range.startMs / 1000.0
+                val endSec = range.endMs / 1000.0
+                if (!video.isAudioOnly) {
+                    val key = withContext(Dispatchers.IO) {
+                        runCatching {
+                            TrackProber.findForwardKeyframeSec(
+                                video.cachePath, video.videoStreamIndex, startSec, endSec
+                            )
+                        }.getOrNull()
+                    }
+                    if (key != null && key > startSec && key < endSec - 0.05) startSec = key
+                }
+                val durationSec = (endSec - startSec).coerceAtLeast(0.05)
+
+                val args = arrayOf(
+                    "-y",
+                    "-ss", fmt3(startSec),
+                    "-i", video.cachePath,
+                    "-t", fmt3(durationSec),
+                    "-map", "0",
+                    "-c", "copy",
+                    "-map_chapters", "-1",
+                    "-avoid_negative_ts", "make_zero",
+                    part.absolutePath
+                )
+                val baseMs = doneMs
+                val rc = runFfmpegAsync(args, (durationSec * 1000).toLong()) { pct ->
+                    val overall = ((baseMs + range.durationMs * pct / 100.0) / totalMs.toDouble() * 100.0).toInt()
+                    trimProgress = overall.coerceIn(0, 96)
+                    MuxForegroundService.update(
+                        app, trimProgress,
+                        "Parça ${index + 1}/${keep.size} kesiliyor… %$trimProgress"
+                    )
+                }
+                doneMs += range.durationMs
+                if (rc == 0 && part.exists() && part.length() > 0L) {
+                    parts += part
+                } else {
+                    runCatching { part.delete() }
+                }
+            }
+
+            if (parts.isEmpty()) return false
+
+            val listFile = File(dir, "concat_$stamp.txt")
+            val builder = StringBuilder("ffconcat version 1.0\n")
+            parts.forEach { builder.append("file '").append(it.absolutePath).append("'\n") }
+            listFile.writeText(builder.toString())
+
+            MuxForegroundService.update(app, 97, "Parçalar birleştiriliyor…")
+            trimProgress = 97
+            val concatArgs = arrayOf(
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", listFile.absolutePath,
+                "-map", "0:V?",
+                "-map", "0:a?",
+                "-map", "0:s?",
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                tempOutput.absolutePath
+            )
+            val rcConcat = runFfmpegAsync(concatArgs, totalMs) { }
+            runCatching { listFile.delete() }
+            return rcConcat == 0 && tempOutput.exists() && tempOutput.length() > 0L
+        } finally {
+            parts.forEach { runCatching { it.delete() } }
+        }
+    }
 
     /**
      * Hassas kesim: [startSec, keySec) arası videoyu libx264 ile yeniden kodlar, [keySec, endSec]
@@ -532,6 +771,12 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val MIN_GAP_MS = 100L
+        /** Çoklu kesimde bir kesim aralığının en kısa süresi. */
+        private const val MIN_CUT_MS = 200L
+        /** Çoklu kesimde korunacak bir parçanın en kısa süresi (daha kısalar atlanır). */
+        private const val MIN_SEGMENT_MS = 120L
+        /** Makas ile eklenen yeni kesim aralığının varsayılan uzunluğu (10 sn). */
+        private const val DEFAULT_CUT_LENGTH_MS = 10_000L
         private val MEDIA_EXTS = setOf(
             "mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "mpg", "mpeg",
             "mp3", "m4a", "aac", "opus", "ogg", "oga", "flac", "wav", "wma", "mka", "ac3", "eac3", "dts"
