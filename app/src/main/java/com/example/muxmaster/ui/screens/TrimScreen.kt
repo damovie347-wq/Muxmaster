@@ -197,7 +197,7 @@ fun TrimScreen(
                     if (video != null) {
                         // MAKAS: oynatıcının bulunduğu yerden yeni bir kesim aralığı ekler.
                         IconButton(
-                            onClick = { viewModel.addCutRange(playheadRef.longValue) },
+                            onClick = { viewModel.addCutRangeFromSelection(playheadRef.longValue) },
                             enabled = !busy
                         ) {
                             Icon(
@@ -313,10 +313,24 @@ fun TrimScreen(
                         color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
                     )
                     Spacer(Modifier.weight(1f))
-                    if (viewModel.isMultiCut) {
-                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
-                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
-                        }
+                    // MAKAS: seçili aralığı (Başlangıç–Bitiş alanları) doğrudan
+                    // "kesilecek aralık" yapar; çoklu kesim modunda yenisini ekler.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Amber.copy(alpha = 0.14f))
+                            .clickable(enabled = !viewModel.isTrimming) {
+                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (viewModel.isMultiCut) "Aralık ekle" else "Makasla kes",
+                            color = Amber, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -358,17 +372,27 @@ fun TrimScreen(
                         shape = RoundedCornerShape(12.dp),
                         border = BorderStroke(1.dp, Amber)
                     ) {
-                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.Add, null, tint = Amber, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "MAKASLA KESİM ARALIĞI EKLE",
+                            "OYNADIĞI YERDEN 10 sn'LİK ARALIK EKLE",
                             color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
                         )
                     }
-                    Spacer(Modifier.height(6.dp))
+                    Spacer(Modifier.height(2.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "${viewModel.cutRanges.size} aralık çıkarılacak · Kalan " +
+                                formatClock(viewModel.keptDurationMs),
+                            color = TextSec, fontSize = 11.sp, modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
+                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
+                        }
+                    }
                     Text(
-                        "Her aralık ayrı ayrı kayıpsız kesilir, kalan parçalar sırayla birleştirilir. " +
-                            "Parça başlangıçları en yakın kare (keyframe) sınırına hizalanabilir.",
+                        "Kırmızı aralıklar videodan çıkarılır, mor bölgeler sırayla birleştirilir. " +
+                            "Kesim kayıpsızdır (yeniden kodlama yok).",
                         color = TextMuted, fontSize = 10.sp
                     )
                 } else {
@@ -405,14 +429,15 @@ fun TrimScreen(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
                             .clickable(enabled = !viewModel.isTrimming) {
-                                viewModel.addCutRange(playheadRef.longValue)
+                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
                             }
                             .padding(horizontal = 4.dp, vertical = 6.dp)
                     ) {
                         Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Birden fazla aralığı kesmek için makas (sağ üst) — kalanlar birleştirilir.",
+                            "Makas (yukarıdaki) seçili aralığı kesim listesine ekler; " +
+                                "birden fazla aralık kesilip kalanlar birleştirilir.",
                             color = Amber, fontSize = 11.sp
                         )
                     }

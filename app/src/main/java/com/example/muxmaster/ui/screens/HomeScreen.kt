@@ -78,6 +78,8 @@ private val HomeBgMid = Color(0xFF1A0B3E)
 private val HomeBgBottom = Color(0xFF08050F)
 private val HomeAccentText = Color(0xFFB9AEE6)
 private val HomeLink = Color(0xFFB9A6F7)
+private val HomeCardBg = Color(0xFF171130)
+private val HomeCardStroke = Color(0xFF2A2150)
 
 /**
  * UYGULAMANIN ANA EKRANI.
@@ -147,7 +149,7 @@ fun HomeScreen(
                         Icon(Icons.Filled.Settings, "Ayarlar", tint = Color(0xFFCFC6F5))
                     }
                 }
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(16.dp))
             }
 
             item {
@@ -159,17 +161,19 @@ fun HomeScreen(
                         title = "Mux",
                         subtitle = "Ses ve altyazı\nparçalarını ayır",
                         icon = Icons.Filled.Extension,
-                        gradient = listOf(Color(0xFF7C3AED), Color(0xFF4C1D95)),
+                        gradient = listOf(Color(0xFF8B3DFF), Color(0xFF4C1D95)),
+                        glow = Color(0xFFB388FF),
                         onClick = onOpenMux,
-                        modifier = Modifier.weight(1f).height(154.dp)
+                        modifier = Modifier.weight(1f).height(160.dp)
                     )
                     FeatureCard(
                         title = "Kes",
                         subtitle = "Videoyu kes",
                         icon = Icons.Filled.ContentCut,
-                        gradient = listOf(Color(0xFF0F766E), Color(0xFF0B3B48)),
+                        gradient = listOf(Color(0xFF0E8A86), Color(0xFF0B3B48)),
+                        glow = Color(0xFF4DE3DC),
                         onClick = onOpenTrim,
-                        modifier = Modifier.weight(1f).height(154.dp)
+                        modifier = Modifier.weight(1f).height(160.dp)
                     )
                 }
                 Spacer(Modifier.height(12.dp))
@@ -181,20 +185,22 @@ fun HomeScreen(
                         title = "Birleştir",
                         subtitle = "Videoları birleştir",
                         icon = Icons.Filled.Link,
-                        gradient = listOf(Color(0xFF1D4ED8), Color(0xFF0B2A6B)),
+                        gradient = listOf(Color(0xFF1F5BE0), Color(0xFF0B2A6B)),
+                        glow = Color(0xFF7FB0FF),
                         onClick = onOpenMerge,
-                        modifier = Modifier.weight(1f).height(154.dp)
+                        modifier = Modifier.weight(1f).height(160.dp)
                     )
                     FeatureCard(
                         title = "Oynatıcı",
                         subtitle = "Medyanızı oynat",
                         icon = Icons.Filled.PlayCircle,
-                        gradient = listOf(Color(0xFFEA580C), Color(0xFF7C2D12)),
+                        gradient = listOf(Color(0xFFF97316), Color(0xFF7C2D12)),
+                        glow = Color(0xFFFFC46B),
                         onClick = onOpenPlayer,
-                        modifier = Modifier.weight(1f).height(154.dp)
+                        modifier = Modifier.weight(1f).height(160.dp)
                     )
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(14.dp))
             }
 
             item {
@@ -202,24 +208,32 @@ fun HomeScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(92.dp)
+                        .height(90.dp)
                         .clip(RoundedCornerShape(22.dp))
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFF6D28D9), Color(0xFF8B5CF6))
+                                listOf(Color(0xFF6D28D9), Color(0xFF9B5CF6))
                             )
                         )
-                        .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(22.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
                         .clickable(onClick = onOpenConverter)
-                        .padding(horizontal = 18.dp)
+                        .padding(horizontal = 16.dp)
                 ) {
-                    Icon(
-                        Icons.Filled.GraphicEq,
-                        null,
-                        tint = Color.White,
-                        modifier = Modifier.size(40.dp)
-                    )
-                    Spacer(Modifier.width(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.White.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.GraphicEq,
+                            null,
+                            tint = Color.White,
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             "Ses Dönüştürme",
@@ -229,16 +243,24 @@ fun HomeScreen(
                         )
                         Text(
                             "Sesi başka bir formata dönüştür",
-                            color = Color.White.copy(alpha = 0.85f),
+                            color = Color.White.copy(alpha = 0.88f),
                             fontSize = 12.sp
                         )
                     }
-                    Icon(
-                        Icons.Filled.ChevronRight,
-                        null,
-                        tint = Color.White,
-                        modifier = Modifier.size(26.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White.copy(alpha = 0.18f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.ChevronRight,
+                            null,
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
                 Spacer(Modifier.height(22.dp))
             }
@@ -284,8 +306,8 @@ fun HomeScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .background(Color(0xFF171130))
-                            .border(1.dp, Color(0xFF2A2150), RoundedCornerShape(16.dp))
+                            .background(HomeCardBg)
+                            .border(1.dp, HomeCardStroke, RoundedCornerShape(16.dp))
                             .padding(vertical = 22.dp, horizontal = 16.dp)
                     ) {
                         Icon(
@@ -393,44 +415,67 @@ private fun HomeBackdrop(modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * Ana ekran kartı: gradyan zemin + arkada yumuşak ışık halkası + ortalanmış ikon/başlık.
+ * Dokunma alanı kartın tamamıdır (tek dokunuşla ilgili ekran açılır).
+ */
 @Composable
 private fun FeatureCard(
     title: String,
     subtitle: String,
     icon: ImageVector,
     gradient: List<Color>,
+    glow: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+    Box(
         modifier = modifier
-            .clip(RoundedCornerShape(22.dp))
+            .clip(RoundedCornerShape(24.dp))
             .background(Brush.linearGradient(gradient))
-            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(22.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 14.dp)
     ) {
-        Icon(icon, null, tint = Color.White, modifier = Modifier.size(42.dp))
-        Spacer(Modifier.height(10.dp))
-        Text(
-            title,
-            color = Color.White,
-            fontSize = 19.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            subtitle,
-            color = Color.White.copy(alpha = 0.82f),
-            fontSize = 12.sp,
-            lineHeight = 15.sp,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
+        Canvas(modifier = Modifier.matchParentSize()) {
+            val center = Offset(size.width / 2f, size.height * 0.34f)
+            val radius = size.minDimension * 0.72f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(glow.copy(alpha = 0.40f), Color.Transparent),
+                    center = center,
+                    radius = radius
+                ),
+                radius = radius,
+                center = center
+            )
+        }
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp, vertical = 14.dp)
+        ) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(44.dp))
+            Spacer(Modifier.height(10.dp))
+            Text(
+                title,
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                subtitle,
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 12.sp,
+                lineHeight = 15.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
@@ -449,15 +494,15 @@ private fun RecentRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF171130))
-            .border(1.dp, Color(0xFF2A2150), RoundedCornerShape(14.dp))
+            .background(HomeCardBg)
+            .border(1.dp, HomeCardStroke, RoundedCornerShape(14.dp))
             .clickable(onClick = onOpen)
             .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(width = 62.dp, height = 46.dp)
-                .clip(RoundedCornerShape(9.dp))
+                .size(width = 64.dp, height = 48.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .background(
                     Brush.linearGradient(listOf(Color(0xFF3B2A6B), Color(0xFF221640)))
                 ),
@@ -484,12 +529,12 @@ private fun RecentRow(
             Text(
                 item.name,
                 color = Color.White,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(3.dp))
             Text(
                 buildRecentSubtitle(item.lastUsedMs, durationMs),
                 color = HomeAccentText,

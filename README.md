@@ -170,3 +170,48 @@ yüklerken atlanabilir; bu durumda GitHub'da `.github/workflows/build.yml` dosya
 ### Doğrulama
 Bu sürüm; JDK 17 + Android SDK 34 + Gradle 8.5 ile `gradle :app:assembleRelease`
 (minify/R8 açık) çalıştırılarak derlendi — hatasız tamamlandı.
+
+## Güncelleme 5 — derleme hatası + hız, kaydırma, makas, ana ekran
+
+### 1) GitHub derlemesi neden 12-13 dakika sürüp hata veriyordu?
+`ubuntu-latest` imajı Ubuntu 26.04'e (Python 3.14) geçti. Python 3.14'te `tarfile`
+varsayılan olarak `data` filtresiyle açıyor; bu filtre Termux `.deb` paketlerindeki
+**mutlak symlink**'lerde (`./data/data/com.termux/files/usr/bin/aws` gibi) hata verip
+paketin tamamının açılmasını engelliyor. Sonuç: `libz.so.1` (awscli) ve
+`libQt6Core.so.6` (qt6-qtbase) çözülemiyor, betik 12 dakika sonunda
+"aşağıdaki paylaşımlı kütüphaneler çözümlenemedi" diyip çıkıyordu.
+
+Düzeltmeler (`scripts/fetch_mkvtoolnix_assets.py`):
+- `.deb` açma `filter="fully_trusted"` ile yapılıyor (eski Python'larda otomatik geri düşüş).
+- Açtıktan sonra mutlak Termux symlink'leri **göreli** hale getiriliyor, kırık linkler çözülüyor.
+- `libz.so.1` artık 20+ MB'lık `awscli` yerine küçük `zlib` paketinden alınıyor (paket tercih tablosu).
+- İndirmelerde 3 deneme, `exhale` derlemesinde önce `-O2` (daha kısa derleme).
+- Android sistem kütüphaneleri (`libEGL`, `libGLESv2`, `libOpenSLES`, `libvulkan` …) atlanıyor.
+
+Hız (`build.yml` + `gradle.properties`):
+- `app/src/main/jniLibs/arm64-v8a` artık **actions/cache** ile önbelleğe alınıyor; betik
+  değişmedikçe native adım tamamen atlanıyor (ilk derleme uzun, sonrakiler ~4 dakika).
+- Gereksiz aarch64 cross-toolchain kurulumu (70 MB) kaldırıldı, NDK clang++ kullanılıyor.
+- Gradle: `--build-cache --parallel`, `org.gradle.caching=true`, `parallel=true`.
+- Native dosyalar için doğrulama adımı eklendi (eksikse derleme sessizce bozuk APK üretmiyor).
+
+### 2) Oynatıcı slider'ı sürüklenmiyordu (sadece dokunma)
+`ui/components/Sliders.kt`: jest artık **`PointerEventPass.Initial`** aşamasında yakalanıp
+her karede tüketiliyor. Böylece içinde bulunduğu dikey kaydırma (verticalScroll) kapsayıcısı
+hareketi çalamıyor; parmak slider'ı birebir takip ediyor, kalkınca kesin hedefe oturuyor.
+Aynı düzeltme `MuxRangeSlider` (başlangıç/bitiş aralığı) için de yapıldı. Dokunma çalışmaya devam eder.
+
+### 3) Makas (çoklu kesim) artık görünür ve kullanışlı
+- "Kırpma Aralığı" başlığının hemen sağına **Makasla kes** düğmesi eklendi: Başlangıç–Bitiş
+  alanlarında seçili aralığı tek dokunuşla "kesilecek aralık" yapar.
+- İstenildiği kadar aralık eklenebilir; her aralık dk/sn/ms alanlarıyla düzeltilebilir, tek tek silinebilir.
+- "Oynadığı yerden 10 sn'lik aralık ekle" düğmesi, "N aralık çıkarılacak · Kalan süre" özeti ve
+  "Tek aralığa dön" eklendi.
+- Dışa aktarım: her korunacak parça kayıpsız (`-c copy`) kesilir, `concat` demuxer'ı ile birleştirilir.
+  Parça kesilemezse artık sessizce atlanmıyor, net hata veriliyor. Altyazı hedef kapsayıcıya
+  sığmazsa (ör. ASS + mp4) altyazı düşürülüp yeniden denenir.
+
+### 4) Ana ekran
+Kartlar gönderilen tasarıma yaklaştırıldı: 24dp köşe, arkada yumuşak ışık halkası, 44dp ikon,
+20sp başlık; "Ses Dönüştürme" kartında ikon çerçevesi ve yuvarlak ok. Kartlara dokununca ilgili
+ekran doğrudan açılır, geri tuşu ana ekrana döner.

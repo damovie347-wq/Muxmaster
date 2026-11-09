@@ -19,6 +19,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -29,13 +30,14 @@ import kotlin.math.abs
  * Neden özel slider?
  *
  * Material3'ün hazır `Slider` / `RangeSlider` bileşenleri, dikey olarak kaydırılabilen
- * (verticalScroll) bir sütunun içinde, daraltılmış yükseklikte (36-40dp) kullanıldığında
- * bazı cihaz/sürüm kombinasyonlarında sürükleme (drag) hareketini yutuyor; sadece tek
- * dokunuş (tap) çalışıyordu. Bu dosyadaki bileşenler dokunma + sürükleme davranışını
- * TEK bir `pointerInput` bloğunda, `awaitEachGesture` ile baştan sona kendileri yönetir:
- * parmak aşağı indiği an konum uygulanır, parmak kaydıkça her karede güncellenir,
- * parmak kalkınca kesin değer gönderilir. Böylece hangi Compose/Material sürümü olursa
- * olsun "sağa sola kaydırma" garantili çalışır.
+ * (verticalScroll) bir sütunun içinde, daraltılmış yükseklikte kullanıldığında bazı
+ * cihazlarda sürükleme (drag) hareketini yutuyor; yalnızca tek dokunuş çalışıyordu.
+ *
+ * ÇÖZÜM (bu sürüm): jest, [PointerEventPass.Initial] aşamasında yakalanır ve HER karede
+ * tüketilir (consume). Initial aşaması yukarıdan aşağıya dağıtıldığı için, üstteki
+ * kaydırılabilir kapsayıcı Main aşamasında olayı "tüketilmiş" görür ve kendi kaydırma
+ * jestini iptal eder. Böylece parmak slider'ın üzerindeyken ekran kaymaz, slider
+ * parmağı birebir takip eder. Tek dokunuş da aynı yoldan çalışır.
  */
 @Composable
 fun MuxSeekSlider(
@@ -49,9 +51,11 @@ fun MuxSeekSlider(
     inactiveColor: Color = Color(0x55FFFFFF),
     trackHeight: Dp = 4.dp,
     thumbRadius: Dp = 7.dp,
-    sliderHeight: Dp = 32.dp
+    sliderHeight: Dp = 36.dp,
+    enabled: Boolean = true
 ) {
     val span = (endMs - startMs).coerceAtLeast(1L)
+    // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
     var dragFraction by remember { mutableFloatStateOf(-1f) }
 
     val onSeekState = rememberUpdatedState(onSeek)
@@ -69,7 +73,8 @@ fun MuxSeekSlider(
         modifier = modifier
             .fillMaxWidth()
             .height(sliderHeight)
-            .pointerInput(startMs, endMs) {
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
                 val thumbPx = thumbRadius.toPx()
 
                 fun fractionAt(x: Float): Float {
@@ -83,7 +88,8 @@ fun MuxSeekSlider(
                     startState.value + (fraction * spanState.value.toFloat()).toLong()
 
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    // Initial aşaması: üstteki verticalScroll bu olayları tüketilmiş görür.
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     down.consume()
 
                     var fraction = fractionAt(down.position.x)
@@ -93,22 +99,21 @@ fun MuxSeekSlider(
                     var lastPreviewAt = System.currentTimeMillis()
 
                     while (true) {
-                        val event = awaitPointerEvent()
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         fraction = fractionAt(change.position.x)
                         dragFraction = fraction
+                        change.consume()
                         if (!change.pressed) {
                             // Parmak kalktı: kesin hedefe tek seferde otur.
-                            change.consume()
                             onSeekState.value(msAt(fraction))
                             break
                         }
                         val now = System.currentTimeMillis()
-                        if (now - lastPreviewAt >= 90L) {
+                        if (now - lastPreviewAt >= 70L) {
                             lastPreviewAt = now
                             onSeekState.value(msAt(fraction))
                         }
-                        change.consume()
                     }
                     dragFraction = -1f
                     onScrubState.value(false)
@@ -146,6 +151,7 @@ fun MuxSeekSlider(
 /**
  * İki tutamaçlı (başlangıç + bitiş) aralık slider'ı. Her iki tutamaç da parmakla
  * sürüklenebilir; tutamaçlardan uzak bir yere dokunulursa en yakın tutamaç oraya taşınır.
+ * Jest yönetimi [MuxSeekSlider] ile aynıdır (Initial aşamasında tüketim).
  */
 @Composable
 fun MuxRangeSlider(
@@ -159,7 +165,7 @@ fun MuxRangeSlider(
     inactiveColor: Color = Color(0xFF2A2A35),
     minGapMs: Long = 100L,
     thumbRadius: Dp = 9.dp,
-    sliderHeight: Dp = 40.dp
+    sliderHeight: Dp = 44.dp
 ) {
     val safeDuration = durationMs.coerceAtLeast(minGapMs + 1L)
 
@@ -202,7 +208,7 @@ fun MuxRangeSlider(
                 }
 
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     down.consume()
 
                     val gap = gapState.value
@@ -228,7 +234,7 @@ fun MuxRangeSlider(
                     onRangeState.value(s, e)
 
                     while (true) {
-                        val event = awaitPointerEvent()
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         val target = msAt(fractionAt(change.position.x))
                         if (handle == 0) {
@@ -284,7 +290,7 @@ fun MuxRangeSlider(
 }
 
 /**
- * Tüm video süresini tek bir çubukta gösterir: korunacak (mavi/mor) ve kesilecek
+ * Tüm video süresini tek bir çubukta gösterir: korunacak (mor) ve kesilecek
  * (kırmızı) bölgeler ayrı renklerde çizilir, oynatıcının anlık konumu beyaz çizgiyle işaretlenir.
  */
 @Composable

@@ -147,6 +147,26 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         cutRanges = (cutRanges + window).sortedBy { it.startMs }
     }
 
+    /**
+     * MAKAS düğmesi: Başlangıç–Bitiş alanlarında seçili aralık varsa ONU kesilecek
+     * aralık olarak ekler (kullanıcı slider'la seçtiği bölümü tek dokunuşla çıkarır).
+     * Seçim anlamlı değilse (çok kısa ya da videonun tamamı) oynatıcının bulunduğu
+     * yerden varsayılan uzunlukta bir aralık eklenir.
+     */
+    fun addCutRangeFromSelection(playheadMs: Long) {
+        val dur = videoFile?.durationMs ?: return
+        if (dur <= MIN_CUT_MS || isTrimming) return
+        val s = trimStartMs.coerceIn(0L, dur)
+        val e = trimEndMs.coerceIn(0L, dur)
+        val len = e - s
+        val usable = len >= MIN_SELECTION_MS && len <= dur - 400L
+        if (usable) {
+            cutRanges = (cutRanges + TimeRange(s, e)).sortedBy { it.startMs }
+        } else {
+            addCutRange(playheadMs)
+        }
+    }
+
     private fun findFreeWindow(dur: Long, preferredStart: Long): TimeRange? {
         val merged = mergedCutRanges(dur)
         var start = preferredStart.coerceIn(0L, dur)
@@ -478,7 +498,10 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
                 val ok = rc == 0 && tempOutput.exists() && tempOutput.length() > 0L
                 if (!ok) {
-                    resultMessage = "Kırpma başarısız oldu (kod: $rc)."
+                    // buildMultiCut kendi özel hata mesajını yazdıysa onu koru.
+                    if (resultMessage.isNullOrBlank()) {
+                        resultMessage = "Kırpma başarısız oldu (kod: $rc)."
+                    }
                     isSuccess = false
                     runCatching { tempOutput.delete() }
                 } else {
@@ -591,7 +614,13 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                     "-ss", fmt3(startSec),
                     "-i", video.cachePath,
                     "-t", fmt3(durationSec),
-                    "-map", "0",
+                    // Sadece video/ses/altyazı/ek dosya: "0" ile gelen data/zmcd gibi
+                    // akışlar bazı kaynaklarda mkv'ye kopyalanamıyor ve parça
+                    // oluşturmayı başarısız ediyordu.
+                    "-map", "0:v?",
+                    "-map", "0:a?",
+                    "-map", "0:s?",
+                    "-map", "0:t?",
                     "-c", "copy",
                     "-map_chapters", "-1",
                     "-avoid_negative_ts", "make_zero",
@@ -611,6 +640,10 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                     parts += part
                 } else {
                     runCatching { part.delete() }
+                    // Sessizce eksik parça bırakmak yerine net hata ver.
+                    resultMessage = "Parça ${index + 1}/${keep.size} kesilemedi (kod: $rc)."
+                    isSuccess = false
+                    return false
                 }
             }
 
@@ -623,24 +656,44 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
             MuxForegroundService.update(app, 97, "Parçalar birleştiriliyor…")
             trimProgress = 97
-            val concatArgs = arrayOf(
-                "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", listFile.absolutePath,
-                "-map", "0:V?",
-                "-map", "0:a?",
-                "-map", "0:s?",
-                "-c", "copy",
-                "-avoid_negative_ts", "make_zero",
-                tempOutput.absolutePath
-            )
-            val rcConcat = runFfmpegAsync(concatArgs, totalMs) { }
+
+            var rcConcat = concatParts(listFile, tempOutput, totalMs, withSubtitles = true)
+            if (rcConcat != 0) {
+                // Ör. ASS altyazı + mp4 hedefi: altyazıyı düşürüp yeniden dene.
+                MuxForegroundService.update(app, 97, "Altyazı eklenemedi, altyazısız birleştiriliyor…")
+                runCatching { tempOutput.delete() }
+                rcConcat = concatParts(listFile, tempOutput, totalMs, withSubtitles = false)
+            }
             runCatching { listFile.delete() }
             return rcConcat == 0 && tempOutput.exists() && tempOutput.length() > 0L
         } finally {
             parts.forEach { runCatching { it.delete() } }
         }
+    }
+
+    /** Parçaları ffmpeg "concat" demuxer'ı ile tek dosyada birleştirir (-c copy). */
+    private suspend fun concatParts(
+        listFile: File,
+        tempOutput: File,
+        totalMs: Long,
+        withSubtitles: Boolean
+    ): Int? {
+        val maps = mutableListOf("-map", "0:V?", "-map", "0:a?")
+        if (withSubtitles) {
+            maps += "-map"; maps += "0:s?"
+            maps += "-map"; maps += "0:t?"
+        }
+        val concatArgs = arrayOf(
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", listFile.absolutePath
+        ) + maps.toTypedArray() + arrayOf(
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            tempOutput.absolutePath
+        )
+        return runFfmpegAsync(concatArgs, totalMs) { }
     }
 
     /**
@@ -777,6 +830,8 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         private const val MIN_SEGMENT_MS = 120L
         /** Makas ile eklenen yeni kesim aralığının varsayılan uzunluğu (10 sn). */
         private const val DEFAULT_CUT_LENGTH_MS = 10_000L
+        /** Makas, seçili aralığı kesim olarak eklemek için en az bu süreyi ister. */
+        private const val MIN_SELECTION_MS = 500L
         private val MEDIA_EXTS = setOf(
             "mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "mpg", "mpeg",
             "mp3", "m4a", "aac", "opus", "ogg", "oga", "flac", "wav", "wma", "mka", "ac3", "eac3", "dts"

@@ -1,6 +1,10 @@
 # CI tarafından her derlemede yeniden üretilir (scripts/fetch_mkvtoolnix_assets.py)
 app/src/main/assets/mkvtoolnix/
 
+# Native .so dosyaları (mkvmerge/mkvextract/exhale/opusenc) CI'da üretilir;
+# repoya eklenmesin (yüzlerce MB). Workflow bunları önbellekten geri yükler.
+app/src/main/jniLibs/
+
 # Gradle / Android build çıktıları
 .gradle/
 build/

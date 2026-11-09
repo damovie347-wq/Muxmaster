@@ -28,7 +28,27 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
                         "app", "src", "main", "jniLibs", "arm64-v8a")
 WORK = tempfile.mkdtemp(prefix="mkvtoolnix_fetch_")
 
-SKIP_SONAMES = {"libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so"}
+SKIP_SONAMES = {
+    "libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so",
+    # Android sisteminde hazir gelen (APK'ya gomulmemesi gereken) kutuphaneler:
+    "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libOpenSLES.so", "libvulkan.so",
+    "libjnigraphics.so", "libmediandk.so", "libaaudio.so", "libcamera2ndk.so",
+}
+
+# Termux paketlerindeki symlink'ler bu mutlak onekle uretilir; deb host'ta
+# acildiginda bu yollar var olmadigi icin kirik kalir. Asagidaki fonksiyonlarla
+# bunlari deb'in acildigi dizine gore yeniden yaziyoruz.
+TERMUX_PREFIX = "/data/data/com.termux/files/usr"
+
+# Bazi soname'ler icin "ilk bulunan paket" yanlis/heavy olabiliyor.
+# (Ornek: Contents indeksinde libz.so.1 ilk olarak awscli ile eslesiyordu;
+#  awscli hem 20+ MB hem de symlink hatasi veriyordu. zlib yeterli.)
+SONAME_PKG_OVERRIDES = {
+    "libz.so.1": ["zlib"],
+    "libz.so": ["zlib"],
+    "libc++_shared.so": ["ndk-multilib", "libc++"],
+    "libQt6Core.so.6": ["qt6-qtbase"],
+}
 
 EXHALE_TARBALLS = [
     "https://gitlab.com/ecodis/exhale/-/archive/v1.2.2/exhale-v1.2.2.tar.gz",
@@ -249,9 +269,18 @@ def log(*a):
 
 
 def fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "muxmaster-ci/1.0"})
-    with urllib.request.urlopen(req, timeout=90) as r:
-        return r.read()
+    last_err = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "muxmaster-ci/1.0"})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return r.read()
+        except Exception as e:  # agdalgalanmalarina karsi 3 deneme
+            last_err = e
+            if attempt < 2:
+                import time
+                time.sleep(2 + attempt * 3)
+    raise last_err
 
 
 def fetch_first_ok(bases, rel_paths):
@@ -370,8 +399,64 @@ def extract_deb_data(deb_path, dest):
         subprocess.run(["zstd", "-d", "-f", data_file, "-o", raw], check=True, capture_output=True)
         data_file = raw
     with tarfile.open(data_file, mode="r:*") as t:
-        t.extractall(dest)
+        # ONEMLI: Python 3.12+ varsayilan "data" filtresi, Termux paketlerindeki
+        # MUTLAK symlink'lerde (ornek: ./data/data/com.termux/files/usr/bin/aws)
+        # tarfile.AbsoluteLinkError firlatip paketin TAMAMININ acilmasini
+        # engelliyordu. Bu yuzden libz.so.1 (awscli) ve libQt6Core.so.6
+        # (qt6-qtbase) cozulemiyor, derleme 12+ dakika sonunda hata veriyordu.
+        # Paketler guvenilir kaynaklardan (Termux) geldigi icin "fully_trusted"
+        # kullaniyoruz; kirik mutlak linkler asagida duzeltiliyor.
+        try:
+            t.extractall(dest, filter="fully_trusted")
+        except TypeError:
+            # Python < 3.12: filter parametresi yok.
+            t.extractall(dest)
+    fix_termux_links(dest)
     return dest
+
+
+def fix_termux_links(root):
+    """Deb icindeki mutlak Termux symlink'lerini goreli symlink'e cevirir."""
+    fixed = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in list(dirnames) + list(filenames):
+            p = os.path.join(dirpath, name)
+            if not os.path.islink(p):
+                continue
+            try:
+                target = os.readlink(p)
+            except OSError:
+                continue
+            if not target.startswith(TERMUX_PREFIX):
+                continue
+            real = os.path.join(root, target.lstrip("/"))
+            if not os.path.exists(real):
+                continue
+            try:
+                os.remove(p)
+                os.symlink(os.path.relpath(real, os.path.dirname(p)), p)
+                fixed += 1
+            except OSError:
+                pass
+    if fixed:
+        log(f"  {fixed} adet Termux symlink'i goreli hale getirildi.")
+    return fixed
+
+
+def resolve_candidate(root, path):
+    """Kirik mutlak symlink'i deb kokune gore cozer."""
+    if os.path.exists(path):
+        return os.path.realpath(path)
+    if os.path.islink(path):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            return None
+        if target.startswith(TERMUX_PREFIX):
+            alt = os.path.join(root, target.lstrip("/"))
+            if os.path.exists(alt):
+                return os.path.realpath(alt)
+    return None
 
 
 def find_subdir(root, suffix):
@@ -400,8 +485,9 @@ def is_arm64_elf(path):
 def find_file(root, filename):
     candidates = find_all_files(root, filename)
     for c in candidates:
-        if is_arm64_elf(c):
-            return c
+        resolved = resolve_candidate(root, c)
+        if resolved and is_arm64_elf(resolved):
+            return resolved
     if candidates:
         log(f"UYARI: '{filename}' bulundu ({len(candidates)} aday) ama hicbiri ELF64/AArch64 degil.")
     return None
@@ -583,6 +669,9 @@ def build_exhale_binary(cxx, out_path):
         raise RuntimeError(f"exhale icinde .cpp dosyalari bulunamadi: {src_root}")
 
     flag_sets = [
+        # -O2 once denenir: derleme suresi belirgin sekilde kisa, encoder hizi
+        # pratikte ayni. (CI'da bu adim dakikalar suruyordu.)
+        ["-std=c++11", "-O2", "-ffast-math", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG", "-DBA_MORE_CBR=1"],
         ["-std=c++11", "-O3", "-ffast-math", "-funroll-loops", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG", "-DBA_MORE_CBR=1"],
         ["-std=c++11", "-O3", "-ffast-math", "-funroll-loops", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG"],
         ["-std=c++11", "-O2", "-fPIE", "-pie", "-DNDEBUG"],
@@ -692,8 +781,18 @@ def main():
     build_exhale_binary(cxx, exhale_dst)
 
     # --- 2) Termux resmi libopus.so'yu indir ve libopusenc.so'yu derle ---
-    opus_pkg = contents_map.get("libopus.so", "libopus")
-    opus_root = ensure_package_extracted(opus_pkg)
+    opus_candidates = list(SONAME_PKG_OVERRIDES.get("libopus.so", []))
+    for cand in [contents_map.get("libopus.so"), "libopus"]:
+        if cand and cand not in opus_candidates:
+            opus_candidates.append(cand)
+    opus_pkg = opus_candidates[0]
+    opus_root = None
+    for cand in opus_candidates:
+        opus_root = ensure_package_extracted(cand)
+        if opus_root and find_file(opus_root, "libopus.so"):
+            opus_pkg = cand
+            break
+        opus_root = None
     if not opus_root:
         log(f"HATA: '{opus_pkg}' paketi indirilemedi.")
         sys.exit(1)
@@ -726,28 +825,37 @@ def main():
             if soname in resolved_sonames or soname in SKIP_SONAMES:
                 continue
 
-            pkg_name = contents_map.get(soname)
-            if not pkg_name:
+            # Once bilinen/tercih edilen paketler, sonra Contents indeksinin onerdigi paket.
+            candidates = list(SONAME_PKG_OVERRIDES.get(soname, []))
+            from_contents = contents_map.get(soname)
+            if from_contents and from_contents not in candidates:
+                candidates.append(from_contents)
+
+            if not candidates:
                 log(f"  ! {soname}: Contents indeksinde bulunamadi (paket bilinmiyor)")
                 unresolved_sonames.add(soname)
                 continue
 
-            extract_root = ensure_package_extracted(pkg_name)
-            if not extract_root:
-                log(f"  ! {soname}: paketi '{pkg_name}' indirilemedi/acilamadi")
-                unresolved_sonames.add(soname)
-                continue
+            src, used_pkg = None, None
+            for pkg_name in candidates:
+                extract_root = ensure_package_extracted(pkg_name)
+                if not extract_root:
+                    log(f"  ! {soname}: paketi '{pkg_name}' indirilemedi/acilamadi (diger aday denenecek)")
+                    continue
+                src = find_file(extract_root, soname)
+                if src:
+                    used_pkg = pkg_name
+                    break
+                log(f"  ! {soname}: '{pkg_name}' paketi icinde dosya bulunamadi (diger aday denenecek)")
 
-            src = find_file(extract_root, soname)
             if not src:
-                log(f"  ! {soname}: '{pkg_name}' paketi icinde dosya bulunamadi")
                 unresolved_sonames.add(soname)
                 continue
 
             dst = os.path.join(OUT_DIR, soname)
             if not os.path.exists(dst):
                 real_copy(src, dst)
-                log(f"  + {soname}  (paket: {pkg_name})")
+                log(f"  + {soname}  (paket: {used_pkg})")
             resolved_sonames.add(soname)
             unresolved_sonames.discard(soname)
             queue.append(dst)
