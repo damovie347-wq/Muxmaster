@@ -153,4 +153,42 @@
     <string name="action_export_selected">Export Selected (%1$d)</string>
     <string name="export_none_selected">Please select at least one track to export first.</string>
     <string name="export_batch_success">✅ Successfully exported %1$d/%2$d selected tracks.</string>
+
+    <!-- Home screen -->
+    <string name="home_tagline">Your video and audio tools</string>
+    <string name="home_settings_desc">Settings</string>
+    <string name="home_mux_title">Mux</string>
+    <string name="home_mux_sub">Split audio and\nsubtitle tracks</string>
+    <string name="home_trim_title">Trim</string>
+    <string name="home_trim_sub">Cut the video</string>
+    <string name="home_merge_title">Merge</string>
+    <string name="home_merge_sub">Join videos</string>
+    <string name="home_player_title">Player</string>
+    <string name="home_player_sub">Play your media</string>
+    <string name="home_converter_title">Audio Conversion</string>
+    <string name="home_converter_sub">Convert audio to another format</string>
+    <string name="home_recent_title">Recent Files</string>
+    <string name="home_recent_show_all">See All</string>
+    <string name="home_recent_empty_title">No files opened yet</string>
+    <string name="home_recent_empty_sub">Videos you open are listed here.</string>
+    <string name="home_more_desc">More options</string>
+    <string name="home_action_play">Play</string>
+    <string name="home_action_remove">Remove from list</string>
+
+    <!-- Dialogs (MainActivity) -->
+    <string name="dialog_storage_title">Storage permission</string>
+    <string name="dialog_storage_text">To open videos directly without copying them to the cache, enable &quot;All files access&quot;.</string>
+    <string name="dialog_storage_allow">Allow</string>
+    <string name="dialog_storage_later">Not now</string>
+    <string name="dialog_play_how_title">How do you want to play the video?</string>
+    <string name="dialog_play_single">Play as a single video</string>
+    <string name="dialog_play_multi">Add to multi video</string>
+    <string name="dialog_cancel">Cancel</string>
+    <string name="dialog_open_with_title">What do you want to do?</string>
+    <string name="open_with_play">Play (video player)</string>
+    <string name="open_with_multi">Play in multi video</string>
+    <string name="open_with_mux">Mux Master (add/remove audio or subtitles)</string>
+    <string name="open_with_trim">Trim / Cut</string>
+    <string name="open_with_merge">Merge</string>
+    <string name="open_with_convert">Convert audio</string>
 </resources>

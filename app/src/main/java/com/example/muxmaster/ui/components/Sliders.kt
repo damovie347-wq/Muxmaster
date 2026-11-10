@@ -3,6 +3,7 @@ package com.example.muxmaster.ui.components
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
@@ -301,12 +302,29 @@ fun CutTimelineBar(
     modifier: Modifier = Modifier,
     keepColor: Color = Color(0xFF7C6FE0),
     cutColor: Color = Color(0xFFE24B4A),
-    height: Dp = 34.dp
+    height: Dp = 34.dp,
+    onTapMs: ((Long) -> Unit)? = null
 ) {
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
+            .then(
+                if (onTapMs == null) {
+                    Modifier
+                } else {
+                    Modifier.pointerInput(durationMs, onTapMs) {
+                        // Tek dokunuş: çubuğun dokunulan yerine atla (hızlı kesim akışı).
+                        detectTapGestures { offset ->
+                            val w = size.width.toFloat()
+                            if (w > 0f) {
+                                val fraction = (offset.x / w).coerceIn(0f, 1f)
+                                onTapMs((fraction * durationMs.toFloat()).toLong())
+                            }
+                        }
+                    }
+                }
+            )
     ) {
         val total = durationMs.coerceAtLeast(1L).toFloat()
         val barHeight = 16.dp.toPx()

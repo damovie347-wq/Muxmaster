@@ -15,6 +15,7 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -36,7 +37,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Forward10
@@ -149,6 +152,13 @@ import kotlinx.coroutines.withContext
 /** Yüklenme halkası (LoadingRing) ve oynatıcı slider'ı için turkuaz vurgu rengi. */
 internal val PlayerTurquoise = Color(0xFF66C2B4)
 
+/**
+ * Kare hassas sarma: hedefe 350 ms toleransla en yakın anahtar kareden başlanır.
+ * (Sürükleme biterken kullanılır; sürükleme sırasında [SeekParameters.CLOSEST_SYNC]
+ * kullanılıp görüntünün ANINDA gelmesi sağlanır.)
+ */
+private val SEEK_EXACT = SeekParameters(350_000L, 350_000L)
+
 private fun formatClock(ms: Long): String {
     val safe = ms.coerceAtLeast(0L)
     val m = safe / 60000
@@ -183,6 +193,10 @@ fun TrimScreen(
     // her saniye tüm ekranın yeniden çizilmemesi için State olarak tutulur.
     val playheadRef = remember { mutableLongStateOf(0L) }
 
+    // Oynatıcıya DIŞARIDAN sarma isteği (zaman çizelgesine dokunma, aralık seçme).
+    // -1 = istek yok. Değer yazıldığında oynatıcı o ana atlar ve isteği tüketir.
+    val seekRequest = remember { mutableLongStateOf(-1L) }
+
     Scaffold(
         containerColor = BgDark,
         topBar = {
@@ -195,9 +209,13 @@ fun TrimScreen(
                 },
                 actions = {
                     if (video != null) {
-                        // MAKAS: oynatıcının bulunduğu yerden yeni bir kesim aralığı ekler.
+                        // MAKAS: tek aralık modunda seçili aralığı kesim listesine ekler,
+                        // çoklu kesim modunda oynatıcının bulunduğu yerden yeni aralık açar.
                         IconButton(
-                            onClick = { viewModel.addCutRangeFromSelection(playheadRef.longValue) },
+                            onClick = {
+                                if (viewModel.isMultiCut) viewModel.addCutRange(playheadRef.longValue)
+                                else viewModel.addCutRangeFromSelection(playheadRef.longValue)
+                            },
                             enabled = !busy
                         ) {
                             Icon(
@@ -227,7 +245,8 @@ fun TrimScreen(
                     endMs = if (viewModel.isMultiCut) durationMs else viewModel.trimEndMs,
                     isTrimming = viewModel.isTrimming,
                     followRangeChange = !viewModel.isMultiCut,
-                    playheadRef = playheadRef
+                    playheadRef = playheadRef,
+                    seekRequestMs = seekRequest
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -309,64 +328,95 @@ fun TrimScreen(
                 // ── Kırpma / kesim başlığı ──────────────────────────────────
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        if (viewModel.isMultiCut) "Çoklu kesim (makas)" else "Kırpma Aralığı",
+                        if (viewModel.isMultiCut) "Çoklu kesim" else "Kırpma Aralığı",
                         color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
                     )
-                    Spacer(Modifier.weight(1f))
-                    // MAKAS: seçili aralığı (Başlangıç–Bitiş alanları) doğrudan
-                    // "kesilecek aralık" yapar; çoklu kesim modunda yenisini ekler.
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(Amber.copy(alpha = 0.14f))
-                            .clickable(enabled = !viewModel.isTrimming) {
-                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
-                            }
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            if (viewModel.isMultiCut) "Aralık ekle" else "Makasla kes",
-                            color = Amber, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
-                        )
-                    }
                 }
                 Spacer(Modifier.height(8.dp))
 
                 if (viewModel.isMultiCut) {
-                    // ── ÇOKLU KESİM: birden fazla aralık silinir, kalanlar birleştirilir ──
+                    // ── ÇOKLU KESİM (hızlı akış) ────────────────────────────────
+                    // 1) Zaman çizelgesine dokun → oynatıcı oraya atlar.
+                    // 2) "Başlangıç"/"Bitiş" düğmeleri aralığı oynatıcının yerine oturtur.
+                    // 3) İstersen satırdaki kalemle hassas (dk/sn/ms) alanları aç.
+                    // Böylece 20 dakikalık videoda 5 kesim, saniyeler içinde yapılır.
+                    val ranges = viewModel.cutRanges
+                    var selectedCut by remember { mutableIntStateOf(0) }
+                    var expandedCut by remember { mutableIntStateOf(-1) }
+                    val sel = selectedCut.coerceIn(0, (ranges.size - 1).coerceAtLeast(0))
+                    val selectedRange = ranges.getOrNull(sel)
+
                     CutTimelineBar(
                         durationMs = durationMs,
-                        cutRanges = viewModel.cutRanges,
+                        cutRanges = ranges,
                         playheadMs = { playheadRef.longValue },
                         keepColor = Purple,
+                        onTapMs = { ms -> seekRequest.longValue = ms },
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text(
-                        "Kırmızı: videodan çıkarılacak · Mor: korunacak. Kalan süre: " +
-                            formatClock(viewModel.keptDurationMs),
-                        color = TextMuted, fontSize = 10.sp
-                    )
-                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            "${ranges.size} aralık · Kalan ${formatClock(viewModel.keptDurationMs)}",
+                            color = TextSec, fontSize = 11.sp, modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
+                            Text("Temizle", color = TextMuted, fontSize = 11.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
 
-                    viewModel.cutRanges.forEachIndexed { index, range ->
+                    // Tek dokunuşluk kesim noktası düğmeleri (seçili aralık için).
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        CutPointButton(
+                            label = "Başlangıç = oynatıcı",
+                            enabled = selectedRange != null && !viewModel.isTrimming,
+                            accent = Purple,
+                            onClick = { viewModel.setCutStartFromPlayhead(sel, playheadRef.longValue) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CutPointButton(
+                            label = "Bitiş = oynatıcı",
+                            enabled = selectedRange != null && !viewModel.isTrimming,
+                            accent = Purple,
+                            onClick = { viewModel.setCutEndFromPlayhead(sel, playheadRef.longValue) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    ranges.forEachIndexed { index, range ->
                         key(index) {
-                            CutRangeCard(
+                            CutRangeRow(
                                 index = index,
                                 range = range,
+                                selected = index == sel,
+                                expanded = index == expandedCut,
                                 enabled = !viewModel.isTrimming,
+                                onSelect = {
+                                    selectedCut = index
+                                    seekRequest.longValue = range.startMs
+                                },
+                                onToggleExpand = {
+                                    selectedCut = index
+                                    expandedCut = if (expandedCut == index) -1 else index
+                                },
                                 onStartChange = { viewModel.updateCutRange(index, it, range.endMs) },
                                 onEndChange = { viewModel.updateCutRange(index, range.startMs, it) },
-                                onRemove = { viewModel.removeCutRange(index) }
+                                onRemove = {
+                                    viewModel.removeCutRange(index)
+                                    if (expandedCut == index) expandedCut = -1
+                                }
                             )
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(6.dp))
                         }
                     }
 
+                    Spacer(Modifier.height(2.dp))
                     OutlinedButton(
-                        onClick = { viewModel.addCutRange(playheadRef.longValue) },
+                        onClick = {
+                            val newIndex = viewModel.addCutRange(playheadRef.longValue)
+                            if (newIndex >= 0) selectedCut = newIndex
+                        },
                         enabled = !viewModel.isTrimming,
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
@@ -379,17 +429,7 @@ fun TrimScreen(
                             color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
                         )
                     }
-                    Spacer(Modifier.height(2.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            "${viewModel.cutRanges.size} aralık çıkarılacak · Kalan " +
-                                formatClock(viewModel.keptDurationMs),
-                            color = TextSec, fontSize = 11.sp, modifier = Modifier.weight(1f)
-                        )
-                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
-                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
-                        }
-                    }
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         "Kırmızı aralıklar videodan çıkarılır, mor bölgeler sırayla birleştirilir. " +
                             "Kesim kayıpsızdır (yeniden kodlama yok).",
@@ -421,24 +461,20 @@ fun TrimScreen(
                         color = TextMuted, fontSize = 10.sp
                     )
 
-                    // Çoklu kesim moduna geçiş ipucu (aynı zamanda tıklanabilir kısayol).
+                    // Tek dokunuş: seçili aralığı videodan çıkar (çoklu kesim moduna geçer).
                     Spacer(Modifier.height(10.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable(enabled = !viewModel.isTrimming) {
-                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
-                            }
-                            .padding(horizontal = 4.dp, vertical = 6.dp)
+                    OutlinedButton(
+                        onClick = { viewModel.addCutRangeFromSelection(playheadRef.longValue) },
+                        enabled = !viewModel.isTrimming,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Amber)
                     ) {
-                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
+                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Makas (yukarıdaki) seçili aralığı kesim listesine ekler; " +
-                                "birden fazla aralık kesilip kalanlar birleştirilir.",
-                            color = Amber, fontSize = 11.sp
+                            "BU ARALIĞI VİDEODAN ÇIKAR (MAKAS)",
+                            color = Amber, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
                         )
                     }
 
@@ -610,14 +646,21 @@ fun TrimScreen(
 }
 
 /**
- * Çoklu kesim listesindeki tek bir "kesilecek aralık" kartı: başlangıç ve bitiş
- * zamanı dakika/saniye/salise alanlarıyla düzenlenebilir.
+ * Çoklu kesim listesindeki tek satırlık aralık özeti.
+ *
+ * Eski tasarımda her aralık, iki satır dolusu dk/sn/ms alanıyla açılıyordu; 5 aralıkta
+ * ekran karmaşık bir forma dönüşüyordu. Yeni satır TEK satır: dokun → aralığı seç
+ * (oynatıcı aralığın başına atlar), kalem → hassas alanlar açılır, çöp → sil.
  */
 @Composable
-private fun CutRangeCard(
+private fun CutRangeRow(
     index: Int,
     range: TimeRange,
+    selected: Boolean,
+    expanded: Boolean,
     enabled: Boolean,
+    onSelect: () -> Unit,
+    onToggleExpand: () -> Unit,
     onStartChange: (Long) -> Unit,
     onEndChange: (Long) -> Unit,
     onRemove: () -> Unit
@@ -625,26 +668,96 @@ private fun CutRangeCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Surface, RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Filled.ContentCut, null, tint = Red, modifier = Modifier.size(15.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                "Kesilecek ${index + 1}",
-                color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Amber.copy(alpha = 0.10f) else Surface)
+            .border(
+                width = if (selected) 1.dp else 0.dp,
+                color = if (selected) Amber.copy(alpha = 0.55f) else Color.Transparent,
+                shape = RoundedCornerShape(12.dp)
             )
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = enabled, onClick = onSelect)
+                .padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 4.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) Amber else SurfaceHigh),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "${index + 1}",
+                    color = if (selected) Color.Black else TextSec,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
             Spacer(Modifier.width(8.dp))
-            Text(formatClock(range.durationMs), color = TextMuted, fontSize = 11.sp)
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick = onRemove, enabled = enabled, modifier = Modifier.size(30.dp)) {
-                Icon(Icons.Filled.Delete, "Aralığı sil", tint = Red, modifier = Modifier.size(18.dp))
+            Text(
+                "${formatClock(range.startMs)} → ${formatClock(range.endMs)}",
+                color = TextPrimary,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                formatClock(range.durationMs),
+                color = TextMuted,
+                fontSize = 10.sp,
+                maxLines = 1
+            )
+            IconButton(onClick = onToggleExpand, enabled = enabled, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.Edit,
+                    "Hassas düzenle",
+                    tint = TextSec,
+                    modifier = Modifier.size(17.dp)
+                )
+            }
+            IconButton(onClick = onRemove, enabled = enabled, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Filled.Delete, "Aralığı sil", tint = Red, modifier = Modifier.size(17.dp))
             }
         }
-        CompactTimeRow("Başlangıç", range.startMs, enabled, onStartChange)
-        Spacer(Modifier.height(6.dp))
-        CompactTimeRow("Bitiş", range.endMs, enabled, onEndChange)
+        if (expanded) {
+            Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp)) {
+                CompactTimeRow("Başlangıç", range.startMs, enabled, onStartChange)
+                Spacer(Modifier.height(6.dp))
+                CompactTimeRow("Bitiş", range.endMs, enabled, onEndChange)
+            }
+        }
+    }
+}
+
+/** Oynatıcının yerini aralığın başına/sonuna atayan tek dokunuşluk düğme. */
+@Composable
+private fun CutPointButton(
+    label: String,
+    enabled: Boolean,
+    accent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, if (enabled) accent.copy(alpha = 0.7f) else Outline),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
+        modifier = modifier
+    ) {
+        Text(
+            label,
+            color = if (enabled) accent else TextMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1
+        )
     }
 }
 
@@ -1033,7 +1146,8 @@ private fun TrimPlayer(
     endMs: Long,
     isTrimming: Boolean,
     followRangeChange: Boolean,
-    playheadRef: androidx.compose.runtime.MutableLongState
+    playheadRef: androidx.compose.runtime.MutableLongState,
+    seekRequestMs: androidx.compose.runtime.MutableLongState = remember { mutableLongStateOf(-1L) }
 ) {
     val context = LocalContext.current
     val player = remember { buildFastPlayer(context, isMultiView = false) }
@@ -1103,13 +1217,19 @@ private fun TrimPlayer(
         }
     }
 
-    LaunchedEffect(video.uri) {
-        val playable = if (video.uri.scheme == "content" && !isCloudAuthority(video.uri.authority)) {
-            withContext(Dispatchers.IO) {
-                InputAccess.realPath(context, video.uri)
-            }?.let { Uri.fromFile(File(it)) } ?: video.uri
-        } else {
-            video.uri
+    LaunchedEffect(video.uri, video.cachePath) {
+        // HIZ: dosya yolu zaten çözüldüyse (TrimViewModel -> InputAccess) doğrudan
+        // ondan oynatılır. Böylece her video geçişinde içerik sağlayıcısına tekrar
+        // sorulmaz, "önbelleğe alınıyor" beklemesi oluşmaz.
+        val resolved = video.cachePath
+        val playable = when {
+            resolved.startsWith("/") -> Uri.fromFile(File(resolved))
+            video.uri.scheme == "content" && !isCloudAuthority(video.uri.authority) -> {
+                withContext(Dispatchers.IO) {
+                    InputAccess.realPath(context, video.uri)
+                }?.let { Uri.fromFile(File(it)) } ?: video.uri
+            }
+            else -> video.uri
         }
         player.setMediaItem(MediaItem.fromUri(playable))
         player.prepare()
@@ -1207,6 +1327,15 @@ private fun TrimPlayer(
         player.seekTo(clamped)
     }
 
+    // DIŞARIDAN gelen sarma isteği (zaman çizelgesine dokunma / aralık satırını seçme).
+    LaunchedEffect(seekRequestMs.longValue) {
+        val target = seekRequestMs.longValue
+        if (target >= 0L) {
+            seekRequestMs.longValue = -1L
+            seekTo(target)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1254,6 +1383,17 @@ private fun TrimPlayer(
             onScaleChange = { scaleMode = it },
             showScale = !video.isAudioOnly,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            onScrubChange = { dragging ->
+                // HIZ: sürükleme sırasında en yakın anahtar kareye atlanır -> görüntü
+                // ANINDA gelir (20 dakikalık videoda bile bekleme yok). Parmak kalkınca
+                // kare hassas konuma oturulur ki kesim noktası tam görünsün.
+                if (dragging) {
+                    player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                } else {
+                    player.setSeekParameters(SEEK_EXACT)
+                    player.seekTo(positionMs)
+                }
+            },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TrackMenuButtons(player, tracks, TextPrimary)
@@ -1368,6 +1508,7 @@ internal fun PlayerControls(
     onScaleChange: (ScaleMode) -> Unit = {},
     showScale: Boolean = true,
     onMenuOpen: (Boolean) -> Unit = {},
+    onScrubChange: (Boolean) -> Unit = {},
     textColor: Color = TextPrimary,
     modifier: Modifier = Modifier,
     onRotateScreen: (() -> Unit)? = null,
@@ -1400,7 +1541,10 @@ internal fun PlayerControls(
             startMs = startMs,
             endMs = endMs,
             onSeekTo = onSeekTo,
-            onDragStateChange = { dragging -> onMenuOpen(dragging) },
+            onDragStateChange = { dragging ->
+                onMenuOpen(dragging)
+                onScrubChange(dragging)
+            },
             textColor = textColor,
             fontSizeSp = 12,
             rowHeight = 36.dp

@@ -153,4 +153,42 @@
     <string name="action_export_selected">Ausgewählte exportieren (%1$d)</string>
     <string name="export_none_selected">Bitte zuerst mindestens eine Spur zum Exportieren auswählen.</string>
     <string name="export_batch_success">✅ %1$d/%2$d ausgewählte Spuren erfolgreich exportiert.</string>
+
+    <!-- Startseite -->
+    <string name="home_tagline">Deine Video- und Audio-Werkzeuge</string>
+    <string name="home_settings_desc">Einstellungen</string>
+    <string name="home_mux_title">Mux</string>
+    <string name="home_mux_sub">Audio- und Untertitel-\nspuren trennen</string>
+    <string name="home_trim_title">Schneiden</string>
+    <string name="home_trim_sub">Video kürzen</string>
+    <string name="home_merge_title">Zusammenfügen</string>
+    <string name="home_merge_sub">Videos verbinden</string>
+    <string name="home_player_title">Player</string>
+    <string name="home_player_sub">Medien abspielen</string>
+    <string name="home_converter_title">Audio-Umwandlung</string>
+    <string name="home_converter_sub">Audio in ein anderes Format umwandeln</string>
+    <string name="home_recent_title">Letzte Dateien</string>
+    <string name="home_recent_show_all">Alle ansehen</string>
+    <string name="home_recent_empty_title">Noch keine Datei geöffnet</string>
+    <string name="home_recent_empty_sub">Geöffnete Videos werden hier gelistet.</string>
+    <string name="home_more_desc">Weitere Optionen</string>
+    <string name="home_action_play">Abspielen</string>
+    <string name="home_action_remove">Aus Liste entfernen</string>
+
+    <!-- Dialoge (MainActivity) -->
+    <string name="dialog_storage_title">Speicherberechtigung</string>
+    <string name="dialog_storage_text">Damit Videos ohne Kopie im Cache direkt geöffnet werden, aktiviere &quot;Zugriff auf alle Dateien&quot;.</string>
+    <string name="dialog_storage_allow">Erlauben</string>
+    <string name="dialog_storage_later">Nicht jetzt</string>
+    <string name="dialog_play_how_title">Wie möchtest du das Video abspielen?</string>
+    <string name="dialog_play_single">Als einzelnes Video abspielen</string>
+    <string name="dialog_play_multi">Zu Multi-Video hinzufügen</string>
+    <string name="dialog_cancel">Abbrechen</string>
+    <string name="dialog_open_with_title">Was möchtest du tun?</string>
+    <string name="open_with_play">Abspielen (Video-Player)</string>
+    <string name="open_with_multi">In Multi-Video abspielen</string>
+    <string name="open_with_mux">Mux Master (Audio/Untertitel hinzufügen oder entfernen)</string>
+    <string name="open_with_trim">Kürzen / Schneiden</string>
+    <string name="open_with_merge">Zusammenfügen</string>
+    <string name="open_with_convert">Audio umwandeln</string>
 </resources>

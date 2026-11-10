@@ -1,6 +1,7 @@
 package com.example.muxmaster.ui.theme
 
 import android.app.Activity
+import android.os.Build
 import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.drawable.ColorDrawable
@@ -75,8 +76,18 @@ fun MuxMasterTheme(themeMode: ThemeMode = ThemeMode.DARK, content: @Composable (
             val window = activity?.window
             if (window != null) {
                 val bgArgb = colorScheme.background.toArgb()
-                window.statusBarColor = bgArgb
-                window.navigationBarColor = bgArgb
+                // KENARDAN KENARA (edge-to-edge): durum çubuğu ve gezinme çubuğu artık
+                // şeffaf. Ekranların kendi gradyanı/zemini çubukların ARKASINA kadar
+                // uzanır (tam ekran görünüm); yazılar ise her ekranda güvenli alan
+                // (WindowInsets) kadar aşağıdan başlar. Böylece üst panel başlığı
+                // durum çubuğunun altında kalmaz.
+                window.statusBarColor = android.graphics.Color.TRANSPARENT
+                window.navigationBarColor = android.graphics.Color.TRANSPARENT
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    // Sistem çubuklarının arkasına otomatik siyah/beyaz perde çizmesin.
+                    window.isStatusBarContrastEnforced = false
+                    window.isNavigationBarContrastEnforced = false
+                }
                 window.setBackgroundDrawable(ColorDrawable(bgArgb))
                 window.decorView.setBackgroundColor(bgArgb)
                 val controller = WindowCompat.getInsetsController(window, view)

@@ -11,8 +11,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -37,8 +43,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import com.example.muxmaster.data.AppPreferences
 import com.example.muxmaster.data.RecentFiles
 import com.example.muxmaster.data.DriveStreamResolver
@@ -291,6 +302,14 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // KENARDAN KENARA (edge-to-edge) — TAM EKRAN DÜZELTMESİ:
+        // Uygulama artık sistem çubuklarının (durum çubuğu / gezinme çubuğu) ARKASINA
+        // kadar çiziyor. Böylece üstteki panel gerçekten ekranın en üstüne kadar
+        // uzanıyor; başlık ve içerik ise her ekranda güvenli alan kadar içeride
+        // kalıyor (Scaffold/WindowInsets). Önceden Android 15+ ve bazı üretici
+        // ROM'larında içerik durum çubuğunun ALTINDA kalıp başlıkla çakışıyordu.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
         if (savedInstanceState == null &&
             !muxViewModel.isMuxing && !trimViewModel.isTrimming &&
             !converterViewModel.isConverting && !mergeViewModel.isMerging
@@ -321,18 +340,17 @@ class MainActivity : AppCompatActivity() {
                 if (askStorage.value) {
                     AlertDialog(
                         onDismissRequest = { askStorage.value = false },
-                        title = { Text("Depolama izni") },
-                        text = {
-                            Text(
-                                "Videoların önbelleğe kopyalanmadan, beklemeden doğrudan açılması için " +
-                                    "\"Tüm dosyalara erişim\" iznini açın."
-                            )
-                        },
+                        title = { Text(stringResource(R.string.dialog_storage_title)) },
+                        text = { Text(stringResource(R.string.dialog_storage_text)) },
                         confirmButton = {
-                            TextButton(onClick = { askStorage.value = false; requestStorageAccess() }) { Text("İzin ver") }
+                            TextButton(onClick = { askStorage.value = false; requestStorageAccess() }) {
+                                Text(stringResource(R.string.dialog_storage_allow))
+                            }
                         },
                         dismissButton = {
-                            TextButton(onClick = { askStorage.value = false }) { Text("Şimdi değil") }
+                            TextButton(onClick = { askStorage.value = false }) {
+                                Text(stringResource(R.string.dialog_storage_later))
+                            }
                         }
                     )
                 }
@@ -371,6 +389,25 @@ class MainActivity : AppCompatActivity() {
                     )
                 }
 
+                // ── YUMUŞAK DÖNME GEÇİŞİ ──────────────────────────────────────
+                // Cihaz yatay/dikey çevrildiğinde yerleşim anında değişiyordu ("çat"
+                // etkisi). Artık dönme anında tam ekran bir perde kısa süreliğine
+                // kapanıp yumuşakça açılıyor: geçiş akıcı görünüyor, kare kaybı yok.
+                // Perde sadece GPU'da saydamlık olarak çizilir (alpha, draw fazında
+                // okunur) — yeniden kompozisyon, ek kare üretimi veya CPU yükü yok.
+                val orientation = LocalConfiguration.current.orientation
+                val rotationScrim = remember { Animatable(0f) }
+                var firstOrientation by remember { mutableStateOf(true) }
+                LaunchedEffect(orientation) {
+                    if (firstOrientation) {
+                        firstOrientation = false
+                    } else {
+                        rotationScrim.snapTo(0.75f)
+                        rotationScrim.animateTo(0f, animationSpec = tween(220, easing = LinearOutSlowInEasing))
+                    }
+                }
+
+                Box(modifier = Modifier.fillMaxSize()) {
                 when (screen) {
                     0 -> MuxScreen(
                         viewModel = muxViewModel,
@@ -482,6 +519,15 @@ class MainActivity : AppCompatActivity() {
                         }
                     )
                 }
+
+                // Dönme perdesi (dokunma olaylarını yakalamaz, sadece görsel).
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .graphicsLayer { alpha = rotationScrim.value }
+                )
+                }
             }
         }
     }
@@ -569,22 +615,22 @@ private fun SingleOrMultiPlayDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Videoyu nasıl oynatmak istiyorsunuz?") },
+        title = { Text(stringResource(R.string.dialog_play_how_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(fileName, maxLines = 2)
                 OutlinedButton(onClick = onPlaySingle, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.PlayCircle, null, modifier = Modifier.padding(end = 10.dp))
-                    Text("Tek video olarak oynat", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.dialog_play_single), modifier = Modifier.weight(1f))
                 }
                 OutlinedButton(onClick = onPlayMulti, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.GridView, null, modifier = Modifier.padding(end = 10.dp))
-                    Text("Çoklu videoya ekle (Multi Video)", modifier = Modifier.weight(1f))
+                    Text(stringResource(R.string.dialog_play_multi), modifier = Modifier.weight(1f))
                 }
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } }
     )
 }
 
@@ -608,19 +654,19 @@ private fun OpenWithChooser(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Ne yapmak istiyorsunuz?") },
+        title = { Text(stringResource(R.string.dialog_open_with_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(fileName, maxLines = 2)
-                Choice(Icons.Filled.PlayCircle, "Oynat (video oynatıcı)", onPlaySingle)
-                Choice(Icons.Filled.GridView, "Çoklu Oynat (Multi Video)", onPlayMulti)
-                Choice(Icons.Filled.Layers, "Mux Master (ses / altyazı ekle-çıkar)", onMux)
-                Choice(Icons.Filled.ContentCut, "Kırp / Kes", onTrim)
-                Choice(Icons.Filled.CallMerge, "Birleştir", onMerge)
-                Choice(Icons.Filled.GraphicEq, "Sesi dönüştür", onConvert)
+                Choice(Icons.Filled.PlayCircle, stringResource(R.string.open_with_play), onPlaySingle)
+                Choice(Icons.Filled.GridView, stringResource(R.string.open_with_multi), onPlayMulti)
+                Choice(Icons.Filled.Layers, stringResource(R.string.open_with_mux), onMux)
+                Choice(Icons.Filled.ContentCut, stringResource(R.string.open_with_trim), onTrim)
+                Choice(Icons.Filled.CallMerge, stringResource(R.string.open_with_merge), onMerge)
+                Choice(Icons.Filled.GraphicEq, stringResource(R.string.open_with_convert), onConvert)
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } }
     )
 }

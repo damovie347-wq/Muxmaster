@@ -97,6 +97,9 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     var cutRanges by mutableStateOf<List<TimeRange>>(emptyList())
         private set
 
+    /** URI -> ffprobe sonucu. Aynı dosyaya dönüldüğünde yeniden analiz edilmez (anında açılır). */
+    private val probeCache = java.util.concurrent.ConcurrentHashMap<String, TrackProber.ProbeResult>()
+
     val isMultiCut: Boolean get() = cutRanges.isNotEmpty()
 
     /** Çoklu kesim modunda videoda KALACAK parçalar (kesim aralıklarının tersi). */
@@ -140,11 +143,13 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
      * Yeni bir kesim aralığı ekler. Varsayılan olarak oynatıcının bulunduğu yerden
      * [DEFAULT_CUT_LENGTH_MS] kadarını keser; orası doluysa en yakın boş bölüme taşınır.
      */
-    fun addCutRange(playheadMs: Long) {
-        val dur = videoFile?.durationMs ?: return
-        if (dur <= MIN_CUT_MS || isTrimming) return
-        val window = findFreeWindow(dur, playheadMs.coerceIn(0L, dur)) ?: return
-        cutRanges = (cutRanges + window).sortedBy { it.startMs }
+    fun addCutRange(playheadMs: Long): Int {
+        val dur = videoFile?.durationMs ?: return -1
+        if (dur <= MIN_CUT_MS || isTrimming) return -1
+        val window = findFreeWindow(dur, playheadMs.coerceIn(0L, dur)) ?: return -1
+        val list = (cutRanges + window).sortedBy { it.startMs }
+        cutRanges = list
+        return list.indexOf(window)
     }
 
     /**
@@ -153,18 +158,64 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
      * Seçim anlamlı değilse (çok kısa ya da videonun tamamı) oynatıcının bulunduğu
      * yerden varsayılan uzunlukta bir aralık eklenir.
      */
-    fun addCutRangeFromSelection(playheadMs: Long) {
-        val dur = videoFile?.durationMs ?: return
-        if (dur <= MIN_CUT_MS || isTrimming) return
+    fun addCutRangeFromSelection(playheadMs: Long): Int {
+        val dur = videoFile?.durationMs ?: return -1
+        if (dur <= MIN_CUT_MS || isTrimming) return -1
         val s = trimStartMs.coerceIn(0L, dur)
         val e = trimEndMs.coerceIn(0L, dur)
         val len = e - s
         val usable = len >= MIN_SELECTION_MS && len <= dur - 400L
-        if (usable) {
-            cutRanges = (cutRanges + TimeRange(s, e)).sortedBy { it.startMs }
+        return if (usable) {
+            val list = (cutRanges + TimeRange(s, e)).sortedBy { it.startMs }
+            cutRanges = list
+            list.indexOf(TimeRange(s, e))
         } else {
             addCutRange(playheadMs)
         }
+    }
+
+    /**
+     * Çoklu kesimde seçili aralığın BAŞLANGICINI oynatıcının bulunduğu ana taşır.
+     * (Tek dokunuş: videoyu istenen yere kadar oynat → "Başlangıç" düğmesi.)
+     */
+    fun setCutStartFromPlayhead(index: Int, playheadMs: Long) {
+        val dur = videoFile?.durationMs ?: return
+        val r = cutRanges.getOrNull(index) ?: return
+        if (isTrimming) return
+        val s = playheadMs.coerceIn(0L, dur)
+        val e = if (s >= r.endMs - MIN_CUT_MS) {
+            (s + DEFAULT_CUT_LENGTH_MS).coerceAtMost(dur)
+        } else {
+            r.endMs
+        }
+        updateCutRange(index, s, e)
+    }
+
+    /**
+     * Çoklu kesimde seçili aralığın BİTİŞİNİ oynatıcının bulunduğu ana taşır.
+     * Başlangıç noktası ile çakışırsa aralık [DEFAULT_CUT_LENGTH_MS] kadar geriye alınır.
+     */
+    fun setCutEndFromPlayhead(index: Int, playheadMs: Long) {
+        val dur = videoFile?.durationMs ?: return
+        val r = cutRanges.getOrNull(index) ?: return
+        if (isTrimming) return
+        val e = playheadMs.coerceIn(0L, dur)
+        val s = if (e <= r.startMs + MIN_CUT_MS) {
+            (e - DEFAULT_CUT_LENGTH_MS).coerceAtLeast(0L)
+        } else {
+            r.startMs
+        }
+        updateCutRange(index, s, e)
+    }
+
+    /** Aralığı [deltaMs] kadar kaydırır (başlangıç/bitiş birlikte, sınırlar içinde). */
+    fun nudgeCutRange(index: Int, deltaMs: Long) {
+        val dur = videoFile?.durationMs ?: return
+        val r = cutRanges.getOrNull(index) ?: return
+        if (isTrimming || r.durationMs <= 0L) return
+        val len = r.durationMs
+        val s = (r.startMs + deltaMs).coerceIn(0L, (dur - len).coerceAtLeast(0L))
+        updateCutRange(index, s, s + len)
     }
 
     private fun findFreeWindow(dur: Long, preferredStart: Long): TimeRange? {
@@ -311,6 +362,7 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
     fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
         if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1; folderName = "" }
+        val key = uri.toString()
         viewModelScope.launch {
             isLoading = true
             loadingMessage = "Dosya analiz ediliyor..."
@@ -336,7 +388,11 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             }
 
             val sizeMb = withContext(Dispatchers.IO) { InputAccess.length(cacheFile).toFloat() / (1024 * 1024) }
-            val probe = withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
+            // HIZ: aynı dosya daha önce analiz edildiyse ffprobe (en yavaş adım) hiç
+            // çalıştırılmaz. Klasörde ileri/geri gezinirken video ANINDA açılır.
+            val cachedProbe = probeCache[key]
+            val probe = cachedProbe ?: withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
+            if (cachedProbe == null && probe.durationMs > 0L) probeCache[key] = probe
 
             val audioOnly = !probe.hasVideo
             if (audioOnly && probe.audioStreams.isEmpty()) {
@@ -363,6 +419,34 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
             outputFileName = "${rawName}_kirpilmis.$ext"
 
             isLoading = false
+            prefetchQueueNeighbors()
+        }
+    }
+
+    /**
+     * Klasör kuyruğundaki ÖNCEKİ ve SONRAKİ dosyanın meta bilgisini arka planda
+     * hazırlar. Böylece "sonraki video"ya basıldığında ffprobe beklenmez; geçiş
+     * anında olur. Kopyalama YAPILMAZ: dosya kopyalanmadan okunamıyorsa atlanır.
+     */
+    private fun prefetchQueueNeighbors() {
+        if (folderQueue.isEmpty()) return
+        val targets = listOfNotNull(
+            folderQueue.getOrNull(queueIndex + 1),
+            folderQueue.getOrNull(queueIndex - 1)
+        ).filter { probeCache[it.uri.toString()] == null }
+        if (targets.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            targets.forEach { entry ->
+                val k = entry.uri.toString()
+                if (probeCache.containsKey(k)) return@forEach
+                val path = runCatching { InputAccess.acquireNoCopy(app, entry.uri) }.getOrNull()
+                    ?: return@forEach
+                runCatching {
+                    val probe = TrackProber.probe(path)
+                    if (probe.durationMs > 0L) probeCache[k] = probe
+                }
+                runCatching { InputAccess.release(path) }
+            }
         }
     }
 

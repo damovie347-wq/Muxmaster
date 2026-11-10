@@ -163,4 +163,42 @@
     <string name="action_export_selected">Seçilenleri Dışa Aktar (%1$d)</string>
     <string name="export_none_selected">Önce dışa aktarılacak en az bir parça seçin.</string>
     <string name="export_batch_success">✅ Seçilen %1$d/%2$d parça başarıyla dışa aktarıldı.</string>
+
+    <!-- Ana ekran (HomeScreen) -->
+    <string name="home_tagline">Video ve ses araçların</string>
+    <string name="home_settings_desc">Ayarlar</string>
+    <string name="home_mux_title">Mux</string>
+    <string name="home_mux_sub">Ses ve altyazı\nparçalarını ayır</string>
+    <string name="home_trim_title">Kes</string>
+    <string name="home_trim_sub">Videoyu kes</string>
+    <string name="home_merge_title">Birleştir</string>
+    <string name="home_merge_sub">Videoları birleştir</string>
+    <string name="home_player_title">Oynatıcı</string>
+    <string name="home_player_sub">Medyanızı oynat</string>
+    <string name="home_converter_title">Ses Dönüştürme</string>
+    <string name="home_converter_sub">Sesi başka bir formata dönüştür</string>
+    <string name="home_recent_title">Son Dosyalar</string>
+    <string name="home_recent_show_all">Tümünü Gör</string>
+    <string name="home_recent_empty_title">Henüz dosya açmadın</string>
+    <string name="home_recent_empty_sub">Açtığın videolar burada listelenir.</string>
+    <string name="home_more_desc">Diğer seçenekler</string>
+    <string name="home_action_play">Oynat</string>
+    <string name="home_action_remove">Listeden çıkar</string>
+
+    <!-- Açılış / izin diyalogları (MainActivity) -->
+    <string name="dialog_storage_title">Depolama izni</string>
+    <string name="dialog_storage_text">Videoların önbelleğe kopyalanmadan, beklemeden doğrudan açılması için &quot;Tüm dosyalara erişim&quot; iznini açın.</string>
+    <string name="dialog_storage_allow">İzin ver</string>
+    <string name="dialog_storage_later">Şimdi değil</string>
+    <string name="dialog_play_how_title">Videoyu nasıl oynatmak istiyorsunuz?</string>
+    <string name="dialog_play_single">Tek video olarak oynat</string>
+    <string name="dialog_play_multi">Çoklu videoya ekle (Multi Video)</string>
+    <string name="dialog_cancel">İptal</string>
+    <string name="dialog_open_with_title">Ne yapmak istiyorsunuz?</string>
+    <string name="open_with_play">Oynat (video oynatıcı)</string>
+    <string name="open_with_multi">Çoklu Oynat (Multi Video)</string>
+    <string name="open_with_mux">Mux Master (ses / altyazı ekle-çıkar)</string>
+    <string name="open_with_trim">Kırp / Kes</string>
+    <string name="open_with_merge">Birleştir</string>
+    <string name="open_with_convert">Sesi dönüştür</string>
 </resources>

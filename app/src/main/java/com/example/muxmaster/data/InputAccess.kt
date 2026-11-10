@@ -46,6 +46,17 @@ object InputAccess {
         return copyToCache(context, uri, copyDir, copyName)
     }
 
+    /**
+     * Yalnızca KOPYALAMADAN okunabilen bir yol döndürür; kopya gerekiyorsa null.
+     *
+     * Arka planda yapılan ön hazırlık (önbelleğe alma) için kullanılır: büyük bir
+     * videoyu sırf meta bilgisini okumak için önbelleğe kopyalamaya kalkmaz.
+     */
+    fun acquireNoCopy(context: Context, uri: Uri): String? {
+        realPath(context, uri)?.let { realPaths.add(it); return it }
+        return direct(context, uri, needChildRead = false)
+    }
+
     /** URI'yi cihazdaki gerçek dosya yoluna çevirir (okunabiliyorsa). */
     fun realPath(context: Context, uri: Uri): String? {
         val candidates = mutableListOf<String>()

@@ -1,1033 +1,1782 @@
-# MuxMaster — Güncelleme 5 / Değişiklik Özeti
+# MuxMaster — Güncelleme 6 / Değişiklik Özeti
 
-Bu sürümde 4 dosya grubu değişti. Aşağıda her değişikliğin **birebir diff'i** var;
-tam dosyalar zip'in içindedir.
+11 dosya değişti. Proje **GitHub'da hatasız derleniyor** (AGP 8.3.0 / Kotlin 1.9.22 /
+Gradle 8.5 / compileSdk 34; `assembleRelease` + R8 + resource shrink + lintVital temiz).
 
-## 1) Derleme hatası (asıl neden)
-GitHub `ubuntu-latest` imajı Ubuntu 26.04 + Python 3.14'e geçti. Python 3.14'te
-`tarfile.extractall()` varsayılan olarak `data` filtresi kullanıyor ve Termux `.deb`
-paketlerindeki **mutlak symlink**'lerde (`./data/data/com.termux/files/usr/bin/aws`)
-`AbsoluteLinkError` fırlatıyor. Bu yüzden `awscli` (→ `libz.so.1`) ve `qt6-qtbase`
-(→ `libQt6Core.so.6`) paketleri hiç açılamıyor, betik 12 dakika sonunda
-"aşağıdaki paylaşımlı kütüphaneler çözümlenemedi" diyerek çıkıyordu.
+## 1) Tam ekran / üst panel çakışması
+- `MainActivity`: `WindowCompat.setDecorFitsSystemWindows(window, false)` → uygulama
+  kenardan kenara çiziyor (Android 15+ ve üretici ROM'larında içerik durum çubuğunun
+  altında kalıp başlıkla çakışmıyor).
+- `Theme`: durum/gezinme çubuğu **şeffaf**, sistem kontrast perdesi kapalı.
+- `HomeScreen`: içerik `WindowInsets.safeDrawing` kadar içeride başlıyor; gradyan ise
+  çubukların arkasına kadar uzanıyor (başlık artık saatin altında kalmıyor).
+- Scaffold kullanan diğer ekranlar insetleri kendisi yönetiyor (ek kod gerekmedi).
 
-Çözüm (`scripts/fetch_mkvtoolnix_assets.py`):
-- `filter="fully_trusted"` (Python < 3.12 için otomatik geri düşüş)
-- açılan paketteki mutlak Termux symlink'lerini göreli hale getirme + kırık link çözme
-- `libz.so.1` için `awscli` yerine `zlib` paketi (paket tercih tablosu)
-- indirmelerde 3 deneme; `exhale` derlemesinde önce `-O2`
-- Android sistem kütüphanelerini (libEGL/libGLESv2/libOpenSLES/libvulkan…) atlama
+## 2) Video kırpma: çoklu kesim artık hızlı ve sade
+- Uzun "kart + dk/sn/ms alanları" yerine **tek satırlık aralık listesi**
+  (`CutRangeRow`): dokun → seç (oynatıcı aralığın başına atlar), kalem → hassas
+  alanlar açılır, çöp → sil.
+- Yeni **"Başlangıç = oynatıcı" / "Bitiş = oynatıcı"** düğmeleri: videoyu oynat,
+  tek dokunuşla kesim noktasını oturt (`setCutStartFromPlayhead` /
+  `setCutEndFromPlayhead`).
+- Zaman çizelgesine **dokununca oynatıcı oraya atlıyor** (`CutTimelineBar.onTapMs`).
+- Başlıktaki tekrar eden "Aralık ekle" çipi kaldırıldı; makas düğmesi moda göre
+  çalışıyor (tek aralıkta seçimi kesime çevirir, çoklu kesimde yeni aralık açar).
+- `addCutRange` / `addCutRangeFromSelection` yeni aralığın indeksini döndürüyor →
+  eklenen aralık otomatik seçili geliyor.
 
-## 2) Derleme süresi
-- `jniLibs/arm64-v8a` → `actions/cache` (betik değişmedikçe native adım atlanır)
-- 70 MB'lık aarch64 cross-toolchain kurulumu kaldırıldı (NDK clang++ yeterli)
-- Gradle: `--build-cache --parallel`, `org.gradle.caching=true`
-- Native dosya doğrulama adımı (eksikse sessizce bozuk APK üretilmez)
+## 3) Dil değişince ana ekran da değişiyor
+- `HomeScreen`'deki tüm sabit Türkçe yazılar `strings.xml`'e taşındı
+  (`values` = tr, `values-en`, `values-de`).
+- `MainActivity`'deki açılış/izin diyalogları da aynı şekilde yerelleştirildi.
+- `AndroidManifest`: `AppLocalesMetadataHolderService` + `autoStoreLocales` →
+  seçilen dil uygulama yeniden açıldığında da korunuyor.
 
-## 3) Slider sürükleme
-`ui/components/Sliders.kt` — jest `PointerEventPass.Initial` aşamasında yakalanıp her
-karede tüketiliyor; içindeki `verticalScroll` hareketi çalamıyor. `MuxRangeSlider`
-için de aynısı.
+## 4) Yatay mod + yumuşak dönme animasyonu
+- `HomeScreen` duyarlı: yatay/tablette **4 kart tek satırda**, kart yüksekliği
+  126dp, ikon 34dp, başlık 17sp; içerik 780dp ile sınırlanıp ortalanıyor
+  (dev simgeler / dağınık arayüz bitti). Dikeyde eski 2×2 düzen aynı.
+- `MainActivity`: dönme anında tam ekran bir perde 220 ms'de yumuşakça açılıyor
+  (alpha draw fazında okunur → yeniden kompozisyon/ek CPU yükü yok; SurfaceView
+  video katmanı da perdenin altında kaldığı için geçiş akıcı).
 
-## 4) Makas / çoklu kesim
-- Başlığın yanına **Makasla kes** düğmesi (seçili aralığı kesim listesine ekler)
-- "Oynadığı yerden 10 sn'lik aralık ekle", özet satırı, "Tek aralığa dön"
-- Dışa aktarım: parça hatası artık sessizce atlanmıyor; altyazı hedefe sığmazsa
-  altyazısız yeniden deneniyor; `-map 0` yerine `v/a/s/t` eşlemesi
-
-## 5) Ana ekran
-`ui/screens/HomeScreen.kt` — 24dp köşeli kartlar, arkada ışık halkası, 44dp ikon,
-20sp başlık, "Ses Dönüştürme" kartında ikon çerçevesi + yuvarlak ok.
+## 5) Oynatıcı / kırpma ekranı hızı
+- `TrimPlayer` artık **çözülmüş dosya yolundan** (`video.cachePath`) oynatıyor;
+  her geçişte içerik sağlayıcısına tekrar sorulmuyor.
+- Sürükleme sırasında `SeekParameters.CLOSEST_SYNC` (en yakın anahtar kare → görüntü
+  anında), parmak kalkınca 350 ms toleranslı kare hassas sarma. Kesim doğruluğu
+  ffmpeg tarafında değişmedi.
+- `TrimViewModel`: ffprobe sonuçları URI bazında önbelleğe alınıyor; klasörde
+  ileri/geri gezinirken analiz tekrar edilmiyor. Komşu dosyaların meta bilgisi
+  arka planda hazırlanıyor (`prefetchQueueNeighbors`) — kopyalama yapmadan
+  (`InputAccess.acquireNoCopy`).
 
 ---
 
 # Diff
 
---- .github/workflows/build.yml	2026-11-09 17:04:15.000000000 +0000
-+++ .github/workflows/build.yml	2026-11-09 17:28:27.138516160 +0000
-@@ -64,15 +64,35 @@
-         with:
-           gradle-version: 8.5
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/AndroidManifest.xml src/Muxmaster-main/app/src/main/AndroidManifest.xml
+--- orig/x/Muxmaster-main/app/src/main/AndroidManifest.xml	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/AndroidManifest.xml	2026-11-10 13:24:58.770848736 +0000
+@@ -55,6 +55,18 @@
+             android:exported="false"
+             android:foregroundServiceType="dataSync|mediaPlayback" />
  
-+      # YENİ: native dosyalar (mkvmerge, mkvextract, exhale, opusenc + bağımlılıkları)
-+      # her seferinde indirilip yeniden derleniyordu; bu tek başına 10-12 dakika
-+      # sürüyordu. Artık betik değişmediği sürece önbellekten geliyor.
-+      - name: Native kütüphane önbelleği (jniLibs)
-+        id: jnilibs-cache
-+        uses: actions/cache@v4
-+        with:
-+          path: app/src/main/jniLibs/arm64-v8a
-+          key: jnilibs-${{ runner.os }}-${{ hashFiles('scripts/fetch_mkvtoolnix_assets.py') }}
-+          restore-keys: |
-+            jnilibs-${{ runner.os }}-
++        <!-- Ayarlar'dan seçilen uygulama dili kalıcı olsun: AppCompat seçilen yerel
++             ayarı (locale) kendisi saklar ve uygulama yeniden açıldığında geri yükler.
++             Bu servis olmadan dil yalnızca o oturum için geçerli oluyordu. -->
++        <service
++            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
++            android:enabled="false"
++            android:exported="false">
++            <meta-data
++                android:name="autoStoreLocales"
++                android:value="true" />
++        </service>
 +
-       - name: Native binary'leri (mkvmerge, mkvextract, exhale xHE-AAC, opusenc) hazırla ve jniLibs'e göm
-+        if: steps.jnilibs-cache.outputs.cache-hit != 'true'
-         run: |
-           sudo apt-get update -y
--          sudo apt-get install -y binutils zstd xz-utils patchelf git
--          sudo apt-get install -y binutils-aarch64-linux-gnu g++-aarch64-linux-gnu || echo "Uyari: aarch64 cross-toolchain kurulamadi; NDK llvm kullanilacak."
-+          sudo apt-get install -y --no-install-recommends binutils zstd xz-utils patchelf git
-           python3 scripts/fetch_mkvtoolnix_assets.py
- 
-+      - name: Native dosyaları doğrula
-+        run: |
-+          test -d app/src/main/jniLibs/arm64-v8a || { echo "jniLibs yok!"; exit 1; }
-+          ls -la app/src/main/jniLibs/arm64-v8a
-+          for f in libmkvmerge.so libmkvextract.so libexhale.so libopusenc.so; do
-+            test -f "app/src/main/jniLibs/arm64-v8a/$f" || { echo "Eksik: $f"; exit 1; }
-+          done
-+
-       - name: Release APK derle (minify açık, ffmpeg-kit + mkvtoolnix + exhale + opusenc native dosyaları dahil)
--        run: gradle assembleRelease --no-daemon --stacktrace
-+        run: gradle assembleRelease --no-daemon --stacktrace --build-cache --parallel
- 
-       - name: APK'yı indirilebilir artifact olarak yükle
-         uses: actions/upload-artifact@v4
---- gradle.properties	2026-11-09 17:04:15.000000000 +0000
-+++ gradle.properties	2026-11-09 17:28:32.809951406 +0000
-@@ -1,4 +1,10 @@
--org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-+# Derleme hızı: paralel + build cache (önbellek) kullanımı.
-+org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8
-+org.gradle.parallel=true
-+org.gradle.caching=true
-+kotlin.incremental=true
-+kotlin.incremental.useClasspathSnapshot=true
-+
- android.useAndroidX=true
--kotlin.code.style=official
- android.nonTransitiveRClass=true
-+kotlin.code.style=official
---- scripts/fetch_mkvtoolnix_assets.py	2026-11-09 17:04:15.000000000 +0000
-+++ scripts/fetch_mkvtoolnix_assets.py	2026-11-09 17:27:59.041037836 +0000
-@@ -28,7 +28,27 @@
-                         "app", "src", "main", "jniLibs", "arm64-v8a")
- WORK = tempfile.mkdtemp(prefix="mkvtoolnix_fetch_")
- 
--SKIP_SONAMES = {"libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so"}
-+SKIP_SONAMES = {
-+    "libc.so", "libm.so", "libdl.so", "liblog.so", "libandroid.so", "libz.so",
-+    # Android sisteminde hazir gelen (APK'ya gomulmemesi gereken) kutuphaneler:
-+    "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libOpenSLES.so", "libvulkan.so",
-+    "libjnigraphics.so", "libmediandk.so", "libaaudio.so", "libcamera2ndk.so",
-+}
-+
-+# Termux paketlerindeki symlink'ler bu mutlak onekle uretilir; deb host'ta
-+# acildiginda bu yollar var olmadigi icin kirik kalir. Asagidaki fonksiyonlarla
-+# bunlari deb'in acildigi dizine gore yeniden yaziyoruz.
-+TERMUX_PREFIX = "/data/data/com.termux/files/usr"
-+
-+# Bazi soname'ler icin "ilk bulunan paket" yanlis/heavy olabiliyor.
-+# (Ornek: Contents indeksinde libz.so.1 ilk olarak awscli ile eslesiyordu;
-+#  awscli hem 20+ MB hem de symlink hatasi veriyordu. zlib yeterli.)
-+SONAME_PKG_OVERRIDES = {
-+    "libz.so.1": ["zlib"],
-+    "libz.so": ["zlib"],
-+    "libc++_shared.so": ["ndk-multilib", "libc++"],
-+    "libQt6Core.so.6": ["qt6-qtbase"],
-+}
- 
- EXHALE_TARBALLS = [
-     "https://gitlab.com/ecodis/exhale/-/archive/v1.2.2/exhale-v1.2.2.tar.gz",
-@@ -249,9 +269,18 @@
- 
- 
- def fetch(url: str) -> bytes:
--    req = urllib.request.Request(url, headers={"User-Agent": "muxmaster-ci/1.0"})
--    with urllib.request.urlopen(req, timeout=90) as r:
--        return r.read()
-+    last_err = None
-+    for attempt in range(3):
-+        try:
-+            req = urllib.request.Request(url, headers={"User-Agent": "muxmaster-ci/1.0"})
-+            with urllib.request.urlopen(req, timeout=90) as r:
-+                return r.read()
-+        except Exception as e:  # agdalgalanmalarina karsi 3 deneme
-+            last_err = e
-+            if attempt < 2:
-+                import time
-+                time.sleep(2 + attempt * 3)
-+    raise last_err
- 
- 
- def fetch_first_ok(bases, rel_paths):
-@@ -370,10 +399,66 @@
-         subprocess.run(["zstd", "-d", "-f", data_file, "-o", raw], check=True, capture_output=True)
-         data_file = raw
-     with tarfile.open(data_file, mode="r:*") as t:
--        t.extractall(dest)
-+        # ONEMLI: Python 3.12+ varsayilan "data" filtresi, Termux paketlerindeki
-+        # MUTLAK symlink'lerde (ornek: ./data/data/com.termux/files/usr/bin/aws)
-+        # tarfile.AbsoluteLinkError firlatip paketin TAMAMININ acilmasini
-+        # engelliyordu. Bu yuzden libz.so.1 (awscli) ve libQt6Core.so.6
-+        # (qt6-qtbase) cozulemiyor, derleme 12+ dakika sonunda hata veriyordu.
-+        # Paketler guvenilir kaynaklardan (Termux) geldigi icin "fully_trusted"
-+        # kullaniyoruz; kirik mutlak linkler asagida duzeltiliyor.
-+        try:
-+            t.extractall(dest, filter="fully_trusted")
-+        except TypeError:
-+            # Python < 3.12: filter parametresi yok.
-+            t.extractall(dest)
-+    fix_termux_links(dest)
-     return dest
- 
- 
-+def fix_termux_links(root):
-+    """Deb icindeki mutlak Termux symlink'lerini goreli symlink'e cevirir."""
-+    fixed = 0
-+    for dirpath, dirnames, filenames in os.walk(root):
-+        for name in list(dirnames) + list(filenames):
-+            p = os.path.join(dirpath, name)
-+            if not os.path.islink(p):
-+                continue
-+            try:
-+                target = os.readlink(p)
-+            except OSError:
-+                continue
-+            if not target.startswith(TERMUX_PREFIX):
-+                continue
-+            real = os.path.join(root, target.lstrip("/"))
-+            if not os.path.exists(real):
-+                continue
-+            try:
-+                os.remove(p)
-+                os.symlink(os.path.relpath(real, os.path.dirname(p)), p)
-+                fixed += 1
-+            except OSError:
-+                pass
-+    if fixed:
-+        log(f"  {fixed} adet Termux symlink'i goreli hale getirildi.")
-+    return fixed
-+
-+
-+def resolve_candidate(root, path):
-+    """Kirik mutlak symlink'i deb kokune gore cozer."""
-+    if os.path.exists(path):
-+        return os.path.realpath(path)
-+    if os.path.islink(path):
-+        try:
-+            target = os.readlink(path)
-+        except OSError:
-+            return None
-+        if target.startswith(TERMUX_PREFIX):
-+            alt = os.path.join(root, target.lstrip("/"))
-+            if os.path.exists(alt):
-+                return os.path.realpath(alt)
-+    return None
-+
-+
- def find_subdir(root, suffix):
-     for dirpath, _, _ in os.walk(root):
-         if dirpath.replace(os.sep, "/").endswith(suffix):
-@@ -400,8 +485,9 @@
- def find_file(root, filename):
-     candidates = find_all_files(root, filename)
-     for c in candidates:
--        if is_arm64_elf(c):
--            return c
-+        resolved = resolve_candidate(root, c)
-+        if resolved and is_arm64_elf(resolved):
-+            return resolved
-     if candidates:
-         log(f"UYARI: '{filename}' bulundu ({len(candidates)} aday) ama hicbiri ELF64/AArch64 degil.")
-     return None
-@@ -583,6 +669,9 @@
-         raise RuntimeError(f"exhale icinde .cpp dosyalari bulunamadi: {src_root}")
- 
-     flag_sets = [
-+        # -O2 once denenir: derleme suresi belirgin sekilde kisa, encoder hizi
-+        # pratikte ayni. (CI'da bu adim dakikalar suruyordu.)
-+        ["-std=c++11", "-O2", "-ffast-math", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG", "-DBA_MORE_CBR=1"],
-         ["-std=c++11", "-O3", "-ffast-math", "-funroll-loops", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG", "-DBA_MORE_CBR=1"],
-         ["-std=c++11", "-O3", "-ffast-math", "-funroll-loops", "-fPIE", "-pie", "-static-libstdc++", "-DNDEBUG"],
-         ["-std=c++11", "-O2", "-fPIE", "-pie", "-DNDEBUG"],
-@@ -692,8 +781,18 @@
-     build_exhale_binary(cxx, exhale_dst)
- 
-     # --- 2) Termux resmi libopus.so'yu indir ve libopusenc.so'yu derle ---
--    opus_pkg = contents_map.get("libopus.so", "libopus")
--    opus_root = ensure_package_extracted(opus_pkg)
-+    opus_candidates = list(SONAME_PKG_OVERRIDES.get("libopus.so", []))
-+    for cand in [contents_map.get("libopus.so"), "libopus"]:
-+        if cand and cand not in opus_candidates:
-+            opus_candidates.append(cand)
-+    opus_pkg = opus_candidates[0]
-+    opus_root = None
-+    for cand in opus_candidates:
-+        opus_root = ensure_package_extracted(cand)
-+        if opus_root and find_file(opus_root, "libopus.so"):
-+            opus_pkg = cand
-+            break
-+        opus_root = None
-     if not opus_root:
-         log(f"HATA: '{opus_pkg}' paketi indirilemedi.")
-         sys.exit(1)
-@@ -726,28 +825,37 @@
-             if soname in resolved_sonames or soname in SKIP_SONAMES:
-                 continue
- 
--            pkg_name = contents_map.get(soname)
--            if not pkg_name:
-+            # Once bilinen/tercih edilen paketler, sonra Contents indeksinin onerdigi paket.
-+            candidates = list(SONAME_PKG_OVERRIDES.get(soname, []))
-+            from_contents = contents_map.get(soname)
-+            if from_contents and from_contents not in candidates:
-+                candidates.append(from_contents)
-+
-+            if not candidates:
-                 log(f"  ! {soname}: Contents indeksinde bulunamadi (paket bilinmiyor)")
-                 unresolved_sonames.add(soname)
-                 continue
- 
--            extract_root = ensure_package_extracted(pkg_name)
--            if not extract_root:
--                log(f"  ! {soname}: paketi '{pkg_name}' indirilemedi/acilamadi")
--                unresolved_sonames.add(soname)
--                continue
-+            src, used_pkg = None, None
-+            for pkg_name in candidates:
-+                extract_root = ensure_package_extracted(pkg_name)
-+                if not extract_root:
-+                    log(f"  ! {soname}: paketi '{pkg_name}' indirilemedi/acilamadi (diger aday denenecek)")
-+                    continue
-+                src = find_file(extract_root, soname)
-+                if src:
-+                    used_pkg = pkg_name
-+                    break
-+                log(f"  ! {soname}: '{pkg_name}' paketi icinde dosya bulunamadi (diger aday denenecek)")
- 
--            src = find_file(extract_root, soname)
-             if not src:
--                log(f"  ! {soname}: '{pkg_name}' paketi icinde dosya bulunamadi")
-                 unresolved_sonames.add(soname)
-                 continue
- 
-             dst = os.path.join(OUT_DIR, soname)
-             if not os.path.exists(dst):
-                 real_copy(src, dst)
--                log(f"  + {soname}  (paket: {pkg_name})")
-+                log(f"  + {soname}  (paket: {used_pkg})")
-             resolved_sonames.add(soname)
-             unresolved_sonames.discard(soname)
-             queue.append(dst)
---- app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt	2026-11-09 17:04:15.000000000 +0000
-+++ app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt	2026-11-09 17:28:56.175137952 +0000
-@@ -19,6 +19,7 @@
- import androidx.compose.ui.geometry.Size
- import androidx.compose.ui.graphics.Color
- import androidx.compose.ui.graphics.StrokeCap
-+import androidx.compose.ui.input.pointer.PointerEventPass
- import androidx.compose.ui.input.pointer.pointerInput
- import androidx.compose.ui.unit.Dp
+         <activity
+             android:name=".MainActivity"
+             android:exported="true"
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/MainActivity.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/MainActivity.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/MainActivity.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/MainActivity.kt	2026-11-10 13:35:30.284351558 +0000
+@@ -11,8 +11,14 @@
+ import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.activity.viewModels
+ import androidx.appcompat.app.AppCompatActivity
++import androidx.compose.animation.core.Animatable
++import androidx.compose.animation.core.LinearOutSlowInEasing
++import androidx.compose.animation.core.tween
++import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.material.icons.Icons
+@@ -37,8 +43,13 @@
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.graphicsLayer
+ import androidx.compose.ui.graphics.vector.ImageVector
++import androidx.compose.ui.platform.LocalConfiguration
++import androidx.compose.ui.res.stringResource
  import androidx.compose.ui.unit.dp
-@@ -29,13 +30,14 @@
-  * Neden özel slider?
-  *
-  * Material3'ün hazır `Slider` / `RangeSlider` bileşenleri, dikey olarak kaydırılabilen
-- * (verticalScroll) bir sütunun içinde, daraltılmış yükseklikte (36-40dp) kullanıldığında
-- * bazı cihaz/sürüm kombinasyonlarında sürükleme (drag) hareketini yutuyor; sadece tek
-- * dokunuş (tap) çalışıyordu. Bu dosyadaki bileşenler dokunma + sürükleme davranışını
-- * TEK bir `pointerInput` bloğunda, `awaitEachGesture` ile baştan sona kendileri yönetir:
-- * parmak aşağı indiği an konum uygulanır, parmak kaydıkça her karede güncellenir,
-- * parmak kalkınca kesin değer gönderilir. Böylece hangi Compose/Material sürümü olursa
-- * olsun "sağa sola kaydırma" garantili çalışır.
-+ * (verticalScroll) bir sütunun içinde, daraltılmış yükseklikte kullanıldığında bazı
-+ * cihazlarda sürükleme (drag) hareketini yutuyor; yalnızca tek dokunuş çalışıyordu.
-+ *
-+ * ÇÖZÜM (bu sürüm): jest, [PointerEventPass.Initial] aşamasında yakalanır ve HER karede
-+ * tüketilir (consume). Initial aşaması yukarıdan aşağıya dağıtıldığı için, üstteki
-+ * kaydırılabilir kapsayıcı Main aşamasında olayı "tüketilmiş" görür ve kendi kaydırma
-+ * jestini iptal eder. Böylece parmak slider'ın üzerindeyken ekran kaymaz, slider
-+ * parmağı birebir takip eder. Tek dokunuş da aynı yoldan çalışır.
-  */
- @Composable
- fun MuxSeekSlider(
-@@ -49,9 +51,11 @@
-     inactiveColor: Color = Color(0x55FFFFFF),
-     trackHeight: Dp = 4.dp,
-     thumbRadius: Dp = 7.dp,
--    sliderHeight: Dp = 32.dp
-+    sliderHeight: Dp = 36.dp,
-+    enabled: Boolean = true
- ) {
-     val span = (endMs - startMs).coerceAtLeast(1L)
-+    // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
-     var dragFraction by remember { mutableFloatStateOf(-1f) }
++import androidx.core.view.WindowCompat
+ import com.example.muxmaster.data.AppPreferences
+ import com.example.muxmaster.data.RecentFiles
+ import com.example.muxmaster.data.DriveStreamResolver
+@@ -291,6 +302,14 @@
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
  
-     val onSeekState = rememberUpdatedState(onSeek)
-@@ -69,7 +73,8 @@
-         modifier = modifier
-             .fillMaxWidth()
-             .height(sliderHeight)
--            .pointerInput(startMs, endMs) {
-+            .pointerInput(enabled) {
-+                if (!enabled) return@pointerInput
-                 val thumbPx = thumbRadius.toPx()
- 
-                 fun fractionAt(x: Float): Float {
-@@ -83,7 +88,8 @@
-                     startState.value + (fraction * spanState.value.toFloat()).toLong()
- 
-                 awaitEachGesture {
--                    val down = awaitFirstDown(requireUnconsumed = false)
-+                    // Initial aşaması: üstteki verticalScroll bu olayları tüketilmiş görür.
-+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                     down.consume()
- 
-                     var fraction = fractionAt(down.position.x)
-@@ -93,22 +99,21 @@
-                     var lastPreviewAt = System.currentTimeMillis()
- 
-                     while (true) {
--                        val event = awaitPointerEvent()
-+                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                         fraction = fractionAt(change.position.x)
-                         dragFraction = fraction
-+                        change.consume()
-                         if (!change.pressed) {
-                             // Parmak kalktı: kesin hedefe tek seferde otur.
--                            change.consume()
-                             onSeekState.value(msAt(fraction))
-                             break
-                         }
-                         val now = System.currentTimeMillis()
--                        if (now - lastPreviewAt >= 90L) {
-+                        if (now - lastPreviewAt >= 70L) {
-                             lastPreviewAt = now
-                             onSeekState.value(msAt(fraction))
-                         }
--                        change.consume()
-                     }
-                     dragFraction = -1f
-                     onScrubState.value(false)
-@@ -146,6 +151,7 @@
- /**
-  * İki tutamaçlı (başlangıç + bitiş) aralık slider'ı. Her iki tutamaç da parmakla
-  * sürüklenebilir; tutamaçlardan uzak bir yere dokunulursa en yakın tutamaç oraya taşınır.
-+ * Jest yönetimi [MuxSeekSlider] ile aynıdır (Initial aşamasında tüketim).
-  */
- @Composable
- fun MuxRangeSlider(
-@@ -159,7 +165,7 @@
-     inactiveColor: Color = Color(0xFF2A2A35),
-     minGapMs: Long = 100L,
-     thumbRadius: Dp = 9.dp,
--    sliderHeight: Dp = 40.dp
-+    sliderHeight: Dp = 44.dp
- ) {
-     val safeDuration = durationMs.coerceAtLeast(minGapMs + 1L)
- 
-@@ -202,7 +208,7 @@
-                 }
- 
-                 awaitEachGesture {
--                    val down = awaitFirstDown(requireUnconsumed = false)
-+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                     down.consume()
- 
-                     val gap = gapState.value
-@@ -228,7 +234,7 @@
-                     onRangeState.value(s, e)
- 
-                     while (true) {
--                        val event = awaitPointerEvent()
-+                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                         val target = msAt(fractionAt(change.position.x))
-                         if (handle == 0) {
-@@ -284,7 +290,7 @@
- }
- 
- /**
-- * Tüm video süresini tek bir çubukta gösterir: korunacak (mavi/mor) ve kesilecek
-+ * Tüm video süresini tek bir çubukta gösterir: korunacak (mor) ve kesilecek
-  * (kırmızı) bölgeler ayrı renklerde çizilir, oynatıcının anlık konumu beyaz çizgiyle işaretlenir.
-  */
- @Composable
---- app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt	2026-11-09 17:04:15.000000000 +0000
-+++ app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt	2026-11-09 17:31:19.012709692 +0000
-@@ -197,7 +197,7 @@
-                     if (video != null) {
-                         // MAKAS: oynatıcının bulunduğu yerden yeni bir kesim aralığı ekler.
-                         IconButton(
--                            onClick = { viewModel.addCutRange(playheadRef.longValue) },
-+                            onClick = { viewModel.addCutRangeFromSelection(playheadRef.longValue) },
-                             enabled = !busy
-                         ) {
-                             Icon(
-@@ -313,10 +313,24 @@
-                         color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-                     )
-                     Spacer(Modifier.weight(1f))
--                    if (viewModel.isMultiCut) {
--                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
--                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
--                        }
-+                    // MAKAS: seçili aralığı (Başlangıç–Bitiş alanları) doğrudan
-+                    // "kesilecek aralık" yapar; çoklu kesim modunda yenisini ekler.
-+                    Row(
-+                        verticalAlignment = Alignment.CenterVertically,
-+                        modifier = Modifier
-+                            .clip(RoundedCornerShape(20.dp))
-+                            .background(Amber.copy(alpha = 0.14f))
-+                            .clickable(enabled = !viewModel.isTrimming) {
-+                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
++        // KENARDAN KENARA (edge-to-edge) — TAM EKRAN DÜZELTMESİ:
++        // Uygulama artık sistem çubuklarının (durum çubuğu / gezinme çubuğu) ARKASINA
++        // kadar çiziyor. Böylece üstteki panel gerçekten ekranın en üstüne kadar
++        // uzanıyor; başlık ve içerik ise her ekranda güvenli alan kadar içeride
++        // kalıyor (Scaffold/WindowInsets). Önceden Android 15+ ve bazı üretici
++        // ROM'larında içerik durum çubuğunun ALTINDA kalıp başlıkla çakışıyordu.
++        WindowCompat.setDecorFitsSystemWindows(window, false)
++
+         if (savedInstanceState == null &&
+             !muxViewModel.isMuxing && !trimViewModel.isTrimming &&
+             !converterViewModel.isConverting && !mergeViewModel.isMerging
+@@ -321,18 +340,17 @@
+                 if (askStorage.value) {
+                     AlertDialog(
+                         onDismissRequest = { askStorage.value = false },
+-                        title = { Text("Depolama izni") },
+-                        text = {
+-                            Text(
+-                                "Videoların önbelleğe kopyalanmadan, beklemeden doğrudan açılması için " +
+-                                    "\"Tüm dosyalara erişim\" iznini açın."
+-                            )
+-                        },
++                        title = { Text(stringResource(R.string.dialog_storage_title)) },
++                        text = { Text(stringResource(R.string.dialog_storage_text)) },
+                         confirmButton = {
+-                            TextButton(onClick = { askStorage.value = false; requestStorageAccess() }) { Text("İzin ver") }
++                            TextButton(onClick = { askStorage.value = false; requestStorageAccess() }) {
++                                Text(stringResource(R.string.dialog_storage_allow))
 +                            }
-+                            .padding(horizontal = 10.dp, vertical = 6.dp)
-+                    ) {
-+                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
-+                        Spacer(Modifier.width(6.dp))
-+                        Text(
-+                            if (viewModel.isMultiCut) "Aralık ekle" else "Makasla kes",
-+                            color = Amber, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
-+                        )
-                     }
-                 }
-                 Spacer(Modifier.height(8.dp))
-@@ -358,17 +372,27 @@
-                         shape = RoundedCornerShape(12.dp),
-                         border = BorderStroke(1.dp, Amber)
-                     ) {
--                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(18.dp))
-+                        Icon(Icons.Filled.Add, null, tint = Amber, modifier = Modifier.size(18.dp))
-                         Spacer(Modifier.width(8.dp))
-                         Text(
--                            "MAKASLA KESİM ARALIĞI EKLE",
-+                            "OYNADIĞI YERDEN 10 sn'LİK ARALIK EKLE",
-                             color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
-                         )
-                     }
--                    Spacer(Modifier.height(6.dp))
-+                    Spacer(Modifier.height(2.dp))
-+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-+                        Text(
-+                            "${viewModel.cutRanges.size} aralık çıkarılacak · Kalan " +
-+                                formatClock(viewModel.keptDurationMs),
-+                            color = TextSec, fontSize = 11.sp, modifier = Modifier.weight(1f)
-+                        )
-+                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
-+                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
-+                        }
-+                    }
-                     Text(
--                        "Her aralık ayrı ayrı kayıpsız kesilir, kalan parçalar sırayla birleştirilir. " +
--                            "Parça başlangıçları en yakın kare (keyframe) sınırına hizalanabilir.",
-+                        "Kırmızı aralıklar videodan çıkarılır, mor bölgeler sırayla birleştirilir. " +
-+                            "Kesim kayıpsızdır (yeniden kodlama yok).",
-                         color = TextMuted, fontSize = 10.sp
+                         },
+                         dismissButton = {
+-                            TextButton(onClick = { askStorage.value = false }) { Text("Şimdi değil") }
++                            TextButton(onClick = { askStorage.value = false }) {
++                                Text(stringResource(R.string.dialog_storage_later))
++                            }
+                         }
                      )
-                 } else {
-@@ -405,14 +429,15 @@
-                             .fillMaxWidth()
-                             .clip(RoundedCornerShape(10.dp))
-                             .clickable(enabled = !viewModel.isTrimming) {
--                                viewModel.addCutRange(playheadRef.longValue)
-+                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
-                             }
-                             .padding(horizontal = 4.dp, vertical = 6.dp)
-                     ) {
-                         Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
-                         Spacer(Modifier.width(8.dp))
-                         Text(
--                            "Birden fazla aralığı kesmek için makas (sağ üst) — kalanlar birleştirilir.",
-+                            "Makas (yukarıdaki) seçili aralığı kesim listesine ekler; " +
-+                                "birden fazla aralık kesilip kalanlar birleştirilir.",
-                             color = Amber, fontSize = 11.sp
-                         )
-                     }
---- app/src/main/java/com/example/muxmaster/ui/screens/HomeScreen.kt	2026-11-09 17:04:15.000000000 +0000
-+++ app/src/main/java/com/example/muxmaster/ui/screens/HomeScreen.kt	2026-11-09 17:30:38.738741355 +0000
-@@ -78,6 +78,8 @@
- private val HomeBgBottom = Color(0xFF08050F)
- private val HomeAccentText = Color(0xFFB9AEE6)
- private val HomeLink = Color(0xFFB9A6F7)
-+private val HomeCardBg = Color(0xFF171130)
-+private val HomeCardStroke = Color(0xFF2A2150)
+                 }
+@@ -371,6 +389,25 @@
+                     )
+                 }
  
- /**
-  * UYGULAMANIN ANA EKRANI.
-@@ -147,7 +149,7 @@
-                         Icon(Icons.Filled.Settings, "Ayarlar", tint = Color(0xFFCFC6F5))
-                     }
-                 }
--                Spacer(Modifier.height(18.dp))
-+                Spacer(Modifier.height(16.dp))
-             }
- 
-             item {
-@@ -159,17 +161,19 @@
-                         title = "Mux",
-                         subtitle = "Ses ve altyazı\nparçalarını ayır",
-                         icon = Icons.Filled.Extension,
--                        gradient = listOf(Color(0xFF7C3AED), Color(0xFF4C1D95)),
-+                        gradient = listOf(Color(0xFF8B3DFF), Color(0xFF4C1D95)),
-+                        glow = Color(0xFFB388FF),
-                         onClick = onOpenMux,
--                        modifier = Modifier.weight(1f).height(154.dp)
-+                        modifier = Modifier.weight(1f).height(160.dp)
-                     )
-                     FeatureCard(
-                         title = "Kes",
-                         subtitle = "Videoyu kes",
-                         icon = Icons.Filled.ContentCut,
--                        gradient = listOf(Color(0xFF0F766E), Color(0xFF0B3B48)),
-+                        gradient = listOf(Color(0xFF0E8A86), Color(0xFF0B3B48)),
-+                        glow = Color(0xFF4DE3DC),
-                         onClick = onOpenTrim,
--                        modifier = Modifier.weight(1f).height(154.dp)
-+                        modifier = Modifier.weight(1f).height(160.dp)
-                     )
-                 }
-                 Spacer(Modifier.height(12.dp))
-@@ -181,20 +185,22 @@
-                         title = "Birleştir",
-                         subtitle = "Videoları birleştir",
-                         icon = Icons.Filled.Link,
--                        gradient = listOf(Color(0xFF1D4ED8), Color(0xFF0B2A6B)),
-+                        gradient = listOf(Color(0xFF1F5BE0), Color(0xFF0B2A6B)),
-+                        glow = Color(0xFF7FB0FF),
-                         onClick = onOpenMerge,
--                        modifier = Modifier.weight(1f).height(154.dp)
-+                        modifier = Modifier.weight(1f).height(160.dp)
-                     )
-                     FeatureCard(
-                         title = "Oynatıcı",
-                         subtitle = "Medyanızı oynat",
-                         icon = Icons.Filled.PlayCircle,
--                        gradient = listOf(Color(0xFFEA580C), Color(0xFF7C2D12)),
-+                        gradient = listOf(Color(0xFFF97316), Color(0xFF7C2D12)),
-+                        glow = Color(0xFFFFC46B),
-                         onClick = onOpenPlayer,
--                        modifier = Modifier.weight(1f).height(154.dp)
-+                        modifier = Modifier.weight(1f).height(160.dp)
-                     )
-                 }
--                Spacer(Modifier.height(12.dp))
-+                Spacer(Modifier.height(14.dp))
-             }
- 
-             item {
-@@ -202,24 +208,32 @@
-                     verticalAlignment = Alignment.CenterVertically,
-                     modifier = Modifier
-                         .fillMaxWidth()
--                        .height(92.dp)
-+                        .height(90.dp)
-                         .clip(RoundedCornerShape(22.dp))
-                         .background(
-                             Brush.horizontalGradient(
--                                listOf(Color(0xFF6D28D9), Color(0xFF8B5CF6))
-+                                listOf(Color(0xFF6D28D9), Color(0xFF9B5CF6))
-                             )
-                         )
--                        .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(22.dp))
-+                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
-                         .clickable(onClick = onOpenConverter)
--                        .padding(horizontal = 18.dp)
-+                        .padding(horizontal = 16.dp)
-                 ) {
--                    Icon(
--                        Icons.Filled.GraphicEq,
--                        null,
--                        tint = Color.White,
--                        modifier = Modifier.size(40.dp)
--                    )
--                    Spacer(Modifier.width(16.dp))
-+                    Box(
-+                        modifier = Modifier
-+                            .size(52.dp)
-+                            .clip(RoundedCornerShape(16.dp))
-+                            .background(Color.White.copy(alpha = 0.16f)),
-+                        contentAlignment = Alignment.Center
-+                    ) {
-+                        Icon(
-+                            Icons.Filled.GraphicEq,
-+                            null,
-+                            tint = Color.White,
-+                            modifier = Modifier.size(30.dp)
-+                        )
++                // ── YUMUŞAK DÖNME GEÇİŞİ ──────────────────────────────────────
++                // Cihaz yatay/dikey çevrildiğinde yerleşim anında değişiyordu ("çat"
++                // etkisi). Artık dönme anında tam ekran bir perde kısa süreliğine
++                // kapanıp yumuşakça açılıyor: geçiş akıcı görünüyor, kare kaybı yok.
++                // Perde sadece GPU'da saydamlık olarak çizilir (alpha, draw fazında
++                // okunur) — yeniden kompozisyon, ek kare üretimi veya CPU yükü yok.
++                val orientation = LocalConfiguration.current.orientation
++                val rotationScrim = remember { Animatable(0f) }
++                var firstOrientation by remember { mutableStateOf(true) }
++                LaunchedEffect(orientation) {
++                    if (firstOrientation) {
++                        firstOrientation = false
++                    } else {
++                        rotationScrim.snapTo(0.75f)
++                        rotationScrim.animateTo(0f, animationSpec = tween(220, easing = LinearOutSlowInEasing))
 +                    }
-+                    Spacer(Modifier.width(14.dp))
-                     Column(modifier = Modifier.weight(1f)) {
-                         Text(
-                             "Ses Dönüştürme",
-@@ -229,16 +243,24 @@
-                         )
-                         Text(
-                             "Sesi başka bir formata dönüştür",
--                            color = Color.White.copy(alpha = 0.85f),
-+                            color = Color.White.copy(alpha = 0.88f),
-                             fontSize = 12.sp
-                         )
-                     }
--                    Icon(
--                        Icons.Filled.ChevronRight,
--                        null,
--                        tint = Color.White,
--                        modifier = Modifier.size(26.dp)
--                    )
-+                    Box(
-+                        modifier = Modifier
-+                            .size(34.dp)
-+                            .clip(RoundedCornerShape(50))
-+                            .background(Color.White.copy(alpha = 0.18f)),
-+                        contentAlignment = Alignment.Center
-+                    ) {
-+                        Icon(
-+                            Icons.Filled.ChevronRight,
-+                            null,
-+                            tint = Color.White,
-+                            modifier = Modifier.size(22.dp)
-+                        )
-+                    }
++                }
++
++                Box(modifier = Modifier.fillMaxSize()) {
+                 when (screen) {
+                     0 -> MuxScreen(
+                         viewModel = muxViewModel,
+@@ -482,6 +519,15 @@
+                         }
+                     )
                  }
-                 Spacer(Modifier.height(22.dp))
++
++                // Dönme perdesi (dokunma olaylarını yakalamaz, sadece görsel).
++                Box(
++                    modifier = Modifier
++                        .fillMaxSize()
++                        .background(Color.Black)
++                        .graphicsLayer { alpha = rotationScrim.value }
++                )
++                }
              }
-@@ -284,8 +306,8 @@
-                         modifier = Modifier
-                             .fillMaxWidth()
-                             .clip(RoundedCornerShape(16.dp))
--                            .background(Color(0xFF171130))
--                            .border(1.dp, Color(0xFF2A2150), RoundedCornerShape(16.dp))
-+                            .background(HomeCardBg)
-+                            .border(1.dp, HomeCardStroke, RoundedCornerShape(16.dp))
-                             .padding(vertical = 22.dp, horizontal = 16.dp)
-                     ) {
-                         Icon(
-@@ -393,44 +415,67 @@
+         }
      }
- }
- 
-+/**
-+ * Ana ekran kartı: gradyan zemin + arkada yumuşak ışık halkası + ortalanmış ikon/başlık.
-+ * Dokunma alanı kartın tamamıdır (tek dokunuşla ilgili ekran açılır).
-+ */
- @Composable
- private fun FeatureCard(
-     title: String,
-     subtitle: String,
-     icon: ImageVector,
-     gradient: List<Color>,
-+    glow: Color,
-     onClick: () -> Unit,
-     modifier: Modifier = Modifier
+@@ -569,22 +615,22 @@
  ) {
--    Column(
--        horizontalAlignment = Alignment.CenterHorizontally,
--        verticalArrangement = Arrangement.Center,
-+    Box(
-         modifier = modifier
--            .clip(RoundedCornerShape(22.dp))
-+            .clip(RoundedCornerShape(24.dp))
-             .background(Brush.linearGradient(gradient))
--            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(22.dp))
-+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
-             .clickable(onClick = onClick)
--            .padding(horizontal = 10.dp, vertical = 14.dp)
-     ) {
--        Icon(icon, null, tint = Color.White, modifier = Modifier.size(42.dp))
--        Spacer(Modifier.height(10.dp))
--        Text(
--            title,
--            color = Color.White,
--            fontSize = 19.sp,
--            fontWeight = FontWeight.Bold,
--            textAlign = TextAlign.Center
--        )
--        Spacer(Modifier.height(4.dp))
--        Text(
--            subtitle,
--            color = Color.White.copy(alpha = 0.82f),
--            fontSize = 12.sp,
--            lineHeight = 15.sp,
--            textAlign = TextAlign.Center,
--            maxLines = 2,
--            overflow = TextOverflow.Ellipsis
--        )
-+        Canvas(modifier = Modifier.matchParentSize()) {
-+            val center = Offset(size.width / 2f, size.height * 0.34f)
-+            val radius = size.minDimension * 0.72f
-+            drawCircle(
-+                brush = Brush.radialGradient(
-+                    colors = listOf(glow.copy(alpha = 0.40f), Color.Transparent),
-+                    center = center,
-+                    radius = radius
-+                ),
-+                radius = radius,
-+                center = center
-+            )
-+        }
-+        Column(
-+            horizontalAlignment = Alignment.CenterHorizontally,
-+            verticalArrangement = Arrangement.Center,
-+            modifier = Modifier
-+                .fillMaxSize()
-+                .padding(horizontal = 10.dp, vertical = 14.dp)
-+        ) {
-+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(44.dp))
-+            Spacer(Modifier.height(10.dp))
-+            Text(
-+                title,
-+                color = Color.White,
-+                fontSize = 20.sp,
-+                fontWeight = FontWeight.Bold,
-+                textAlign = TextAlign.Center
-+            )
-+            Spacer(Modifier.height(4.dp))
-+            Text(
-+                subtitle,
-+                color = Color.White.copy(alpha = 0.85f),
-+                fontSize = 12.sp,
-+                lineHeight = 15.sp,
-+                textAlign = TextAlign.Center,
-+                maxLines = 2,
-+                overflow = TextOverflow.Ellipsis
-+            )
-+        }
-     }
+     AlertDialog(
+         onDismissRequest = onDismiss,
+-        title = { Text("Videoyu nasıl oynatmak istiyorsunuz?") },
++        title = { Text(stringResource(R.string.dialog_play_how_title)) },
+         text = {
+             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                 Text(fileName, maxLines = 2)
+                 OutlinedButton(onClick = onPlaySingle, modifier = Modifier.fillMaxWidth()) {
+                     Icon(Icons.Filled.PlayCircle, null, modifier = Modifier.padding(end = 10.dp))
+-                    Text("Tek video olarak oynat", modifier = Modifier.weight(1f))
++                    Text(stringResource(R.string.dialog_play_single), modifier = Modifier.weight(1f))
+                 }
+                 OutlinedButton(onClick = onPlayMulti, modifier = Modifier.fillMaxWidth()) {
+                     Icon(Icons.Filled.GridView, null, modifier = Modifier.padding(end = 10.dp))
+-                    Text("Çoklu videoya ekle (Multi Video)", modifier = Modifier.weight(1f))
++                    Text(stringResource(R.string.dialog_play_multi), modifier = Modifier.weight(1f))
+                 }
+             }
+         },
+         confirmButton = {},
+-        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
++        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } }
+     )
  }
  
-@@ -449,15 +494,15 @@
-         modifier = Modifier
-             .fillMaxWidth()
-             .clip(RoundedCornerShape(14.dp))
--            .background(Color(0xFF171130))
--            .border(1.dp, Color(0xFF2A2150), RoundedCornerShape(14.dp))
-+            .background(HomeCardBg)
-+            .border(1.dp, HomeCardStroke, RoundedCornerShape(14.dp))
-             .clickable(onClick = onOpen)
-             .padding(horizontal = 8.dp, vertical = 8.dp)
-     ) {
-         Box(
-             modifier = Modifier
--                .size(width = 62.dp, height = 46.dp)
--                .clip(RoundedCornerShape(9.dp))
-+                .size(width = 64.dp, height = 48.dp)
-+                .clip(RoundedCornerShape(10.dp))
-                 .background(
-                     Brush.linearGradient(listOf(Color(0xFF3B2A6B), Color(0xFF221640)))
-                 ),
-@@ -484,12 +529,12 @@
-             Text(
-                 item.name,
-                 color = Color.White,
--                fontSize = 14.sp,
-+                fontSize = 15.sp,
-                 fontWeight = FontWeight.SemiBold,
-                 maxLines = 1,
-                 overflow = TextOverflow.Ellipsis
-             )
--            Spacer(Modifier.height(2.dp))
-+            Spacer(Modifier.height(3.dp))
-             Text(
-                 buildRecentSubtitle(item.lastUsedMs, durationMs),
-                 color = HomeAccentText,
-@@ -551,4 +596,4 @@
-     } else {
-         String.format(Locale.US, "%02d:%02d", minutes, seconds)
+@@ -608,19 +654,19 @@
      }
--}
-\ No newline at end of file
-+}
---- app/src/main/java/com/example/muxmaster/viewmodel/TrimViewModel.kt	2026-11-09 17:04:15.000000000 +0000
-+++ app/src/main/java/com/example/muxmaster/viewmodel/TrimViewModel.kt	2026-11-09 17:30:07.688226230 +0000
-@@ -147,6 +147,26 @@
-         cutRanges = (cutRanges + window).sortedBy { it.startMs }
+     AlertDialog(
+         onDismissRequest = onDismiss,
+-        title = { Text("Ne yapmak istiyorsunuz?") },
++        title = { Text(stringResource(R.string.dialog_open_with_title)) },
+         text = {
+             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                 Text(fileName, maxLines = 2)
+-                Choice(Icons.Filled.PlayCircle, "Oynat (video oynatıcı)", onPlaySingle)
+-                Choice(Icons.Filled.GridView, "Çoklu Oynat (Multi Video)", onPlayMulti)
+-                Choice(Icons.Filled.Layers, "Mux Master (ses / altyazı ekle-çıkar)", onMux)
+-                Choice(Icons.Filled.ContentCut, "Kırp / Kes", onTrim)
+-                Choice(Icons.Filled.CallMerge, "Birleştir", onMerge)
+-                Choice(Icons.Filled.GraphicEq, "Sesi dönüştür", onConvert)
++                Choice(Icons.Filled.PlayCircle, stringResource(R.string.open_with_play), onPlaySingle)
++                Choice(Icons.Filled.GridView, stringResource(R.string.open_with_multi), onPlayMulti)
++                Choice(Icons.Filled.Layers, stringResource(R.string.open_with_mux), onMux)
++                Choice(Icons.Filled.ContentCut, stringResource(R.string.open_with_trim), onTrim)
++                Choice(Icons.Filled.CallMerge, stringResource(R.string.open_with_merge), onMerge)
++                Choice(Icons.Filled.GraphicEq, stringResource(R.string.open_with_convert), onConvert)
+             }
+         },
+         confirmButton = {},
+-        dismissButton = { TextButton(onClick = onDismiss) { Text("İptal") } }
++        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } }
+     )
+ }
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/data/InputAccess.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/data/InputAccess.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/data/InputAccess.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/data/InputAccess.kt	2026-11-10 13:25:36.059478599 +0000
+@@ -46,6 +46,17 @@
+         return copyToCache(context, uri, copyDir, copyName)
      }
  
 +    /**
-+     * MAKAS düğmesi: Başlangıç–Bitiş alanlarında seçili aralık varsa ONU kesilecek
-+     * aralık olarak ekler (kullanıcı slider'la seçtiği bölümü tek dokunuşla çıkarır).
-+     * Seçim anlamlı değilse (çok kısa ya da videonun tamamı) oynatıcının bulunduğu
-+     * yerden varsayılan uzunlukta bir aralık eklenir.
++     * Yalnızca KOPYALAMADAN okunabilen bir yol döndürür; kopya gerekiyorsa null.
++     *
++     * Arka planda yapılan ön hazırlık (önbelleğe alma) için kullanılır: büyük bir
++     * videoyu sırf meta bilgisini okumak için önbelleğe kopyalamaya kalkmaz.
 +     */
-+    fun addCutRangeFromSelection(playheadMs: Long) {
-+        val dur = videoFile?.durationMs ?: return
-+        if (dur <= MIN_CUT_MS || isTrimming) return
-+        val s = trimStartMs.coerceIn(0L, dur)
-+        val e = trimEndMs.coerceIn(0L, dur)
-+        val len = e - s
-+        val usable = len >= MIN_SELECTION_MS && len <= dur - 400L
-+        if (usable) {
-+            cutRanges = (cutRanges + TimeRange(s, e)).sortedBy { it.startMs }
-+        } else {
-+            addCutRange(playheadMs)
++    fun acquireNoCopy(context: Context, uri: Uri): String? {
++        realPath(context, uri)?.let { realPaths.add(it); return it }
++        return direct(context, uri, needChildRead = false)
++    }
++
+     /** URI'yi cihazdaki gerçek dosya yoluna çevirir (okunabiliyorsa). */
+     fun realPath(context: Context, uri: Uri): String? {
+         val candidates = mutableListOf<String>()
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt	2026-11-10 13:26:43.055196150 +0000
+@@ -3,6 +3,7 @@
+ import androidx.compose.foundation.Canvas
+ import androidx.compose.foundation.gestures.awaitEachGesture
+ import androidx.compose.foundation.gestures.awaitFirstDown
++import androidx.compose.foundation.gestures.detectTapGestures
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.runtime.Composable
+@@ -301,12 +302,29 @@
+     modifier: Modifier = Modifier,
+     keepColor: Color = Color(0xFF7C6FE0),
+     cutColor: Color = Color(0xFFE24B4A),
+-    height: Dp = 34.dp
++    height: Dp = 34.dp,
++    onTapMs: ((Long) -> Unit)? = null
+ ) {
+     Canvas(
+         modifier = modifier
+             .fillMaxWidth()
+             .height(height)
++            .then(
++                if (onTapMs == null) {
++                    Modifier
++                } else {
++                    Modifier.pointerInput(durationMs, onTapMs) {
++                        // Tek dokunuş: çubuğun dokunulan yerine atla (hızlı kesim akışı).
++                        detectTapGestures { offset ->
++                            val w = size.width.toFloat()
++                            if (w > 0f) {
++                                val fraction = (offset.x / w).coerceIn(0f, 1f)
++                                onTapMs((fraction * durationMs.toFloat()).toLong())
++                            }
++                        }
++                    }
++                }
++            )
+     ) {
+         val total = durationMs.coerceAtLeast(1L).toFloat()
+         val barHeight = 16.dp.toPx()
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/HomeScreen.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/HomeScreen.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/HomeScreen.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/HomeScreen.kt	2026-11-10 13:24:01.881166369 +0000
+@@ -9,16 +9,21 @@
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Arrangement
+ import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.BoxWithConstraints
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.PaddingValues
+ import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.asPaddingValues
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.safeDrawing
+ import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.layout.widthIn
++import androidx.compose.foundation.layout.WindowInsets
+ import androidx.compose.foundation.lazy.LazyColumn
+ import androidx.compose.foundation.lazy.items
+ import androidx.compose.foundation.shape.RoundedCornerShape
+@@ -58,11 +63,14 @@
+ import androidx.compose.ui.graphics.vector.ImageVector
+ import androidx.compose.ui.layout.ContentScale
+ import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.text.font.FontWeight
+ import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.Dp
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
++import com.example.muxmaster.R
+ import com.example.muxmaster.data.MediaThumbs
+ import com.example.muxmaster.data.RecentFiles
+ import com.example.muxmaster.data.RecentMedia
+@@ -86,7 +94,15 @@
+  *
+  * Büyük, tek dokunuşla erişilebilen kartlar: Mux · Kes · Birleştir · Oynatıcı,
+  * altında tam genişlikte "Ses Dönüştürme" kartı ve "Son Dosyalar" listesi.
+- * Kartlara dokunulduğunda ilgili ekran, hiçbir ayar bozulmadan açılır.
++ *
++ * Duyarlı (responsive) yerleşim:
++ * - Dikey telefonda 2×2 kart ızgarası.
++ * - Yatay modda / tablette 4 kart TEK satırda, daha alçak kart + daha küçük ikon;
++ *   içerik ortalanır ve [MAX_CONTENT_WIDE] ile sınırlanır (ekran ne kadar geniş
++ *   olursa olsun arayüz dağılmaz, simgeler devleşmez).
++ *
++ * Yazıların tamamı `strings.xml`'den gelir: Ayarlar'dan dil değiştirildiğinde ana
++ * ekran da anında o dile geçer.
+  */
+ @Composable
+ fun HomeScreen(
+@@ -123,226 +139,318 @@
+         }
+     }
+ 
+-    Box(modifier = Modifier.fillMaxSize()) {
++    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
++        // Yatay mod / tablet: geniş ve alçak ekran.
++        val wide = maxWidth > maxHeight || maxWidth >= 600.dp
++        val contentMaxWidth = if (wide) 780.dp else 640.dp
++        val cardHeight = if (wide) 126.dp else 160.dp
++        val iconSize = if (wide) 34.dp else 44.dp
++        val cardTitleSp = if (wide) 17 else 20
++        val cardSubSp = if (wide) 11 else 12
++        val converterHeight = if (wide) 74.dp else 90.dp
++        val insets = WindowInsets.safeDrawing.asPaddingValues()
++
+         HomeBackdrop(Modifier.fillMaxSize())
+ 
+-        LazyColumn(
+-            modifier = Modifier.fillMaxSize(),
+-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 28.dp)
+-        ) {
+-            item {
+-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+-                    Column(modifier = Modifier.weight(1f)) {
+-                        Text(
+-                            "MuxMaster",
+-                            color = Color.White,
+-                            fontSize = 23.sp,
+-                            fontWeight = FontWeight.Bold
+-                        )
+-                        Text(
+-                            "Video ve ses araçların",
+-                            color = HomeAccentText,
+-                            fontSize = 12.sp
+-                        )
+-                    }
+-                    IconButton(onClick = onOpenSettings) {
+-                        Icon(Icons.Filled.Settings, "Ayarlar", tint = Color(0xFFCFC6F5))
++        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
++            LazyColumn(
++                modifier = Modifier
++                    .widthIn(max = contentMaxWidth)
++                    .fillMaxWidth(),
++                contentPadding = PaddingValues(
++                    start = 16.dp,
++                    end = 16.dp,
++                    top = 10.dp + insets.calculateTopPadding(),
++                    bottom = 28.dp + insets.calculateBottomPadding()
++                )
++            ) {
++                item {
++                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
++                        Column(modifier = Modifier.weight(1f)) {
++                            Text(
++                                "MuxMaster",
++                                color = Color.White,
++                                fontSize = 23.sp,
++                                fontWeight = FontWeight.Bold
++                            )
++                            Text(
++                                stringResource(R.string.home_tagline),
++                                color = HomeAccentText,
++                                fontSize = 12.sp
++                            )
++                        }
++                        IconButton(onClick = onOpenSettings) {
++                            Icon(
++                                Icons.Filled.Settings,
++                                stringResource(R.string.home_settings_desc),
++                                tint = Color(0xFFCFC6F5)
++                            )
++                        }
+                     }
++                    Spacer(Modifier.height(if (wide) 10.dp else 16.dp))
+                 }
+-                Spacer(Modifier.height(16.dp))
+-            }
+ 
+-            item {
+-                Row(
+-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+-                    modifier = Modifier.fillMaxWidth()
+-                ) {
+-                    FeatureCard(
+-                        title = "Mux",
+-                        subtitle = "Ses ve altyazı\nparçalarını ayır",
+-                        icon = Icons.Filled.Extension,
+-                        gradient = listOf(Color(0xFF8B3DFF), Color(0xFF4C1D95)),
+-                        glow = Color(0xFFB388FF),
+-                        onClick = onOpenMux,
+-                        modifier = Modifier.weight(1f).height(160.dp)
+-                    )
+-                    FeatureCard(
+-                        title = "Kes",
+-                        subtitle = "Videoyu kes",
+-                        icon = Icons.Filled.ContentCut,
+-                        gradient = listOf(Color(0xFF0E8A86), Color(0xFF0B3B48)),
+-                        glow = Color(0xFF4DE3DC),
+-                        onClick = onOpenTrim,
+-                        modifier = Modifier.weight(1f).height(160.dp)
+-                    )
+-                }
+-                Spacer(Modifier.height(12.dp))
+-                Row(
+-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+-                    modifier = Modifier.fillMaxWidth()
+-                ) {
+-                    FeatureCard(
+-                        title = "Birleştir",
+-                        subtitle = "Videoları birleştir",
+-                        icon = Icons.Filled.Link,
+-                        gradient = listOf(Color(0xFF1F5BE0), Color(0xFF0B2A6B)),
+-                        glow = Color(0xFF7FB0FF),
+-                        onClick = onOpenMerge,
+-                        modifier = Modifier.weight(1f).height(160.dp)
+-                    )
+-                    FeatureCard(
+-                        title = "Oynatıcı",
+-                        subtitle = "Medyanızı oynat",
+-                        icon = Icons.Filled.PlayCircle,
+-                        gradient = listOf(Color(0xFFF97316), Color(0xFF7C2D12)),
+-                        glow = Color(0xFFFFC46B),
+-                        onClick = onOpenPlayer,
+-                        modifier = Modifier.weight(1f).height(160.dp)
+-                    )
+-                }
+-                Spacer(Modifier.height(14.dp))
+-            }
+-
+-            item {
+-                Row(
+-                    verticalAlignment = Alignment.CenterVertically,
+-                    modifier = Modifier
+-                        .fillMaxWidth()
+-                        .height(90.dp)
+-                        .clip(RoundedCornerShape(22.dp))
+-                        .background(
+-                            Brush.horizontalGradient(
+-                                listOf(Color(0xFF6D28D9), Color(0xFF9B5CF6))
++                item {
++                    if (wide) {
++                        // Yatay mod: dört kart tek satırda, alçak ve dengeli.
++                        Row(
++                            horizontalArrangement = Arrangement.spacedBy(10.dp),
++                            modifier = Modifier.fillMaxWidth()
++                        ) {
++                            FeatureCard(
++                                title = stringResource(R.string.home_mux_title),
++                                subtitle = stringResource(R.string.home_mux_sub),
++                                icon = Icons.Filled.Extension,
++                                gradient = listOf(Color(0xFF8B3DFF), Color(0xFF4C1D95)),
++                                glow = Color(0xFFB388FF),
++                                onClick = onOpenMux,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
+                             )
+-                        )
+-                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
+-                        .clickable(onClick = onOpenConverter)
+-                        .padding(horizontal = 16.dp)
+-                ) {
+-                    Box(
+-                        modifier = Modifier
+-                            .size(52.dp)
+-                            .clip(RoundedCornerShape(16.dp))
+-                            .background(Color.White.copy(alpha = 0.16f)),
+-                        contentAlignment = Alignment.Center
+-                    ) {
+-                        Icon(
+-                            Icons.Filled.GraphicEq,
+-                            null,
+-                            tint = Color.White,
+-                            modifier = Modifier.size(30.dp)
+-                        )
+-                    }
+-                    Spacer(Modifier.width(14.dp))
+-                    Column(modifier = Modifier.weight(1f)) {
+-                        Text(
+-                            "Ses Dönüştürme",
+-                            color = Color.White,
+-                            fontSize = 19.sp,
+-                            fontWeight = FontWeight.Bold
+-                        )
+-                        Text(
+-                            "Sesi başka bir formata dönüştür",
+-                            color = Color.White.copy(alpha = 0.88f),
+-                            fontSize = 12.sp
+-                        )
+-                    }
+-                    Box(
+-                        modifier = Modifier
+-                            .size(34.dp)
+-                            .clip(RoundedCornerShape(50))
+-                            .background(Color.White.copy(alpha = 0.18f)),
+-                        contentAlignment = Alignment.Center
+-                    ) {
+-                        Icon(
+-                            Icons.Filled.ChevronRight,
+-                            null,
+-                            tint = Color.White,
+-                            modifier = Modifier.size(22.dp)
+-                        )
++                            FeatureCard(
++                                title = stringResource(R.string.home_trim_title),
++                                subtitle = stringResource(R.string.home_trim_sub),
++                                icon = Icons.Filled.ContentCut,
++                                gradient = listOf(Color(0xFF0E8A86), Color(0xFF0B3B48)),
++                                glow = Color(0xFF4DE3DC),
++                                onClick = onOpenTrim,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                            FeatureCard(
++                                title = stringResource(R.string.home_merge_title),
++                                subtitle = stringResource(R.string.home_merge_sub),
++                                icon = Icons.Filled.Link,
++                                gradient = listOf(Color(0xFF1F5BE0), Color(0xFF0B2A6B)),
++                                glow = Color(0xFF7FB0FF),
++                                onClick = onOpenMerge,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                            FeatureCard(
++                                title = stringResource(R.string.home_player_title),
++                                subtitle = stringResource(R.string.home_player_sub),
++                                icon = Icons.Filled.PlayCircle,
++                                gradient = listOf(Color(0xFFF97316), Color(0xFF7C2D12)),
++                                glow = Color(0xFFFFC46B),
++                                onClick = onOpenPlayer,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                        }
++                    } else {
++                        Row(
++                            horizontalArrangement = Arrangement.spacedBy(12.dp),
++                            modifier = Modifier.fillMaxWidth()
++                        ) {
++                            FeatureCard(
++                                title = stringResource(R.string.home_mux_title),
++                                subtitle = stringResource(R.string.home_mux_sub),
++                                icon = Icons.Filled.Extension,
++                                gradient = listOf(Color(0xFF8B3DFF), Color(0xFF4C1D95)),
++                                glow = Color(0xFFB388FF),
++                                onClick = onOpenMux,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                            FeatureCard(
++                                title = stringResource(R.string.home_trim_title),
++                                subtitle = stringResource(R.string.home_trim_sub),
++                                icon = Icons.Filled.ContentCut,
++                                gradient = listOf(Color(0xFF0E8A86), Color(0xFF0B3B48)),
++                                glow = Color(0xFF4DE3DC),
++                                onClick = onOpenTrim,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                        }
++                        Spacer(Modifier.height(12.dp))
++                        Row(
++                            horizontalArrangement = Arrangement.spacedBy(12.dp),
++                            modifier = Modifier.fillMaxWidth()
++                        ) {
++                            FeatureCard(
++                                title = stringResource(R.string.home_merge_title),
++                                subtitle = stringResource(R.string.home_merge_sub),
++                                icon = Icons.Filled.Link,
++                                gradient = listOf(Color(0xFF1F5BE0), Color(0xFF0B2A6B)),
++                                glow = Color(0xFF7FB0FF),
++                                onClick = onOpenMerge,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                            FeatureCard(
++                                title = stringResource(R.string.home_player_title),
++                                subtitle = stringResource(R.string.home_player_sub),
++                                icon = Icons.Filled.PlayCircle,
++                                gradient = listOf(Color(0xFFF97316), Color(0xFF7C2D12)),
++                                glow = Color(0xFFFFC46B),
++                                onClick = onOpenPlayer,
++                                iconSize = iconSize,
++                                titleSp = cardTitleSp,
++                                subtitleSp = cardSubSp,
++                                modifier = Modifier.weight(1f).height(cardHeight)
++                            )
++                        }
+                     }
++                    Spacer(Modifier.height(14.dp))
+                 }
+-                Spacer(Modifier.height(22.dp))
+-            }
+ 
+-            item {
+-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+-                    Text(
+-                        "Son Dosyalar",
+-                        color = Color.White,
+-                        fontSize = 20.sp,
+-                        fontWeight = FontWeight.Bold,
+-                        modifier = Modifier.weight(1f)
+-                    )
++                item {
+                     Row(
+                         verticalAlignment = Alignment.CenterVertically,
+                         modifier = Modifier
+-                            .clip(RoundedCornerShape(8.dp))
+-                            .clickable(onClick = onShowAllFiles)
+-                            .padding(horizontal = 6.dp, vertical = 4.dp)
++                            .fillMaxWidth()
++                            .height(converterHeight)
++                            .clip(RoundedCornerShape(22.dp))
++                            .background(
++                                Brush.horizontalGradient(
++                                    listOf(Color(0xFF6D28D9), Color(0xFF9B5CF6))
++                                )
++                            )
++                            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(22.dp))
++                            .clickable(onClick = onOpenConverter)
++                            .padding(horizontal = 16.dp)
+                     ) {
+-                        Text(
+-                            "Tümünü Gör",
+-                            color = HomeLink,
+-                            fontSize = 13.sp,
+-                            fontWeight = FontWeight.SemiBold
+-                        )
+-                        Spacer(Modifier.width(4.dp))
+-                        Icon(
+-                            Icons.Filled.ArrowForward,
+-                            null,
+-                            tint = HomeLink,
+-                            modifier = Modifier.size(16.dp)
+-                        )
++                        Box(
++                            modifier = Modifier
++                                .size(if (wide) 44.dp else 52.dp)
++                                .clip(RoundedCornerShape(16.dp))
++                                .background(Color.White.copy(alpha = 0.16f)),
++                            contentAlignment = Alignment.Center
++                        ) {
++                            Icon(
++                                Icons.Filled.GraphicEq,
++                                null,
++                                tint = Color.White,
++                                modifier = Modifier.size(if (wide) 26.dp else 30.dp)
++                            )
++                        }
++                        Spacer(Modifier.width(14.dp))
++                        Column(modifier = Modifier.weight(1f)) {
++                            Text(
++                                stringResource(R.string.home_converter_title),
++                                color = Color.White,
++                                fontSize = if (wide) 17.sp else 19.sp,
++                                fontWeight = FontWeight.Bold
++                            )
++                            Text(
++                                stringResource(R.string.home_converter_sub),
++                                color = Color.White.copy(alpha = 0.88f),
++                                fontSize = 12.sp
++                            )
++                        }
++                        Box(
++                            modifier = Modifier
++                                .size(34.dp)
++                                .clip(RoundedCornerShape(50))
++                                .background(Color.White.copy(alpha = 0.18f)),
++                            contentAlignment = Alignment.Center
++                        ) {
++                            Icon(
++                                Icons.Filled.ChevronRight,
++                                null,
++                                tint = Color.White,
++                                modifier = Modifier.size(22.dp)
++                            )
++                        }
+                     }
++                    Spacer(Modifier.height(if (wide) 14.dp else 22.dp))
+                 }
+-                Spacer(Modifier.height(10.dp))
+-            }
+ 
+-            if (recents.isEmpty()) {
+                 item {
+-                    Column(
+-                        horizontalAlignment = Alignment.CenterHorizontally,
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .clip(RoundedCornerShape(16.dp))
+-                            .background(HomeCardBg)
+-                            .border(1.dp, HomeCardStroke, RoundedCornerShape(16.dp))
+-                            .padding(vertical = 22.dp, horizontal = 16.dp)
+-                    ) {
+-                        Icon(
+-                            Icons.Filled.Movie,
+-                            null,
+-                            tint = Color(0xFF6D5AA8),
+-                            modifier = Modifier.size(30.dp)
+-                        )
+-                        Spacer(Modifier.height(8.dp))
+-                        Text(
+-                            "Henüz dosya açmadın",
+-                            color = Color.White.copy(alpha = 0.85f),
+-                            fontSize = 13.sp,
+-                            fontWeight = FontWeight.SemiBold
+-                        )
++                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                         Text(
+-                            "Açtığın videolar burada listelenir.",
+-                            color = HomeAccentText,
+-                            fontSize = 11.sp
+-                        )
++                            stringResource(R.string.home_recent_title),
++                            color = Color.White,
++                            fontSize = 20.sp,
++                            fontWeight = FontWeight.Bold,
++                            modifier = Modifier.weight(1f)
++                        )
++                        Row(
++                            verticalAlignment = Alignment.CenterVertically,
++                            modifier = Modifier
++                                .clip(RoundedCornerShape(8.dp))
++                                .clickable(onClick = onShowAllFiles)
++                                .padding(horizontal = 6.dp, vertical = 4.dp)
++                        ) {
++                            Text(
++                                stringResource(R.string.home_recent_show_all),
++                                color = HomeLink,
++                                fontSize = 13.sp,
++                                fontWeight = FontWeight.SemiBold
++                            )
++                            Spacer(Modifier.width(4.dp))
++                            Icon(
++                                Icons.Filled.ArrowForward,
++                                null,
++                                tint = HomeLink,
++                                modifier = Modifier.size(16.dp)
++                            )
++                        }
+                     }
++                    Spacer(Modifier.height(10.dp))
+                 }
+-            } else {
+-                items(recents, key = { it.uriString }) { item ->
+-                    RecentRow(
+-                        item = item,
+-                        thumbnail = thumbs[item.uriString],
+-                        durationMs = durations[item.uriString] ?: item.durationMs,
+-                        onOpen = { onOpenFile(item) },
+-                        onRemove = {
+-                            recents = recents.filter { it.uriString != item.uriString }
+-                            RecentFiles.remove(context, item.uriString)
++
++                if (recents.isEmpty()) {
++                    item {
++                        Column(
++                            horizontalAlignment = Alignment.CenterHorizontally,
++                            modifier = Modifier
++                                .fillMaxWidth()
++                                .clip(RoundedCornerShape(16.dp))
++                                .background(HomeCardBg)
++                                .border(1.dp, HomeCardStroke, RoundedCornerShape(16.dp))
++                                .padding(vertical = 22.dp, horizontal = 16.dp)
++                        ) {
++                            Icon(
++                                Icons.Filled.Movie,
++                                null,
++                                tint = Color(0xFF6D5AA8),
++                                modifier = Modifier.size(30.dp)
++                            )
++                            Spacer(Modifier.height(8.dp))
++                            Text(
++                                stringResource(R.string.home_recent_empty_title),
++                                color = Color.White.copy(alpha = 0.85f),
++                                fontSize = 13.sp,
++                                fontWeight = FontWeight.SemiBold
++                            )
++                            Text(
++                                stringResource(R.string.home_recent_empty_sub),
++                                color = HomeAccentText,
++                                fontSize = 11.sp
++                            )
+                         }
+-                    )
+-                    Spacer(Modifier.height(8.dp))
++                    }
++                } else {
++                    items(recents, key = { it.uriString }) { item ->
++                        RecentRow(
++                            item = item,
++                            thumbnail = thumbs[item.uriString],
++                            durationMs = durations[item.uriString] ?: item.durationMs,
++                            onOpen = { onOpenFile(item) },
++                            onRemove = {
++                                recents = recents.filter { it.uriString != item.uriString }
++                                RecentFiles.remove(context, item.uriString)
++                            }
++                        )
++                        Spacer(Modifier.height(8.dp))
++                    }
+                 }
+             }
+         }
+@@ -418,6 +526,9 @@
+ /**
+  * Ana ekran kartı: gradyan zemin + arkada yumuşak ışık halkası + ortalanmış ikon/başlık.
+  * Dokunma alanı kartın tamamıdır (tek dokunuşla ilgili ekran açılır).
++ *
++ * [iconSize] / [titleSp] / [subtitleSp] dışarıdan verilir; yatay modda kartlar daha
++ * alçak ve simgeler daha küçük olduğu için ekran "dev simgeler" görüntüsünden kurtulur.
+  */
+ @Composable
+ private fun FeatureCard(
+@@ -427,7 +538,10 @@
+     gradient: List<Color>,
+     glow: Color,
+     onClick: () -> Unit,
+-    modifier: Modifier = Modifier
++    modifier: Modifier = Modifier,
++    iconSize: Dp = 44.dp,
++    titleSp: Int = 20,
++    subtitleSp: Int = 12
+ ) {
+     Box(
+         modifier = modifier
+@@ -454,23 +568,25 @@
+             verticalArrangement = Arrangement.Center,
+             modifier = Modifier
+                 .fillMaxSize()
+-                .padding(horizontal = 10.dp, vertical = 14.dp)
++                .padding(horizontal = 10.dp, vertical = 10.dp)
+         ) {
+-            Icon(icon, null, tint = Color.White, modifier = Modifier.size(44.dp))
+-            Spacer(Modifier.height(10.dp))
++            Icon(icon, null, tint = Color.White, modifier = Modifier.size(iconSize))
++            Spacer(Modifier.height(if (iconSize.value >= 40f) 10.dp else 6.dp))
+             Text(
+                 title,
+                 color = Color.White,
+-                fontSize = 20.sp,
++                fontSize = titleSp.sp,
+                 fontWeight = FontWeight.Bold,
+-                textAlign = TextAlign.Center
++                textAlign = TextAlign.Center,
++                maxLines = 1,
++                overflow = TextOverflow.Ellipsis
+             )
+             Spacer(Modifier.height(4.dp))
+             Text(
+                 subtitle,
+                 color = Color.White.copy(alpha = 0.85f),
+-                fontSize = 12.sp,
+-                lineHeight = 15.sp,
++                fontSize = subtitleSp.sp,
++                lineHeight = (subtitleSp + 3).sp,
+                 textAlign = TextAlign.Center,
+                 maxLines = 2,
+                 overflow = TextOverflow.Ellipsis
+@@ -546,21 +662,21 @@
+             IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(34.dp)) {
+                 Icon(
+                     Icons.Filled.MoreVert,
+-                    "Diğer seçenekler",
++                    stringResource(R.string.home_more_desc),
+                     tint = Color(0xFF9C8FD6),
+                     modifier = Modifier.size(20.dp)
+                 )
+             }
+             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                 DropdownMenuItem(
+-                    text = { Text("Oynat") },
++                    text = { Text(stringResource(R.string.home_action_play)) },
+                     onClick = {
+                         menuOpen = false
+                         onOpen()
+                     }
+                 )
+                 DropdownMenuItem(
+-                    text = { Text("Listeden çıkar") },
++                    text = { Text(stringResource(R.string.home_action_remove)) },
+                     onClick = {
+                         menuOpen = false
+                         onRemove()
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt	2026-11-10 13:30:08.807946968 +0000
+@@ -15,6 +15,7 @@
+ import androidx.activity.compose.BackHandler
+ import androidx.compose.foundation.BorderStroke
+ import androidx.compose.foundation.background
++import androidx.compose.foundation.border
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.combinedClickable
+ import androidx.compose.foundation.horizontalScroll
+@@ -36,7 +37,9 @@
+ import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.ContentCut
+ import androidx.compose.material.icons.filled.Delete
++import androidx.compose.material.icons.filled.Edit
+ import androidx.compose.material.icons.filled.ErrorOutline
++import androidx.compose.material.icons.filled.ExpandLess
+ import androidx.compose.material.icons.filled.Folder
+ import androidx.compose.material.icons.filled.FolderOpen
+ import androidx.compose.material.icons.filled.Forward10
+@@ -149,6 +152,13 @@
+ /** Yüklenme halkası (LoadingRing) ve oynatıcı slider'ı için turkuaz vurgu rengi. */
+ internal val PlayerTurquoise = Color(0xFF66C2B4)
+ 
++/**
++ * Kare hassas sarma: hedefe 350 ms toleransla en yakın anahtar kareden başlanır.
++ * (Sürükleme biterken kullanılır; sürükleme sırasında [SeekParameters.CLOSEST_SYNC]
++ * kullanılıp görüntünün ANINDA gelmesi sağlanır.)
++ */
++private val SEEK_EXACT = SeekParameters(350_000L, 350_000L)
++
+ private fun formatClock(ms: Long): String {
+     val safe = ms.coerceAtLeast(0L)
+     val m = safe / 60000
+@@ -183,6 +193,10 @@
+     // her saniye tüm ekranın yeniden çizilmemesi için State olarak tutulur.
+     val playheadRef = remember { mutableLongStateOf(0L) }
+ 
++    // Oynatıcıya DIŞARIDAN sarma isteği (zaman çizelgesine dokunma, aralık seçme).
++    // -1 = istek yok. Değer yazıldığında oynatıcı o ana atlar ve isteği tüketir.
++    val seekRequest = remember { mutableLongStateOf(-1L) }
++
+     Scaffold(
+         containerColor = BgDark,
+         topBar = {
+@@ -195,9 +209,13 @@
+                 },
+                 actions = {
+                     if (video != null) {
+-                        // MAKAS: oynatıcının bulunduğu yerden yeni bir kesim aralığı ekler.
++                        // MAKAS: tek aralık modunda seçili aralığı kesim listesine ekler,
++                        // çoklu kesim modunda oynatıcının bulunduğu yerden yeni aralık açar.
+                         IconButton(
+-                            onClick = { viewModel.addCutRangeFromSelection(playheadRef.longValue) },
++                            onClick = {
++                                if (viewModel.isMultiCut) viewModel.addCutRange(playheadRef.longValue)
++                                else viewModel.addCutRangeFromSelection(playheadRef.longValue)
++                            },
+                             enabled = !busy
+                         ) {
+                             Icon(
+@@ -227,7 +245,8 @@
+                     endMs = if (viewModel.isMultiCut) durationMs else viewModel.trimEndMs,
+                     isTrimming = viewModel.isTrimming,
+                     followRangeChange = !viewModel.isMultiCut,
+-                    playheadRef = playheadRef
++                    playheadRef = playheadRef,
++                    seekRequestMs = seekRequest
+                 )
+                 Spacer(Modifier.height(12.dp))
+             }
+@@ -309,64 +328,95 @@
+                 // ── Kırpma / kesim başlığı ──────────────────────────────────
+                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                     Text(
+-                        if (viewModel.isMultiCut) "Çoklu kesim (makas)" else "Kırpma Aralığı",
++                        if (viewModel.isMultiCut) "Çoklu kesim" else "Kırpma Aralığı",
+                         color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                     )
+-                    Spacer(Modifier.weight(1f))
+-                    // MAKAS: seçili aralığı (Başlangıç–Bitiş alanları) doğrudan
+-                    // "kesilecek aralık" yapar; çoklu kesim modunda yenisini ekler.
+-                    Row(
+-                        verticalAlignment = Alignment.CenterVertically,
+-                        modifier = Modifier
+-                            .clip(RoundedCornerShape(20.dp))
+-                            .background(Amber.copy(alpha = 0.14f))
+-                            .clickable(enabled = !viewModel.isTrimming) {
+-                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
+-                            }
+-                            .padding(horizontal = 10.dp, vertical = 6.dp)
+-                    ) {
+-                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
+-                        Spacer(Modifier.width(6.dp))
+-                        Text(
+-                            if (viewModel.isMultiCut) "Aralık ekle" else "Makasla kes",
+-                            color = Amber, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
+-                        )
+-                    }
+                 }
+                 Spacer(Modifier.height(8.dp))
+ 
+                 if (viewModel.isMultiCut) {
+-                    // ── ÇOKLU KESİM: birden fazla aralık silinir, kalanlar birleştirilir ──
++                    // ── ÇOKLU KESİM (hızlı akış) ────────────────────────────────
++                    // 1) Zaman çizelgesine dokun → oynatıcı oraya atlar.
++                    // 2) "Başlangıç"/"Bitiş" düğmeleri aralığı oynatıcının yerine oturtur.
++                    // 3) İstersen satırdaki kalemle hassas (dk/sn/ms) alanları aç.
++                    // Böylece 20 dakikalık videoda 5 kesim, saniyeler içinde yapılır.
++                    val ranges = viewModel.cutRanges
++                    var selectedCut by remember { mutableIntStateOf(0) }
++                    var expandedCut by remember { mutableIntStateOf(-1) }
++                    val sel = selectedCut.coerceIn(0, (ranges.size - 1).coerceAtLeast(0))
++                    val selectedRange = ranges.getOrNull(sel)
++
+                     CutTimelineBar(
+                         durationMs = durationMs,
+-                        cutRanges = viewModel.cutRanges,
++                        cutRanges = ranges,
+                         playheadMs = { playheadRef.longValue },
+                         keepColor = Purple,
++                        onTapMs = { ms -> seekRequest.longValue = ms },
+                         modifier = Modifier.fillMaxWidth()
+                     )
+-                    Text(
+-                        "Kırmızı: videodan çıkarılacak · Mor: korunacak. Kalan süre: " +
+-                            formatClock(viewModel.keptDurationMs),
+-                        color = TextMuted, fontSize = 10.sp
+-                    )
+-                    Spacer(Modifier.height(10.dp))
++                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
++                        Text(
++                            "${ranges.size} aralık · Kalan ${formatClock(viewModel.keptDurationMs)}",
++                            color = TextSec, fontSize = 11.sp, modifier = Modifier.weight(1f)
++                        )
++                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
++                            Text("Temizle", color = TextMuted, fontSize = 11.sp)
++                        }
++                    }
++                    Spacer(Modifier.height(6.dp))
++
++                    // Tek dokunuşluk kesim noktası düğmeleri (seçili aralık için).
++                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
++                        CutPointButton(
++                            label = "Başlangıç = oynatıcı",
++                            enabled = selectedRange != null && !viewModel.isTrimming,
++                            accent = Purple,
++                            onClick = { viewModel.setCutStartFromPlayhead(sel, playheadRef.longValue) },
++                            modifier = Modifier.weight(1f)
++                        )
++                        CutPointButton(
++                            label = "Bitiş = oynatıcı",
++                            enabled = selectedRange != null && !viewModel.isTrimming,
++                            accent = Purple,
++                            onClick = { viewModel.setCutEndFromPlayhead(sel, playheadRef.longValue) },
++                            modifier = Modifier.weight(1f)
++                        )
++                    }
++                    Spacer(Modifier.height(8.dp))
+ 
+-                    viewModel.cutRanges.forEachIndexed { index, range ->
++                    ranges.forEachIndexed { index, range ->
+                         key(index) {
+-                            CutRangeCard(
++                            CutRangeRow(
+                                 index = index,
+                                 range = range,
++                                selected = index == sel,
++                                expanded = index == expandedCut,
+                                 enabled = !viewModel.isTrimming,
++                                onSelect = {
++                                    selectedCut = index
++                                    seekRequest.longValue = range.startMs
++                                },
++                                onToggleExpand = {
++                                    selectedCut = index
++                                    expandedCut = if (expandedCut == index) -1 else index
++                                },
+                                 onStartChange = { viewModel.updateCutRange(index, it, range.endMs) },
+                                 onEndChange = { viewModel.updateCutRange(index, range.startMs, it) },
+-                                onRemove = { viewModel.removeCutRange(index) }
++                                onRemove = {
++                                    viewModel.removeCutRange(index)
++                                    if (expandedCut == index) expandedCut = -1
++                                }
+                             )
+-                            Spacer(Modifier.height(8.dp))
++                            Spacer(Modifier.height(6.dp))
+                         }
+                     }
+ 
++                    Spacer(Modifier.height(2.dp))
+                     OutlinedButton(
+-                        onClick = { viewModel.addCutRange(playheadRef.longValue) },
++                        onClick = {
++                            val newIndex = viewModel.addCutRange(playheadRef.longValue)
++                            if (newIndex >= 0) selectedCut = newIndex
++                        },
+                         enabled = !viewModel.isTrimming,
+                         modifier = Modifier.fillMaxWidth(),
+                         shape = RoundedCornerShape(12.dp),
+@@ -379,17 +429,7 @@
+                             color = Amber, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+                         )
+                     }
+-                    Spacer(Modifier.height(2.dp))
+-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+-                        Text(
+-                            "${viewModel.cutRanges.size} aralık çıkarılacak · Kalan " +
+-                                formatClock(viewModel.keptDurationMs),
+-                            color = TextSec, fontSize = 11.sp, modifier = Modifier.weight(1f)
+-                        )
+-                        TextButton(onClick = viewModel::clearCutRanges, enabled = !viewModel.isTrimming) {
+-                            Text("Tek aralığa dön", color = TextMuted, fontSize = 11.sp)
+-                        }
+-                    }
++                    Spacer(Modifier.height(4.dp))
+                     Text(
+                         "Kırmızı aralıklar videodan çıkarılır, mor bölgeler sırayla birleştirilir. " +
+                             "Kesim kayıpsızdır (yeniden kodlama yok).",
+@@ -421,24 +461,20 @@
+                         color = TextMuted, fontSize = 10.sp
+                     )
+ 
+-                    // Çoklu kesim moduna geçiş ipucu (aynı zamanda tıklanabilir kısayol).
++                    // Tek dokunuş: seçili aralığı videodan çıkar (çoklu kesim moduna geçer).
+                     Spacer(Modifier.height(10.dp))
+-                    Row(
+-                        verticalAlignment = Alignment.CenterVertically,
+-                        modifier = Modifier
+-                            .fillMaxWidth()
+-                            .clip(RoundedCornerShape(10.dp))
+-                            .clickable(enabled = !viewModel.isTrimming) {
+-                                viewModel.addCutRangeFromSelection(playheadRef.longValue)
+-                            }
+-                            .padding(horizontal = 4.dp, vertical = 6.dp)
++                    OutlinedButton(
++                        onClick = { viewModel.addCutRangeFromSelection(playheadRef.longValue) },
++                        enabled = !viewModel.isTrimming,
++                        modifier = Modifier.fillMaxWidth(),
++                        shape = RoundedCornerShape(10.dp),
++                        border = BorderStroke(1.dp, Amber)
+                     ) {
+-                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(15.dp))
++                        Icon(Icons.Filled.ContentCut, null, tint = Amber, modifier = Modifier.size(16.dp))
+                         Spacer(Modifier.width(8.dp))
+                         Text(
+-                            "Makas (yukarıdaki) seçili aralığı kesim listesine ekler; " +
+-                                "birden fazla aralık kesilip kalanlar birleştirilir.",
+-                            color = Amber, fontSize = 11.sp
++                            "BU ARALIĞI VİDEODAN ÇIKAR (MAKAS)",
++                            color = Amber, fontSize = 11.sp, fontWeight = FontWeight.SemiBold
+                         )
+                     }
+ 
+@@ -610,14 +646,21 @@
+ }
+ 
+ /**
+- * Çoklu kesim listesindeki tek bir "kesilecek aralık" kartı: başlangıç ve bitiş
+- * zamanı dakika/saniye/salise alanlarıyla düzenlenebilir.
++ * Çoklu kesim listesindeki tek satırlık aralık özeti.
++ *
++ * Eski tasarımda her aralık, iki satır dolusu dk/sn/ms alanıyla açılıyordu; 5 aralıkta
++ * ekran karmaşık bir forma dönüşüyordu. Yeni satır TEK satır: dokun → aralığı seç
++ * (oynatıcı aralığın başına atlar), kalem → hassas alanlar açılır, çöp → sil.
+  */
+ @Composable
+-private fun CutRangeCard(
++private fun CutRangeRow(
+     index: Int,
+     range: TimeRange,
++    selected: Boolean,
++    expanded: Boolean,
+     enabled: Boolean,
++    onSelect: () -> Unit,
++    onToggleExpand: () -> Unit,
+     onStartChange: (Long) -> Unit,
+     onEndChange: (Long) -> Unit,
+     onRemove: () -> Unit
+@@ -625,26 +668,96 @@
+     Column(
+         modifier = Modifier
+             .fillMaxWidth()
+-            .background(Surface, RoundedCornerShape(12.dp))
+-            .padding(horizontal = 10.dp, vertical = 8.dp)
++            .clip(RoundedCornerShape(12.dp))
++            .background(if (selected) Amber.copy(alpha = 0.10f) else Surface)
++            .border(
++                width = if (selected) 1.dp else 0.dp,
++                color = if (selected) Amber.copy(alpha = 0.55f) else Color.Transparent,
++                shape = RoundedCornerShape(12.dp)
++            )
+     ) {
+-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+-            Icon(Icons.Filled.ContentCut, null, tint = Red, modifier = Modifier.size(15.dp))
+-            Spacer(Modifier.width(6.dp))
++        Row(
++            verticalAlignment = Alignment.CenterVertically,
++            modifier = Modifier
++                .fillMaxWidth()
++                .clickable(enabled = enabled, onClick = onSelect)
++                .padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 4.dp)
++        ) {
++            Box(
++                modifier = Modifier
++                    .size(20.dp)
++                    .clip(CircleShape)
++                    .background(if (selected) Amber else SurfaceHigh),
++                contentAlignment = Alignment.Center
++            ) {
++                Text(
++                    "${index + 1}",
++                    color = if (selected) Color.Black else TextSec,
++                    fontSize = 11.sp,
++                    fontWeight = FontWeight.Bold
++                )
++            }
++            Spacer(Modifier.width(8.dp))
+             Text(
+-                "Kesilecek ${index + 1}",
+-                color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
++                "${formatClock(range.startMs)} → ${formatClock(range.endMs)}",
++                color = TextPrimary,
++                fontSize = 12.sp,
++                fontFamily = FontFamily.Monospace,
++                maxLines = 1,
++                modifier = Modifier.weight(1f)
+             )
+-            Spacer(Modifier.width(8.dp))
+-            Text(formatClock(range.durationMs), color = TextMuted, fontSize = 11.sp)
+-            Spacer(Modifier.weight(1f))
+-            IconButton(onClick = onRemove, enabled = enabled, modifier = Modifier.size(30.dp)) {
+-                Icon(Icons.Filled.Delete, "Aralığı sil", tint = Red, modifier = Modifier.size(18.dp))
++            Text(
++                formatClock(range.durationMs),
++                color = TextMuted,
++                fontSize = 10.sp,
++                maxLines = 1
++            )
++            IconButton(onClick = onToggleExpand, enabled = enabled, modifier = Modifier.size(32.dp)) {
++                Icon(
++                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.Edit,
++                    "Hassas düzenle",
++                    tint = TextSec,
++                    modifier = Modifier.size(17.dp)
++                )
++            }
++            IconButton(onClick = onRemove, enabled = enabled, modifier = Modifier.size(32.dp)) {
++                Icon(Icons.Filled.Delete, "Aralığı sil", tint = Red, modifier = Modifier.size(17.dp))
++            }
 +        }
++        if (expanded) {
++            Column(Modifier.padding(start = 10.dp, end = 10.dp, bottom = 8.dp)) {
++                CompactTimeRow("Başlangıç", range.startMs, enabled, onStartChange)
++                Spacer(Modifier.height(6.dp))
++                CompactTimeRow("Bitiş", range.endMs, enabled, onEndChange)
+             }
+         }
+-        CompactTimeRow("Başlangıç", range.startMs, enabled, onStartChange)
+-        Spacer(Modifier.height(6.dp))
+-        CompactTimeRow("Bitiş", range.endMs, enabled, onEndChange)
++    }
++}
++
++/** Oynatıcının yerini aralığın başına/sonuna atayan tek dokunuşluk düğme. */
++@Composable
++private fun CutPointButton(
++    label: String,
++    enabled: Boolean,
++    accent: Color,
++    onClick: () -> Unit,
++    modifier: Modifier = Modifier
++) {
++    OutlinedButton(
++        onClick = onClick,
++        enabled = enabled,
++        shape = RoundedCornerShape(10.dp),
++        border = BorderStroke(1.dp, if (enabled) accent.copy(alpha = 0.7f) else Outline),
++        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp),
++        modifier = modifier
++    ) {
++        Text(
++            label,
++            color = if (enabled) accent else TextMuted,
++            fontSize = 11.sp,
++            fontWeight = FontWeight.SemiBold,
++            maxLines = 1
++        )
+     }
+ }
+ 
+@@ -1033,7 +1146,8 @@
+     endMs: Long,
+     isTrimming: Boolean,
+     followRangeChange: Boolean,
+-    playheadRef: androidx.compose.runtime.MutableLongState
++    playheadRef: androidx.compose.runtime.MutableLongState,
++    seekRequestMs: androidx.compose.runtime.MutableLongState = remember { mutableLongStateOf(-1L) }
+ ) {
+     val context = LocalContext.current
+     val player = remember { buildFastPlayer(context, isMultiView = false) }
+@@ -1103,13 +1217,19 @@
+         }
+     }
+ 
+-    LaunchedEffect(video.uri) {
+-        val playable = if (video.uri.scheme == "content" && !isCloudAuthority(video.uri.authority)) {
+-            withContext(Dispatchers.IO) {
+-                InputAccess.realPath(context, video.uri)
+-            }?.let { Uri.fromFile(File(it)) } ?: video.uri
+-        } else {
+-            video.uri
++    LaunchedEffect(video.uri, video.cachePath) {
++        // HIZ: dosya yolu zaten çözüldüyse (TrimViewModel -> InputAccess) doğrudan
++        // ondan oynatılır. Böylece her video geçişinde içerik sağlayıcısına tekrar
++        // sorulmaz, "önbelleğe alınıyor" beklemesi oluşmaz.
++        val resolved = video.cachePath
++        val playable = when {
++            resolved.startsWith("/") -> Uri.fromFile(File(resolved))
++            video.uri.scheme == "content" && !isCloudAuthority(video.uri.authority) -> {
++                withContext(Dispatchers.IO) {
++                    InputAccess.realPath(context, video.uri)
++                }?.let { Uri.fromFile(File(it)) } ?: video.uri
++            }
++            else -> video.uri
+         }
+         player.setMediaItem(MediaItem.fromUri(playable))
+         player.prepare()
+@@ -1207,6 +1327,15 @@
+         player.seekTo(clamped)
+     }
+ 
++    // DIŞARIDAN gelen sarma isteği (zaman çizelgesine dokunma / aralık satırını seçme).
++    LaunchedEffect(seekRequestMs.longValue) {
++        val target = seekRequestMs.longValue
++        if (target >= 0L) {
++            seekRequestMs.longValue = -1L
++            seekTo(target)
++        }
++    }
++
+     Column(
+         modifier = Modifier
+             .fillMaxWidth()
+@@ -1254,6 +1383,17 @@
+             onScaleChange = { scaleMode = it },
+             showScale = !video.isAudioOnly,
+             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
++            onScrubChange = { dragging ->
++                // HIZ: sürükleme sırasında en yakın anahtar kareye atlanır -> görüntü
++                // ANINDA gelir (20 dakikalık videoda bile bekleme yok). Parmak kalkınca
++                // kare hassas konuma oturulur ki kesim noktası tam görünsün.
++                if (dragging) {
++                    player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
++                } else {
++                    player.setSeekParameters(SEEK_EXACT)
++                    player.seekTo(positionMs)
++                }
++            },
+             trailing = {
+                 Row(verticalAlignment = Alignment.CenterVertically) {
+                     TrackMenuButtons(player, tracks, TextPrimary)
+@@ -1368,6 +1508,7 @@
+     onScaleChange: (ScaleMode) -> Unit = {},
+     showScale: Boolean = true,
+     onMenuOpen: (Boolean) -> Unit = {},
++    onScrubChange: (Boolean) -> Unit = {},
+     textColor: Color = TextPrimary,
+     modifier: Modifier = Modifier,
+     onRotateScreen: (() -> Unit)? = null,
+@@ -1400,7 +1541,10 @@
+             startMs = startMs,
+             endMs = endMs,
+             onSeekTo = onSeekTo,
+-            onDragStateChange = { dragging -> onMenuOpen(dragging) },
++            onDragStateChange = { dragging ->
++                onMenuOpen(dragging)
++                onScrubChange(dragging)
++            },
+             textColor = textColor,
+             fontSizeSp = 12,
+             rowHeight = 36.dp
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/theme/Theme.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/theme/Theme.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/theme/Theme.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/ui/theme/Theme.kt	2026-11-10 13:24:23.669704754 +0000
+@@ -1,6 +1,7 @@
+ package com.example.muxmaster.ui.theme
+ 
+ import android.app.Activity
++import android.os.Build
+ import android.content.Context
+ import android.content.ContextWrapper
+ import android.graphics.drawable.ColorDrawable
+@@ -75,8 +76,18 @@
+             val window = activity?.window
+             if (window != null) {
+                 val bgArgb = colorScheme.background.toArgb()
+-                window.statusBarColor = bgArgb
+-                window.navigationBarColor = bgArgb
++                // KENARDAN KENARA (edge-to-edge): durum çubuğu ve gezinme çubuğu artık
++                // şeffaf. Ekranların kendi gradyanı/zemini çubukların ARKASINA kadar
++                // uzanır (tam ekran görünüm); yazılar ise her ekranda güvenli alan
++                // (WindowInsets) kadar aşağıdan başlar. Böylece üst panel başlığı
++                // durum çubuğunun altında kalmaz.
++                window.statusBarColor = android.graphics.Color.TRANSPARENT
++                window.navigationBarColor = android.graphics.Color.TRANSPARENT
++                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                    // Sistem çubuklarının arkasına otomatik siyah/beyaz perde çizmesin.
++                    window.isStatusBarContrastEnforced = false
++                    window.isNavigationBarContrastEnforced = false
++                }
+                 window.setBackgroundDrawable(ColorDrawable(bgArgb))
+                 window.decorView.setBackgroundColor(bgArgb)
+                 val controller = WindowCompat.getInsetsController(window, view)
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/viewmodel/TrimViewModel.kt src/Muxmaster-main/app/src/main/java/com/example/muxmaster/viewmodel/TrimViewModel.kt
+--- orig/x/Muxmaster-main/app/src/main/java/com/example/muxmaster/viewmodel/TrimViewModel.kt	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/java/com/example/muxmaster/viewmodel/TrimViewModel.kt	2026-11-10 13:25:31.200624205 +0000
+@@ -97,6 +97,9 @@
+     var cutRanges by mutableStateOf<List<TimeRange>>(emptyList())
+         private set
+ 
++    /** URI -> ffprobe sonucu. Aynı dosyaya dönüldüğünde yeniden analiz edilmez (anında açılır). */
++    private val probeCache = java.util.concurrent.ConcurrentHashMap<String, TrackProber.ProbeResult>()
++
+     val isMultiCut: Boolean get() = cutRanges.isNotEmpty()
+ 
+     /** Çoklu kesim modunda videoda KALACAK parçalar (kesim aralıklarının tersi). */
+@@ -140,11 +143,13 @@
+      * Yeni bir kesim aralığı ekler. Varsayılan olarak oynatıcının bulunduğu yerden
+      * [DEFAULT_CUT_LENGTH_MS] kadarını keser; orası doluysa en yakın boş bölüme taşınır.
+      */
+-    fun addCutRange(playheadMs: Long) {
+-        val dur = videoFile?.durationMs ?: return
+-        if (dur <= MIN_CUT_MS || isTrimming) return
+-        val window = findFreeWindow(dur, playheadMs.coerceIn(0L, dur)) ?: return
+-        cutRanges = (cutRanges + window).sortedBy { it.startMs }
++    fun addCutRange(playheadMs: Long): Int {
++        val dur = videoFile?.durationMs ?: return -1
++        if (dur <= MIN_CUT_MS || isTrimming) return -1
++        val window = findFreeWindow(dur, playheadMs.coerceIn(0L, dur)) ?: return -1
++        val list = (cutRanges + window).sortedBy { it.startMs }
++        cutRanges = list
++        return list.indexOf(window)
+     }
+ 
+     /**
+@@ -153,20 +158,66 @@
+      * Seçim anlamlı değilse (çok kısa ya da videonun tamamı) oynatıcının bulunduğu
+      * yerden varsayılan uzunlukta bir aralık eklenir.
+      */
+-    fun addCutRangeFromSelection(playheadMs: Long) {
+-        val dur = videoFile?.durationMs ?: return
+-        if (dur <= MIN_CUT_MS || isTrimming) return
++    fun addCutRangeFromSelection(playheadMs: Long): Int {
++        val dur = videoFile?.durationMs ?: return -1
++        if (dur <= MIN_CUT_MS || isTrimming) return -1
+         val s = trimStartMs.coerceIn(0L, dur)
+         val e = trimEndMs.coerceIn(0L, dur)
+         val len = e - s
+         val usable = len >= MIN_SELECTION_MS && len <= dur - 400L
+-        if (usable) {
+-            cutRanges = (cutRanges + TimeRange(s, e)).sortedBy { it.startMs }
++        return if (usable) {
++            val list = (cutRanges + TimeRange(s, e)).sortedBy { it.startMs }
++            cutRanges = list
++            list.indexOf(TimeRange(s, e))
+         } else {
+             addCutRange(playheadMs)
+         }
+     }
+ 
++    /**
++     * Çoklu kesimde seçili aralığın BAŞLANGICINI oynatıcının bulunduğu ana taşır.
++     * (Tek dokunuş: videoyu istenen yere kadar oynat → "Başlangıç" düğmesi.)
++     */
++    fun setCutStartFromPlayhead(index: Int, playheadMs: Long) {
++        val dur = videoFile?.durationMs ?: return
++        val r = cutRanges.getOrNull(index) ?: return
++        if (isTrimming) return
++        val s = playheadMs.coerceIn(0L, dur)
++        val e = if (s >= r.endMs - MIN_CUT_MS) {
++            (s + DEFAULT_CUT_LENGTH_MS).coerceAtMost(dur)
++        } else {
++            r.endMs
++        }
++        updateCutRange(index, s, e)
++    }
++
++    /**
++     * Çoklu kesimde seçili aralığın BİTİŞİNİ oynatıcının bulunduğu ana taşır.
++     * Başlangıç noktası ile çakışırsa aralık [DEFAULT_CUT_LENGTH_MS] kadar geriye alınır.
++     */
++    fun setCutEndFromPlayhead(index: Int, playheadMs: Long) {
++        val dur = videoFile?.durationMs ?: return
++        val r = cutRanges.getOrNull(index) ?: return
++        if (isTrimming) return
++        val e = playheadMs.coerceIn(0L, dur)
++        val s = if (e <= r.startMs + MIN_CUT_MS) {
++            (e - DEFAULT_CUT_LENGTH_MS).coerceAtLeast(0L)
++        } else {
++            r.startMs
++        }
++        updateCutRange(index, s, e)
++    }
++
++    /** Aralığı [deltaMs] kadar kaydırır (başlangıç/bitiş birlikte, sınırlar içinde). */
++    fun nudgeCutRange(index: Int, deltaMs: Long) {
++        val dur = videoFile?.durationMs ?: return
++        val r = cutRanges.getOrNull(index) ?: return
++        if (isTrimming || r.durationMs <= 0L) return
++        val len = r.durationMs
++        val s = (r.startMs + deltaMs).coerceIn(0L, (dur - len).coerceAtLeast(0L))
++        updateCutRange(index, s, s + len)
 +    }
 +
      private fun findFreeWindow(dur: Long, preferredStart: Long): TimeRange? {
          val merged = mergedCutRanges(dur)
          var start = preferredStart.coerceIn(0L, dur)
-@@ -478,7 +498,10 @@
+@@ -311,6 +362,7 @@
  
-                 val ok = rc == 0 && tempOutput.exists() && tempOutput.length() > 0L
-                 if (!ok) {
--                    resultMessage = "Kırpma başarısız oldu (kod: $rc)."
-+                    // buildMultiCut kendi özel hata mesajını yazdıysa onu koru.
-+                    if (resultMessage.isNullOrBlank()) {
-+                        resultMessage = "Kırpma başarısız oldu (kod: $rc)."
-+                    }
-                     isSuccess = false
-                     runCatching { tempOutput.delete() }
-                 } else {
-@@ -591,7 +614,13 @@
-                     "-ss", fmt3(startSec),
-                     "-i", video.cachePath,
-                     "-t", fmt3(durationSec),
--                    "-map", "0",
-+                    // Sadece video/ses/altyazı/ek dosya: "0" ile gelen data/zmcd gibi
-+                    // akışlar bazı kaynaklarda mkv'ye kopyalanamıyor ve parça
-+                    // oluşturmayı başarısız ediyordu.
-+                    "-map", "0:v?",
-+                    "-map", "0:a?",
-+                    "-map", "0:s?",
-+                    "-map", "0:t?",
-                     "-c", "copy",
-                     "-map_chapters", "-1",
-                     "-avoid_negative_ts", "make_zero",
-@@ -611,6 +640,10 @@
-                     parts += part
-                 } else {
-                     runCatching { part.delete() }
-+                    // Sessizce eksik parça bırakmak yerine net hata ver.
-+                    resultMessage = "Parça ${index + 1}/${keep.size} kesilemedi (kod: $rc)."
-+                    isSuccess = false
-+                    return false
-                 }
+     fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
+         if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1; folderName = "" }
++        val key = uri.toString()
+         viewModelScope.launch {
+             isLoading = true
+             loadingMessage = "Dosya analiz ediliyor..."
+@@ -336,7 +388,11 @@
              }
  
-@@ -623,19 +656,14 @@
+             val sizeMb = withContext(Dispatchers.IO) { InputAccess.length(cacheFile).toFloat() / (1024 * 1024) }
+-            val probe = withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
++            // HIZ: aynı dosya daha önce analiz edildiyse ffprobe (en yavaş adım) hiç
++            // çalıştırılmaz. Klasörde ileri/geri gezinirken video ANINDA açılır.
++            val cachedProbe = probeCache[key]
++            val probe = cachedProbe ?: withContext(Dispatchers.IO) { TrackProber.probe(cacheFile) }
++            if (cachedProbe == null && probe.durationMs > 0L) probeCache[key] = probe
  
-             MuxForegroundService.update(app, 97, "Parçalar birleştiriliyor…")
-             trimProgress = 97
--            val concatArgs = arrayOf(
--                "-y",
--                "-f", "concat",
--                "-safe", "0",
--                "-i", listFile.absolutePath,
--                "-map", "0:V?",
--                "-map", "0:a?",
--                "-map", "0:s?",
--                "-c", "copy",
--                "-avoid_negative_ts", "make_zero",
--                tempOutput.absolutePath
--            )
--            val rcConcat = runFfmpegAsync(concatArgs, totalMs) { }
+             val audioOnly = !probe.hasVideo
+             if (audioOnly && probe.audioStreams.isEmpty()) {
+@@ -363,6 +419,34 @@
+             outputFileName = "${rawName}_kirpilmis.$ext"
+ 
+             isLoading = false
++            prefetchQueueNeighbors()
++        }
++    }
 +
-+            var rcConcat = concatParts(listFile, tempOutput, totalMs, withSubtitles = true)
-+            if (rcConcat != 0) {
-+                // Ör. ASS altyazı + mp4 hedefi: altyazıyı düşürüp yeniden dene.
-+                MuxForegroundService.update(app, 97, "Altyazı eklenemedi, altyazısız birleştiriliyor…")
-+                runCatching { tempOutput.delete() }
-+                rcConcat = concatParts(listFile, tempOutput, totalMs, withSubtitles = false)
++    /**
++     * Klasör kuyruğundaki ÖNCEKİ ve SONRAKİ dosyanın meta bilgisini arka planda
++     * hazırlar. Böylece "sonraki video"ya basıldığında ffprobe beklenmez; geçiş
++     * anında olur. Kopyalama YAPILMAZ: dosya kopyalanmadan okunamıyorsa atlanır.
++     */
++    private fun prefetchQueueNeighbors() {
++        if (folderQueue.isEmpty()) return
++        val targets = listOfNotNull(
++            folderQueue.getOrNull(queueIndex + 1),
++            folderQueue.getOrNull(queueIndex - 1)
++        ).filter { probeCache[it.uri.toString()] == null }
++        if (targets.isEmpty()) return
++        viewModelScope.launch(Dispatchers.IO) {
++            targets.forEach { entry ->
++                val k = entry.uri.toString()
++                if (probeCache.containsKey(k)) return@forEach
++                val path = runCatching { InputAccess.acquireNoCopy(app, entry.uri) }.getOrNull()
++                    ?: return@forEach
++                runCatching {
++                    val probe = TrackProber.probe(path)
++                    if (probe.durationMs > 0L) probeCache[k] = probe
++                }
++                runCatching { InputAccess.release(path) }
 +            }
-             runCatching { listFile.delete() }
-             return rcConcat == 0 && tempOutput.exists() && tempOutput.length() > 0L
-         } finally {
-@@ -643,6 +671,31 @@
          }
      }
  
-+    /** Parçaları ffmpeg "concat" demuxer'ı ile tek dosyada birleştirir (-c copy). */
-+    private suspend fun concatParts(
-+        listFile: File,
-+        tempOutput: File,
-+        totalMs: Long,
-+        withSubtitles: Boolean
-+    ): Int? {
-+        val maps = mutableListOf("-map", "0:V?", "-map", "0:a?")
-+        if (withSubtitles) {
-+            maps += "-map"; maps += "0:s?"
-+            maps += "-map"; maps += "0:t?"
-+        }
-+        val concatArgs = arrayOf(
-+            "-y",
-+            "-f", "concat",
-+            "-safe", "0",
-+            "-i", listFile.absolutePath
-+        ) + maps.toTypedArray() + arrayOf(
-+            "-c", "copy",
-+            "-avoid_negative_ts", "make_zero",
-+            tempOutput.absolutePath
-+        )
-+        return runFfmpegAsync(concatArgs, totalMs) { }
-+    }
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/res/values/strings.xml src/Muxmaster-main/app/src/main/res/values/strings.xml
+--- orig/x/Muxmaster-main/app/src/main/res/values/strings.xml	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/res/values/strings.xml	2026-11-10 13:24:16.329068219 +0000
+@@ -163,4 +163,42 @@
+     <string name="action_export_selected">Seçilenleri Dışa Aktar (%1$d)</string>
+     <string name="export_none_selected">Önce dışa aktarılacak en az bir parça seçin.</string>
+     <string name="export_batch_success">✅ Seçilen %1$d/%2$d parça başarıyla dışa aktarıldı.</string>
 +
-     /**
-      * Hassas kesim: [startSec, keySec) arası videoyu libx264 ile yeniden kodlar, [keySec, endSec]
-      * arasını kayıpsız kopyalar, ikisini MPEG-TS üzerinden (SPS/PPS satır içi) birleştirir, sonra
-@@ -777,6 +830,8 @@
-         private const val MIN_SEGMENT_MS = 120L
-         /** Makas ile eklenen yeni kesim aralığının varsayılan uzunluğu (10 sn). */
-         private const val DEFAULT_CUT_LENGTH_MS = 10_000L
-+        /** Makas, seçili aralığı kesim olarak eklemek için en az bu süreyi ister. */
-+        private const val MIN_SELECTION_MS = 500L
-         private val MEDIA_EXTS = setOf(
-             "mkv", "mp4", "m4v", "mov", "avi", "webm", "ts", "m2ts", "mts", "flv", "wmv", "3gp", "mpg", "mpeg",
-             "mp3", "m4a", "aac", "opus", "ogg", "oga", "flac", "wav", "wma", "mka", "ac3", "eac3", "dts"
---- .gitignore	2026-11-09 17:04:15.000000000 +0000
-+++ .gitignore	2026-11-09 17:31:27.740071844 +0000
-@@ -1,6 +1,10 @@
- # CI tarafından her derlemede yeniden üretilir (scripts/fetch_mkvtoolnix_assets.py)
- app/src/main/assets/mkvtoolnix/
- 
-+# Native .so dosyaları (mkvmerge/mkvextract/exhale/opusenc) CI'da üretilir;
-+# repoya eklenmesin (yüzlerce MB). Workflow bunları önbellekten geri yükler.
-+app/src/main/jniLibs/
++    <!-- Ana ekran (HomeScreen) -->
++    <string name="home_tagline">Video ve ses araçların</string>
++    <string name="home_settings_desc">Ayarlar</string>
++    <string name="home_mux_title">Mux</string>
++    <string name="home_mux_sub">Ses ve altyazı\nparçalarını ayır</string>
++    <string name="home_trim_title">Kes</string>
++    <string name="home_trim_sub">Videoyu kes</string>
++    <string name="home_merge_title">Birleştir</string>
++    <string name="home_merge_sub">Videoları birleştir</string>
++    <string name="home_player_title">Oynatıcı</string>
++    <string name="home_player_sub">Medyanızı oynat</string>
++    <string name="home_converter_title">Ses Dönüştürme</string>
++    <string name="home_converter_sub">Sesi başka bir formata dönüştür</string>
++    <string name="home_recent_title">Son Dosyalar</string>
++    <string name="home_recent_show_all">Tümünü Gör</string>
++    <string name="home_recent_empty_title">Henüz dosya açmadın</string>
++    <string name="home_recent_empty_sub">Açtığın videolar burada listelenir.</string>
++    <string name="home_more_desc">Diğer seçenekler</string>
++    <string name="home_action_play">Oynat</string>
++    <string name="home_action_remove">Listeden çıkar</string>
 +
- # Gradle / Android build çıktıları
- .gradle/
- build/
---- README.md	2026-11-09 17:04:15.000000000 +0000
-+++ README.md	2026-11-09 17:31:48.320708715 +0000
-@@ -170,3 +170,48 @@
- ### Doğrulama
- Bu sürüm; JDK 17 + Android SDK 34 + Gradle 8.5 ile `gradle :app:assembleRelease`
- (minify/R8 açık) çalıştırılarak derlendi — hatasız tamamlandı.
++    <!-- Açılış / izin diyalogları (MainActivity) -->
++    <string name="dialog_storage_title">Depolama izni</string>
++    <string name="dialog_storage_text">Videoların önbelleğe kopyalanmadan, beklemeden doğrudan açılması için &quot;Tüm dosyalara erişim&quot; iznini açın.</string>
++    <string name="dialog_storage_allow">İzin ver</string>
++    <string name="dialog_storage_later">Şimdi değil</string>
++    <string name="dialog_play_how_title">Videoyu nasıl oynatmak istiyorsunuz?</string>
++    <string name="dialog_play_single">Tek video olarak oynat</string>
++    <string name="dialog_play_multi">Çoklu videoya ekle (Multi Video)</string>
++    <string name="dialog_cancel">İptal</string>
++    <string name="dialog_open_with_title">Ne yapmak istiyorsunuz?</string>
++    <string name="open_with_play">Oynat (video oynatıcı)</string>
++    <string name="open_with_multi">Çoklu Oynat (Multi Video)</string>
++    <string name="open_with_mux">Mux Master (ses / altyazı ekle-çıkar)</string>
++    <string name="open_with_trim">Kırp / Kes</string>
++    <string name="open_with_merge">Birleştir</string>
++    <string name="open_with_convert">Sesi dönüştür</string>
+ </resources>
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/res/values-de/strings.xml src/Muxmaster-main/app/src/main/res/values-de/strings.xml
+--- orig/x/Muxmaster-main/app/src/main/res/values-de/strings.xml	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/res/values-de/strings.xml	2026-11-10 13:24:16.329389038 +0000
+@@ -153,4 +153,42 @@
+     <string name="action_export_selected">Ausgewählte exportieren (%1$d)</string>
+     <string name="export_none_selected">Bitte zuerst mindestens eine Spur zum Exportieren auswählen.</string>
+     <string name="export_batch_success">✅ %1$d/%2$d ausgewählte Spuren erfolgreich exportiert.</string>
 +
-+## Güncelleme 5 — derleme hatası + hız, kaydırma, makas, ana ekran
++    <!-- Startseite -->
++    <string name="home_tagline">Deine Video- und Audio-Werkzeuge</string>
++    <string name="home_settings_desc">Einstellungen</string>
++    <string name="home_mux_title">Mux</string>
++    <string name="home_mux_sub">Audio- und Untertitel-\nspuren trennen</string>
++    <string name="home_trim_title">Schneiden</string>
++    <string name="home_trim_sub">Video kürzen</string>
++    <string name="home_merge_title">Zusammenfügen</string>
++    <string name="home_merge_sub">Videos verbinden</string>
++    <string name="home_player_title">Player</string>
++    <string name="home_player_sub">Medien abspielen</string>
++    <string name="home_converter_title">Audio-Umwandlung</string>
++    <string name="home_converter_sub">Audio in ein anderes Format umwandeln</string>
++    <string name="home_recent_title">Letzte Dateien</string>
++    <string name="home_recent_show_all">Alle ansehen</string>
++    <string name="home_recent_empty_title">Noch keine Datei geöffnet</string>
++    <string name="home_recent_empty_sub">Geöffnete Videos werden hier gelistet.</string>
++    <string name="home_more_desc">Weitere Optionen</string>
++    <string name="home_action_play">Abspielen</string>
++    <string name="home_action_remove">Aus Liste entfernen</string>
 +
-+### 1) GitHub derlemesi neden 12-13 dakika sürüp hata veriyordu?
-+`ubuntu-latest` imajı Ubuntu 26.04'e (Python 3.14) geçti. Python 3.14'te `tarfile`
-+varsayılan olarak `data` filtresiyle açıyor; bu filtre Termux `.deb` paketlerindeki
-+**mutlak symlink**'lerde (`./data/data/com.termux/files/usr/bin/aws` gibi) hata verip
-+paketin tamamının açılmasını engelliyor. Sonuç: `libz.so.1` (awscli) ve
-+`libQt6Core.so.6` (qt6-qtbase) çözülemiyor, betik 12 dakika sonunda
-+"aşağıdaki paylaşımlı kütüphaneler çözümlenemedi" diyip çıkıyordu.
++    <!-- Dialoge (MainActivity) -->
++    <string name="dialog_storage_title">Speicherberechtigung</string>
++    <string name="dialog_storage_text">Damit Videos ohne Kopie im Cache direkt geöffnet werden, aktiviere &quot;Zugriff auf alle Dateien&quot;.</string>
++    <string name="dialog_storage_allow">Erlauben</string>
++    <string name="dialog_storage_later">Nicht jetzt</string>
++    <string name="dialog_play_how_title">Wie möchtest du das Video abspielen?</string>
++    <string name="dialog_play_single">Als einzelnes Video abspielen</string>
++    <string name="dialog_play_multi">Zu Multi-Video hinzufügen</string>
++    <string name="dialog_cancel">Abbrechen</string>
++    <string name="dialog_open_with_title">Was möchtest du tun?</string>
++    <string name="open_with_play">Abspielen (Video-Player)</string>
++    <string name="open_with_multi">In Multi-Video abspielen</string>
++    <string name="open_with_mux">Mux Master (Audio/Untertitel hinzufügen oder entfernen)</string>
++    <string name="open_with_trim">Kürzen / Schneiden</string>
++    <string name="open_with_merge">Zusammenfügen</string>
++    <string name="open_with_convert">Audio umwandeln</string>
+ </resources>
+diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/res/values-en/strings.xml src/Muxmaster-main/app/src/main/res/values-en/strings.xml
+--- orig/x/Muxmaster-main/app/src/main/res/values-en/strings.xml	2026-11-09 17:34:07.000000000 +0000
++++ src/Muxmaster-main/app/src/main/res/values-en/strings.xml	2026-11-10 13:24:16.329245168 +0000
+@@ -153,4 +153,42 @@
+     <string name="action_export_selected">Export Selected (%1$d)</string>
+     <string name="export_none_selected">Please select at least one track to export first.</string>
+     <string name="export_batch_success">✅ Successfully exported %1$d/%2$d selected tracks.</string>
 +
-+Düzeltmeler (`scripts/fetch_mkvtoolnix_assets.py`):
-+- `.deb` açma `filter="fully_trusted"` ile yapılıyor (eski Python'larda otomatik geri düşüş).
-+- Açtıktan sonra mutlak Termux symlink'leri **göreli** hale getiriliyor, kırık linkler çözülüyor.
-+- `libz.so.1` artık 20+ MB'lık `awscli` yerine küçük `zlib` paketinden alınıyor (paket tercih tablosu).
-+- İndirmelerde 3 deneme, `exhale` derlemesinde önce `-O2` (daha kısa derleme).
-+- Android sistem kütüphaneleri (`libEGL`, `libGLESv2`, `libOpenSLES`, `libvulkan` …) atlanıyor.
++    <!-- Home screen -->
++    <string name="home_tagline">Your video and audio tools</string>
++    <string name="home_settings_desc">Settings</string>
++    <string name="home_mux_title">Mux</string>
++    <string name="home_mux_sub">Split audio and\nsubtitle tracks</string>
++    <string name="home_trim_title">Trim</string>
++    <string name="home_trim_sub">Cut the video</string>
++    <string name="home_merge_title">Merge</string>
++    <string name="home_merge_sub">Join videos</string>
++    <string name="home_player_title">Player</string>
++    <string name="home_player_sub">Play your media</string>
++    <string name="home_converter_title">Audio Conversion</string>
++    <string name="home_converter_sub">Convert audio to another format</string>
++    <string name="home_recent_title">Recent Files</string>
++    <string name="home_recent_show_all">See All</string>
++    <string name="home_recent_empty_title">No files opened yet</string>
++    <string name="home_recent_empty_sub">Videos you open are listed here.</string>
++    <string name="home_more_desc">More options</string>
++    <string name="home_action_play">Play</string>
++    <string name="home_action_remove">Remove from list</string>
 +
-+Hız (`build.yml` + `gradle.properties`):
-+- `app/src/main/jniLibs/arm64-v8a` artık **actions/cache** ile önbelleğe alınıyor; betik
-+  değişmedikçe native adım tamamen atlanıyor (ilk derleme uzun, sonrakiler ~4 dakika).
-+- Gereksiz aarch64 cross-toolchain kurulumu (70 MB) kaldırıldı, NDK clang++ kullanılıyor.
-+- Gradle: `--build-cache --parallel`, `org.gradle.caching=true`, `parallel=true`.
-+- Native dosyalar için doğrulama adımı eklendi (eksikse derleme sessizce bozuk APK üretmiyor).
-+
-+### 2) Oynatıcı slider'ı sürüklenmiyordu (sadece dokunma)
-+`ui/components/Sliders.kt`: jest artık **`PointerEventPass.Initial`** aşamasında yakalanıp
-+her karede tüketiliyor. Böylece içinde bulunduğu dikey kaydırma (verticalScroll) kapsayıcısı
-+hareketi çalamıyor; parmak slider'ı birebir takip ediyor, kalkınca kesin hedefe oturuyor.
-+Aynı düzeltme `MuxRangeSlider` (başlangıç/bitiş aralığı) için de yapıldı. Dokunma çalışmaya devam eder.
-+
-+### 3) Makas (çoklu kesim) artık görünür ve kullanışlı
-+- "Kırpma Aralığı" başlığının hemen sağına **Makasla kes** düğmesi eklendi: Başlangıç–Bitiş
-+  alanlarında seçili aralığı tek dokunuşla "kesilecek aralık" yapar.
-+- İstenildiği kadar aralık eklenebilir; her aralık dk/sn/ms alanlarıyla düzeltilebilir, tek tek silinebilir.
-+- "Oynadığı yerden 10 sn'lik aralık ekle" düğmesi, "N aralık çıkarılacak · Kalan süre" özeti ve
-+  "Tek aralığa dön" eklendi.
-+- Dışa aktarım: her korunacak parça kayıpsız (`-c copy`) kesilir, `concat` demuxer'ı ile birleştirilir.
-+  Parça kesilemezse artık sessizce atlanmıyor, net hata veriliyor. Altyazı hedef kapsayıcıya
-+  sığmazsa (ör. ASS + mp4) altyazı düşürülüp yeniden denenir.
-+
-+### 4) Ana ekran
-+Kartlar gönderilen tasarıma yaklaştırıldı: 24dp köşe, arkada yumuşak ışık halkası, 44dp ikon,
-+20sp başlık; "Ses Dönüştürme" kartında ikon çerçevesi ve yuvarlak ok. Kartlara dokununca ilgili
-+ekran doğrudan açılır, geri tuşu ana ekrana döner.
++    <!-- Dialogs (MainActivity) -->
++    <string name="dialog_storage_title">Storage permission</string>
++    <string name="dialog_storage_text">To open videos directly without copying them to the cache, enable &quot;All files access&quot;.</string>
++    <string name="dialog_storage_allow">Allow</string>
++    <string name="dialog_storage_later">Not now</string>
++    <string name="dialog_play_how_title">How do you want to play the video?</string>
++    <string name="dialog_play_single">Play as a single video</string>
++    <string name="dialog_play_multi">Add to multi video</string>
++    <string name="dialog_cancel">Cancel</string>
++    <string name="dialog_open_with_title">What do you want to do?</string>
++    <string name="open_with_play">Play (video player)</string>
++    <string name="open_with_multi">Play in multi video</string>
++    <string name="open_with_mux">Mux Master (add/remove audio or subtitles)</string>
++    <string name="open_with_trim">Trim / Cut</string>
++    <string name="open_with_merge">Merge</string>
++    <string name="open_with_convert">Convert audio</string>
+ </resources>
