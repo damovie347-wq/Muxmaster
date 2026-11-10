@@ -521,11 +521,18 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 // Dönme perdesi (dokunma olaylarını yakalamaz, sadece görsel).
+                //
+                // ÖNEMLİ (siyah ekran düzeltmesi): Modifier sırası burada kritik.
+                // `background` kendisinden SONRA gelen zincirin altına çizilir; `graphicsLayer`
+                // ise kendisinden SONRA gelen içeriği saydamlık katmanına alır. Bu yüzden
+                // `background` önce yazılırsa siyah dikdörtgen katmanın DIŞINDA kalır ve
+                // alpha=0 olsa bile tam opak çizilir -> uygulama tamamen siyah görünür.
+                // Doğru sıra: önce `graphicsLayer`, sonra `background` (alpha artık zemine de uygulanır).
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black)
                         .graphicsLayer { alpha = rotationScrim.value }
+                        .background(Color.Black)
                 )
                 }
             }
