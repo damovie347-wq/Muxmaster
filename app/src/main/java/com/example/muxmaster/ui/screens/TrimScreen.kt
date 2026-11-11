@@ -158,19 +158,10 @@ import kotlinx.coroutines.withContext
 /** Yüklenme halkası (LoadingRing) ve oynatıcı slider'ı için turkuaz vurgu rengi. */
 internal val PlayerTurquoise = Color(0xFF66C2B4)
 
-/**
- * KARE HASSAS SARMA: tolerans SIFIR ([SeekParameters.EXACT]).
- *
- * Eskiden 350 ms (ve sürüklemede 40 ms) tolerans vardı; bu yüzden oynatıcı hedefe en
- * yakın ANAHTAR KAREYE yuvarlanıyor ve yanlış kare gösterilebiliyordu. Sıfır toleransla
- * oynatıcı, hedefin içinde bulunduğu kareyi gösterir. Dekoder yalnızca o kareye ulaşmak
- * için gereken kareleri çözer: yeniden kodlama, önceden kare çıkarma veya kare önbelleği
- * YOKTUR.
- */
+/** Parmak sürüklenirken hızlı önizleme için anahtar kareye atla; bırakınca kesin ara. */
 private val SEEK_EXACT = SeekParameters.EXACT
-
-/** Sürükleme sırasında da aynı sıfır tolerans: parmak hangi kareyi gösteriyorsa o kare. */
-private val SEEK_SCRUB = SeekParameters.EXACT
+private val SEEK_SCRUB = SeekParameters.CLOSEST_SYNC
+private const val LIVE_SCRUB_INTERVAL_MS = 80L
 
 /**
  * Zoom sonrası görünür pencerenin başlangıcı: verilen an (ör. seçimin başı) pencerenin
@@ -1695,13 +1686,15 @@ private fun TrimPlayer(
             onScaleChange = { scaleMode = it },
             showScale = !video.isAudioOnly,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-            // KARE HASSAS SÜRÜKLEME: sarma toleransı sıfır (SeekParameters.EXACT).
-            // Sürükleme başında oynatma durur; parmak kalkınca seçilen GERÇEK karede
-            // kalınır. Kare görüntüsü ana oynatıcının kendi donanım dekoderinden gelir:
-            // ayrı önizleme penceresi, thumbnail üretimi veya ikinci dekoder YOK.
+            // Sürüklerken hızlı anahtar-kare önizlemesi, bırakınca kesin kare araması.
             onScrubChange = { dragging ->
-                player.setSeekParameters(SEEK_EXACT)
-                if (dragging) player.pause() else player.seekTo(positionMs)
+                if (dragging) {
+                    player.setSeekParameters(SEEK_SCRUB)
+                    player.pause()
+                } else {
+                    player.setSeekParameters(SEEK_EXACT)
+                    player.seekTo(positionMs)
+                }
             },
             snapToFrame = { ms -> frameClock.snap(ms) },
             trailing = {
@@ -2827,20 +2820,22 @@ private fun FullscreenPlayerDialog(
                         // ── DÜZELTME (6): ORTADA YATAY SÜRÜKLEME = İLERİ/GERİ SARMA ──
                         // Video tam ekrandayken parmak ekranın ortasındayken sağa/sola
                         // sürüklenince video takip eder (YouTube'daki gibi). Sürükleme
-                        // miktarı tüm video süresine ölçeklenir; ortada hedef zaman +
+                        // miktarı en fazla 120 saniyelik bir pencereye ölçeklenir; ortada hedef zaman +
                         // kaç saniye atlandığı gösterilir.
                         .pointerInput(Unit) {
                             var baseMs = 0L
                             var accumulated = 0f
                             var lastTargetMs = 0L
+                            var lastLiveSeekAt = 0L
                             detectHorizontalDragGestures(
                                 onDragStart = {
                                     interaction++
                                     accumulated = 0f
                                     baseMs = posState.value.coerceAtLeast(0L)
                                     lastTargetMs = baseMs
-                                    // Sürükleme boyunca kare kare takip (anahtar kareye
-                                    // atlamaz) -> sahne atlaması hissi oluşmaz.
+                                    lastLiveSeekAt = 0L
+                                    // Sürükleme sırasında hızlı anahtar-kare önizlemesi;
+                                    // bırakınca tam kareye kesin arama yapılır.
                                     player.setSeekParameters(SEEK_SCRUB)
                                     dragDeltaMs = 0L
                                     dragSeekMs = baseMs
@@ -2851,7 +2846,11 @@ private fun FullscreenPlayerDialog(
                                     val w = size.width.coerceAtLeast(1).toFloat()
                                     val span = (rangeEndState.value - rangeStartState.value)
                                         .coerceAtLeast(1L)
-                                    val delta = (accumulated / w * span).toLong()
+                                    // Bir ekran genişliği en fazla 120 saniyeyi tarar.
+                                    // Uzun videolarda tam süreyi tek sürüklemeye yaymak,
+                                    // birkaç santimetrelik harekette dakikalar atlatıyordu.
+                                    val scrubWindowMs = span.coerceAtMost(120_000L)
+                                    val delta = (accumulated / w * scrubWindowMs.toFloat()).toLong()
                                     val target = (baseMs + delta).coerceIn(
                                         rangeStartState.value,
                                         rangeEndState.value.coerceAtLeast(rangeStartState.value)
@@ -2861,13 +2860,17 @@ private fun FullscreenPlayerDialog(
                                     dragDeltaMs = snapped - baseMs
                                     dragSeekMs = snapped
                                     lastTargetMs = snapped
-                                    onSeekToState.value(snapped)
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastLiveSeekAt >= LIVE_SCRUB_INTERVAL_MS) {
+                                        lastLiveSeekAt = now
+                                        onSeekToState.value(snapped)
+                                    }
                                 },
                                 onDragEnd = {
                                     // Parmak kalkınca kesim noktası tam görünsün diye
                                     // kare hassas konuma otur.
                                     player.setSeekParameters(SEEK_EXACT)
-                                    player.seekTo(lastTargetMs)
+                                    onSeekToState.value(lastTargetMs)
                                     val token = ++dragToken
                                     scope.launch {
                                         delay(700)
@@ -2879,6 +2882,7 @@ private fun FullscreenPlayerDialog(
                                 },
                                 onDragCancel = {
                                     player.setSeekParameters(SEEK_EXACT)
+                                    onSeekToState.value(lastTargetMs)
                                     dragSeekMs = null
                                     dragDeltaMs = 0L
                                 }
@@ -3192,6 +3196,7 @@ internal class SlotPlayerHolder(
 
     private var pendingSeekTargetMs: Long = -1L
     private var pendingSeekTimestamp: Long = 0L
+    private var scrubActive: Boolean = false
 
     private val listener = object : Player.Listener {
         override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -3384,36 +3389,35 @@ internal class SlotPlayerHolder(
         }
     }
 
-    /**
-     * KARE HASSAS SARMA.
-     *
-     * Hedef önce videonun gerçek kare sınırına oturtulur, sonra toleranssız
-     * ([SeekParameters.EXACT]) sarma yapılır. Böylece anahtar kareye yuvarlanma
-     * ("sahne atlama") olmaz; yalnızca istenen kare gösterilir. Yeniden kodlama,
-     * önceden kare çıkarma veya kare önbelleği YOKTUR: yalnızca o kare dekoderden geçer.
-     *
-     * [isLiveScrub] sürükleme sırasındaki ara istekleri belirtir; aynı hassasiyet
-     * kullanılır çünkü kullanıcı parmağının altındaki kareyi görmek ister.
-     */
+    /** Sürüklemede hızlı anahtar-kare önizlemesi, bırakışta kare hassas arama. */
     fun seekTo(targetMs: Long, isLiveScrub: Boolean = false) {
         val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: durationMs
         if (d > 0L && durationMs != d) durationMs = d
         val safe = if (d > 0L) targetMs.coerceIn(0L, d) else targetMs.coerceAtLeast(0L)
         // Kareye oturt (kare hızı henüz bilinmiyorsa ham değer kullanılır).
         val snapped = if (detectedFps > 0f) frameClock.snap(safe) else safe
+        val liveScrub = isLiveScrub || scrubActive
         pendingSeekTargetMs = snapped
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = snapped
-        player.setSeekParameters(SeekParameters.EXACT)
+        player.setSeekParameters(if (liveScrub) SEEK_SCRUB else SEEK_EXACT)
         if (player.playbackState == Player.STATE_IDLE) {
             player.prepare()
         }
         player.seekTo(snapped)
     }
 
-    /** Sürükleme başladı: oynatmayı durdur, kare sabit kalsın (parmak kalkınca da kalır). */
+    /** Sürükleme başladı: oynatmayı durdur ve ara aramaları hızlandır. */
     fun pauseForScrub() {
+        scrubActive = true
+        player.setSeekParameters(SEEK_SCRUB)
         if (player.playWhenReady) player.pause()
+    }
+
+    /** Sürükleme bitti: son hedefi kesin kare hassasiyetinde uygula. */
+    fun finishScrub(targetMs: Long) {
+        scrubActive = false
+        seekTo(targetMs, isLiveScrub = false)
     }
 
     /**
@@ -4503,11 +4507,9 @@ private fun SingleOrFocusedPlayerContent(
                         },
                         onMenuOpen = onMenuOpen,
                         textColor = Color.White,
-                        // KARE HASSAS SÜRÜKLEME: parmak çubukta gezerken oynatma durur,
-                        // ana oynatıcı seçilen GERÇEK kareyi gösterir; parmak kalkınca
-                        // o karede kalınır. Ayrı önizleme/thumbnail üretilmez.
+                        // Sürüklerken hızlı önizleme; bırakınca son hedef kare hassasiyetinde aranır.
                         onScrubChange = { dragging ->
-                            if (dragging) holder.pauseForScrub() else holder.seekTo(holder.positionMs)
+                            if (dragging) holder.pauseForScrub() else holder.finishScrub(holder.positionMs)
                         },
                         snapToFrame = { ms -> holder.frameClock.snap(ms) },
                         onRotateScreen = {
@@ -4738,7 +4740,7 @@ private fun MultiGridVideoCell(
                     },
                     onDragStateChange = { dragging ->
                         isDraggingSlider = dragging
-                        if (dragging) holder.pauseForScrub() else holder.seekTo(holder.positionMs)
+                        if (dragging) holder.pauseForScrub() else holder.finishScrub(holder.positionMs)
                     },
                     textColor = Color.White,
                     fontSizeSp = 10,

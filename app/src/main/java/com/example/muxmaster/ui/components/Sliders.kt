@@ -25,9 +25,9 @@ import androidx.compose.ui.unit.dp
 import com.example.muxmaster.model.TimeRange
 import kotlin.math.abs
 
-/** Sürükleme sırasında oynatıcıya giden sarma isteği aralığı (ms).
- *  ~24 ms: 60 Hz ekranda akıcı takip, dekoder boğulmaz, eski istekler düşer. */
-private const val SCRUB_SEEK_INTERVAL_MS = 24L
+/** Sürükleme sırasında oynatıcıya giden en sık sarma isteği aralığı (ms).
+ *  Arayüz her dokunuşta hareket eder; dekodere saniyede en fazla ~12 ara arama gider. */
+private const val SCRUB_SEEK_INTERVAL_MS = 80L
 
 /** Parmağın "sürükleme" sayılması için gereken en küçük hareket (px). */
 private const val SCRUB_SLOP_PX = 3f
@@ -50,8 +50,7 @@ private const val SCRUB_SLOP_PX = 3f
  * seçilen GERÇEK karede kalır.
  *
  * KARE HASSASİYETİ: [snapToFrame] verildiğinde hedef an her zaman videonun gerçek kare
- * başlangıcına oturtulur (30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms). Görüntü, oynatıcının
- * kendi donanım dekoderinden gelir; ayrı bir önizleme/thumbnail üretilmez.
+ * başlangıcına oturtulur. Ara önizlemeler hızlıdır; parmak bırakılınca hedef kare kesin aranır.
  */
 @Composable
 fun MuxSeekSlider(
@@ -155,7 +154,7 @@ fun MuxSeekSlider(
                             fraction = fractionOf(target)
                             dragFraction = fraction
                             val now = System.currentTimeMillis()
-                            if (!change.pressed || now - lastSeekAt >= SCRUB_SEEK_INTERVAL_MS) {
+                            if (change.pressed && now - lastSeekAt >= SCRUB_SEEK_INTERVAL_MS) {
                                 lastSeekAt = now
                                 onSeekState.value(target)
                             }
