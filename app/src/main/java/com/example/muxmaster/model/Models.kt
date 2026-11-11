@@ -81,7 +81,16 @@ data class VideoFile(
     val fileSizeMb: Float = 0f,
     val videoStreamIndex: Int = 0, // mkvmerge -d için: kaynaktaki gerçek video track id'si
     val isAudioOnly: Boolean = false, // true ise dosyada video akışı yok (sadece ses)
-    val pixFmt: String = "" // ffprobe pix_fmt (örn. yuv420p); hassas kesim için 8-bit kontrolü
+    val pixFmt: String = "", // ffprobe pix_fmt (örn. yuv420p); hassas kesim için 8-bit kontrolü
+
+    /**
+     * Gerçek kare hızı (ffprobe avg_frame_rate). 0 = bilinmiyor.
+     * Kare hassas sarma/kırpma bu değerden hesaplanır (30 FPS -> 33,33 ms).
+     */
+    val fps: Float = 0f,
+
+    /** Toplam kare sayısı (ffprobe nb_frames). 0 = konteynerde yok (ör. MKV). */
+    val frameCount: Int = 0
 )
 
 /**

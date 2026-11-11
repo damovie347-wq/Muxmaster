@@ -6,7 +6,6 @@ import android.content.ComponentCallbacks
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
@@ -17,7 +16,6 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -72,9 +70,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -125,11 +121,12 @@ import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.mp4.Mp4Extractor
 import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.data.InputAccess
-import com.example.muxmaster.data.VideoThumbnails
+import com.example.muxmaster.data.FrameClock
 import com.example.muxmaster.model.TimeRange
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.components.CutTimelineBar
-import com.example.muxmaster.ui.components.MuxRangeSlider
+import com.example.muxmaster.ui.components.FRAME_TIMELINE_MAX_ZOOM
+import com.example.muxmaster.ui.components.FrameTrimTimeline
 import com.example.muxmaster.ui.components.MuxSeekSlider
 import com.example.muxmaster.ui.components.VideoCard
 import com.example.muxmaster.ui.theme.*
@@ -162,21 +159,28 @@ import kotlinx.coroutines.withContext
 internal val PlayerTurquoise = Color(0xFF66C2B4)
 
 /**
- * Kare hassas sarma: hedefe 350 ms toleransla en yakın anahtar kareden başlanır.
- * (Sürükleme biterken kullanılır; sürükleme sırasında [SeekParameters.CLOSEST_SYNC]
- * kullanılıp görüntünün ANINDA gelmesi sağlanır.)
+ * KARE HASSAS SARMA: tolerans SIFIR ([SeekParameters.EXACT]).
+ *
+ * Eskiden 350 ms (ve sürüklemede 40 ms) tolerans vardı; bu yüzden oynatıcı hedefe en
+ * yakın ANAHTAR KAREYE yuvarlanıyor ve yanlış kare gösterilebiliyordu. Sıfır toleransla
+ * oynatıcı, hedefin içinde bulunduğu kareyi gösterir. Dekoder yalnızca o kareye ulaşmak
+ * için gereken kareleri çözer: yeniden kodlama, önceden kare çıkarma veya kare önbelleği
+ * YOKTUR.
  */
-private val SEEK_EXACT = SeekParameters(350_000L, 350_000L)
+private val SEEK_EXACT = SeekParameters.EXACT
+
+/** Sürükleme sırasında da aynı sıfır tolerans: parmak hangi kareyi gösteriyorsa o kare. */
+private val SEEK_SCRUB = SeekParameters.EXACT
 
 /**
- * Sürükleme (scrub) sırasında kullanılan sarma toleransı.
- *
- * Önceden sürükleme boyunca [SeekParameters.CLOSEST_SYNC] kullanılıyordu; bu yüzden
- * oynatıcı yalnızca anahtar karelere (keyframe) atlıyor ve çubuk her 2-3 saniyede bir
- * sahne gösteriyordu. 40 ms toleransla hedefe neredeyse tam oturulur: kare kare takip
- * eder, yine de anahtar kareden çok uzun çözme yapmaz.
+ * Zoom sonrası görünür pencerenin başlangıcı: verilen an (ör. seçimin başı) pencerenin
+ * ortasında kalacak şekilde hesaplanır ve video sınırlarına kırpılır.
  */
-private val SEEK_SCRUB = SeekParameters(40_000L, 40_000L)
+private fun trimWindowStartFor(focusMs: Long, totalMs: Long, zoom: Float): Long {
+    if (totalMs <= 0L) return 0L
+    val len = (totalMs.toFloat() / zoom.coerceIn(1f, FRAME_TIMELINE_MAX_ZOOM)).toLong().coerceAtLeast(1L)
+    return (focusMs - len / 2L).coerceIn(0L, (totalMs - len).coerceAtLeast(0L))
+}
 
 private fun formatClock(ms: Long): String {
     val safe = ms.coerceAtLeast(0L)
@@ -212,9 +216,23 @@ fun TrimScreen(
     // her saniye tüm ekranın yeniden çizilmemesi için State olarak tutulur.
     val playheadRef = remember { mutableLongStateOf(0L) }
 
-    // Oynatıcıya DIŞARIDAN sarma isteği (zaman çizelgesine dokunma, aralık seçme).
-    // -1 = istek yok. Değer yazıldığında oynatıcı o ana atlar ve isteği tüketir.
+    // Oynatıcıya DIŞARIDAN sarma isteği (zaman çizelgesine dokunma, aralık seçme,
+    // kırpma tutamacı sürükleme). -1 = istek yok. Değer yazıldığında oynatıcı o ana
+    // atlar ve isteği tüketir. Kare hassas önizleme BÖYLECE ana oynatıcıda olur.
     val seekRequest = remember { mutableLongStateOf(-1L) }
+
+    // Kare hassas kırpma: zaman çizelgesi zoom'u ve görünür pencerenin başı.
+    var trimZoom by remember { mutableFloatStateOf(1f) }
+    var trimWindowStart by remember { mutableLongStateOf(0L) }
+
+    // Videonun GERÇEK kare zamanlaması (ffprobe avg_frame_rate + nb_frames).
+    val frameClock = viewModel.frameClock
+
+    // Video değişince zaman çizelgesi yakınlaştırması sıfırlanır (tam video görünür).
+    LaunchedEffect(video?.uri) {
+        trimZoom = 1f
+        trimWindowStart = 0L
+    }
 
     Scaffold(
         containerColor = BgDark,
@@ -273,7 +291,8 @@ fun TrimScreen(
                     cutRanges = viewModel.cutRanges,
                     onAddCut = { s, e -> viewModel.addCutRangeExact(s, e) },
                     onRemoveLastCut = viewModel::removeLastCutRange,
-                    fillHeight = fill
+                    fillHeight = fill,
+                    frameClock = frameClock
                 )
             }
         }
@@ -464,28 +483,149 @@ fun TrimScreen(
                         color = TextMuted, fontSize = 10.sp
                     )
                 } else {
+                    // ── KARE HASSAS KIRPMA (zoom'lu zaman çizelgesi) ─────────────
+                    // İki tutamaç BAĞIMSIZ hareket eder; her değer videonun gerçek kare
+                    // sınırına oturur (30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms). Tutamaç
+                    // sürüklenirken ana oynatıcı o kareyi gösterir: ayrı önizleme
+                    // baloncuğu/thumbnail üretilmez, ikinci bir dekoder açılmaz.
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(formatClock(viewModel.trimStartMs), color = Purple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         Text("Süre: " + formatClock(viewModel.trimEndMs - viewModel.trimStartMs), color = TextMuted, fontSize = 11.sp)
                         Text(formatClock(viewModel.trimEndMs), color = Purple, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                     }
 
-                    MuxRangeSlider(
+                    FrameTrimTimeline(
+                        durationMs = durationMs,
+                        frameClock = frameClock,
                         startMs = viewModel.trimStartMs,
                         endMs = viewModel.trimEndMs,
-                        durationMs = durationMs,
-                        onRangeChange = { s, e -> viewModel.setTrimRange(s, e) },
+                        windowStartMs = trimWindowStart,
+                        zoom = trimZoom,
+                        playheadMs = { playheadRef.longValue },
                         enabled = !viewModel.isTrimming,
                         activeColor = Purple,
-                        inactiveColor = SurfaceHigh,
+                        onRangeChange = { s, e -> viewModel.setTrimRange(s, e) },
+                        onWindowChange = { z, w ->
+                            trimZoom = z
+                            trimWindowStart = w
+                        },
+                        onHandleDrag = { _, ms -> seekRequest.longValue = ms },
                         modifier = Modifier.fillMaxWidth()
                     )
 
+                    // Kare numaraları + zaman çizelgesi yakınlaştırma
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "A karesi " + frameClock.frameNumber(viewModel.trimStartMs) +
+                                " · B karesi " + frameClock.frameNumber(viewModel.trimEndMs),
+                            color = TextMuted, fontSize = 10.sp, modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = {
+                                val z = (trimZoom / 2f).coerceAtLeast(1f)
+                                trimZoom = z
+                                trimWindowStart = trimWindowStartFor(viewModel.trimStartMs, durationMs, z)
+                            },
+                            enabled = trimZoom > 1.001f && !viewModel.isTrimming,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Filled.Remove, "Uzaklaştır", tint = TextSec, modifier = Modifier.size(17.dp))
+                        }
+                        Text(
+                            if (trimZoom < 1.01f) "1X" else (trimZoom.roundToInt().toString() + "X"),
+                            color = PurpleLight, fontSize = 11.sp, fontWeight = FontWeight.Bold
+                        )
+                        IconButton(
+                            onClick = {
+                                val z = (trimZoom * 2f).coerceAtMost(FRAME_TIMELINE_MAX_ZOOM)
+                                trimZoom = z
+                                trimWindowStart = trimWindowStartFor(viewModel.trimStartMs, durationMs, z)
+                            },
+                            enabled = !viewModel.isTrimming,
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Filled.Add, "Yakınlaştır", tint = TextSec, modifier = Modifier.size(17.dp))
+                        }
+                        TextButton(
+                            onClick = { trimZoom = 1f; trimWindowStart = 0L },
+                            enabled = trimZoom > 1.001f && !viewModel.isTrimming
+                        ) {
+                            Text("Tümü", color = TextMuted, fontSize = 10.sp)
+                        }
+                    }
+
+                    // Tek kare ilerletme: tutamaçları kare kare ayarla.
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        CutPointButton(
+                            label = "A −1 kare",
+                            enabled = !viewModel.isTrimming,
+                            accent = Purple,
+                            onClick = { viewModel.setTrimStart(frameClock.step(viewModel.trimStartMs, -1)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CutPointButton(
+                            label = "A +1 kare",
+                            enabled = !viewModel.isTrimming,
+                            accent = Purple,
+                            onClick = { viewModel.setTrimStart(frameClock.step(viewModel.trimStartMs, 1)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        CutPointButton(
+                            label = "B −1 kare",
+                            enabled = !viewModel.isTrimming,
+                            accent = Purple,
+                            onClick = { viewModel.setTrimEnd(frameClock.step(viewModel.trimEndMs, -1)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CutPointButton(
+                            label = "B +1 kare",
+                            enabled = !viewModel.isTrimming,
+                            accent = Purple,
+                            onClick = { viewModel.setTrimEnd(frameClock.step(viewModel.trimEndMs, 1)) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    // Oynatıcıda GÖRÜNEN kareden kesim noktası koy (gözle seç, kare hassas kes).
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        CutPointButton(
+                            label = "A = bu kare",
+                            enabled = !viewModel.isTrimming,
+                            accent = Amber,
+                            onClick = {
+                                val f = frameClock.snap(playheadRef.longValue)
+                                viewModel.setTrimStart(f)
+                                seekRequest.longValue = f
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        CutPointButton(
+                            label = "B = bu kare",
+                            enabled = !viewModel.isTrimming,
+                            accent = Amber,
+                            onClick = {
+                                val f = frameClock.snap(playheadRef.longValue)
+                                viewModel.setTrimEnd(f)
+                                seekRequest.longValue = f
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Spacer(Modifier.height(6.dp))
                     Text(
                         if (video.isAudioOnly)
                             "Not: Ses dosyası yeniden kodlanmadan (kalite kaybı olmadan) kırpılır."
                         else
-                            "Not: Kalite kaybı olmaması için yeniden kodlama yapılmaz; bu yüzden başlangıç noktası videonun en yakın kare (keyframe) sınırına hizalanabilir.",
+                            "Seçim kare hassastır (her kare ~" +
+                                String.format(Locale.US, "%.2f", frameClock.frameStepUs / 1000.0) +
+                                " ms). Çıktı stream copy ile yazılır: kırpma sırasında yeniden kodlama yapılmaz.",
                         color = TextMuted, fontSize = 10.sp
                     )
 
@@ -1222,10 +1362,19 @@ private fun TrimPlayer(
      * Yatay (landscape) yerleşimde oynatıcı ekranın SOL yarısını kaplar; bu durumda
      * video kutusu sabit 260 dp yerine kalan tüm yüksekliği kullanır.
      */
-    fillHeight: Boolean = false
+    fillHeight: Boolean = false,
+    /**
+     * Videonun gerçek kare zamanlaması. Sürükleme sırasında hedef an bu saat ile
+     * kare sınırına oturtulur (30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms).
+     */
+    frameClock: FrameClock = FrameClock.NONE
 ) {
     val context = LocalContext.current
-    val player = remember { buildFastPlayer(context, isMultiView = false) }
+    // Kare hassas sarma: tolerans SIFIR. Oynatıcı anahtar kareye değil, istenen kareye
+    // oturur; yalnızca o kareye ulaşmak için gereken kareler dekoderden geçer.
+    val player = remember {
+        buildFastPlayer(context, isMultiView = false).apply { setSeekParameters(SEEK_EXACT) }
+    }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
     var pendingSeekTargetMs by remember { mutableLongStateOf(-1L) }
@@ -1239,8 +1388,6 @@ private fun TrimPlayer(
     // HIZLI KESİM: A noktası damgası (-1 = damga yok) ve kısa geri bildirim metni.
     var markStartMs by remember { mutableLongStateOf(-1L) }
     var markHint by remember { mutableStateOf<String?>(null) }
-    // Sürükleme sırasında parmağın altındaki an (YouTube tipi önizleme için). null = sürükleme yok.
-    var scrubMs by remember { mutableStateOf<Long?>(null) }
     val hostView = LocalView.current
     DisposableEffect(hostView) {
         hostView.keepScreenOn = true
@@ -1339,7 +1486,8 @@ private fun TrimPlayer(
         }
         if (abs(endMs - lastAppliedEndMs) > 30L) {
             lastAppliedEndMs = endMs
-            val target = (endMs - 1500L).coerceAtLeast(startState.value)
+            // Bitiş tutamacı sürüklenirken O kare gösterilir (kare hassas kesim noktası).
+            val target = frameClock.snap(endMs).coerceAtLeast(startState.value)
             pendingSeekTargetMs = target
             pendingSeekAt = System.currentTimeMillis()
             positionMs = target
@@ -1396,7 +1544,7 @@ private fun TrimPlayer(
         } else {
             player.currentPosition.coerceAtLeast(0L)
         }
-        val target = (base + delta).coerceIn(startState.value, safeEnd)
+        val target = frameClock.snap(base + delta).coerceIn(startState.value, safeEnd)
         pendingSeekTargetMs = target
         pendingSeekAt = System.currentTimeMillis()
         positionMs = target
@@ -1404,7 +1552,7 @@ private fun TrimPlayer(
     }
     val seekTo: (Long) -> Unit = { target ->
         val safeEnd = if (endState.value > startState.value) endState.value else player.duration.coerceAtLeast(1L)
-        val clamped = target.coerceIn(startState.value, safeEnd)
+        val clamped = frameClock.snap(target).coerceIn(startState.value, safeEnd)
         pendingSeekTargetMs = clamped
         pendingSeekAt = System.currentTimeMillis()
         positionMs = clamped
@@ -1513,11 +1661,6 @@ private fun TrimPlayer(
                             markHint,
                             Modifier.align(Alignment.TopStart).padding(8.dp)
                         )
-                        ScrubPreviewBubble(
-                            source = video.cachePath,
-                            timeMs = scrubMs,
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
-                        )
                     }
                 } else {
                     BoxWithConstraints(modifier = Modifier.fillMaxWidth().clipToBounds()) {
@@ -1529,13 +1672,6 @@ private fun TrimPlayer(
                             MarkHintChip(
                                 markHint,
                                 Modifier.align(Alignment.TopStart).padding(8.dp)
-                            )
-                            ScrubPreviewBubble(
-                                source = video.cachePath,
-                                timeMs = scrubMs,
-                                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
-                                width = 118.dp,
-                                height = 66.dp
                             )
                         }
                     }
@@ -1559,19 +1695,15 @@ private fun TrimPlayer(
             onScaleChange = { scaleMode = it },
             showScale = !video.isAudioOnly,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-            // DÜZELTME (4a/5): Sürükleme boyunca oynatıcı parmağı KARE KARE takip eder
-            // (40 ms tolerans). Parmak kalkınca kare hassas konuma oturulur ki kesim
-            // noktası tam görünsün. Önizleme karesi ayrıca [ScrubPreviewBubble] ile
-            // parmağın üstünde gösterilir; böylece sahne atlaması hissi kalmaz.
+            // KARE HASSAS SÜRÜKLEME: sarma toleransı sıfır (SeekParameters.EXACT).
+            // Sürükleme başında oynatma durur; parmak kalkınca seçilen GERÇEK karede
+            // kalınır. Kare görüntüsü ana oynatıcının kendi donanım dekoderinden gelir:
+            // ayrı önizleme penceresi, thumbnail üretimi veya ikinci dekoder YOK.
             onScrubChange = { dragging ->
-                if (dragging) {
-                    player.setSeekParameters(SEEK_SCRUB)
-                } else {
-                    player.setSeekParameters(SEEK_EXACT)
-                    player.seekTo(positionMs)
-                }
+                player.setSeekParameters(SEEK_EXACT)
+                if (dragging) player.pause() else player.seekTo(positionMs)
             },
-            onScrubMs = { scrubMs = it },
+            snapToFrame = { ms -> frameClock.snap(ms) },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TrackMenuButtons(player, tracks, TextPrimary)
@@ -1624,7 +1756,7 @@ private fun TrimPlayer(
             onMarkEnd = markEnd,
             onUndoCut = onRemoveLastCut,
             showLoading = !playerReady,
-            previewSource = video.cachePath
+            frameClock = frameClock
         )
     }
 }
@@ -1649,8 +1781,8 @@ internal fun SmoothVideoSlider(
     rowHeight: Dp = 34.dp,
     cutRanges: List<TimeRange> = emptyList(),
     markStartMs: Long = -1L,
-    /** Parmak çubukta gezdiği an (YouTube tipi kare önizlemesi için); kalkınca `null`. */
-    onScrubMs: (Long?) -> Unit = {}
+    /** Kare hassasiyeti: hedef an bu fonksiyonla gerçek kare sınırına oturtulur. */
+    snapToFrame: ((Long) -> Long)? = null
 ) {
     val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     val enabled = endMs > startMs
@@ -1680,16 +1812,7 @@ internal fun SmoothVideoSlider(
             inactiveColor = Color(0x55FFFFFF),
             markedRanges = cutRanges,
             markStartMs = markStartMs,
-            onScrubFraction = { f ->
-                if (f == null) {
-                    onScrubMs(null)
-                } else {
-                    // 100 ms'lik kovalara yuvarlanır: önizleme akıcı kalır ama
-                    // gereksiz yeniden çizim (saniyede 60 kez) yapılmaz.
-                    val ms = startMs + (f.toDouble() * (safeEnd - startMs)).toLong()
-                    onScrubMs((ms / 100L) * 100L)
-                }
-            },
+            snapToFrame = snapToFrame,
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 6.dp)
@@ -1728,8 +1851,8 @@ internal fun PlayerControls(
     trailing: (@Composable () -> Unit)? = null,
     cutRanges: List<TimeRange> = emptyList(),
     markStartMs: Long = -1L,
-    /** Sürükleme sırasında parmağın altındaki an (ms); parmak kalkınca `null`. */
-    onScrubMs: (Long?) -> Unit = {}
+    /** Kare hassasiyeti: hedef an gerçek kare sınırına oturtulur. */
+    snapToFrame: ((Long) -> Long)? = null
 ) {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { loadSkipSeconds(ctx) }
@@ -1766,7 +1889,7 @@ internal fun PlayerControls(
             rowHeight = 36.dp,
             cutRanges = cutRanges,
             markStartMs = markStartMs,
-            onScrubMs = onScrubMs
+            snapToFrame = snapToFrame
         )
 
         // 2. Satır: Solda (+ Ekle), Ortada En-Boy Oranı, -10sn, Oynat/Duraklat, +10sn, Döndür, Hız (1X)
@@ -2280,79 +2403,6 @@ internal fun MarkHintChip(text: String?, modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * YouTube tipi sürükleme önizlemesi.
- *
- * Çubukta parmak gezdiği sürece parmağın altındaki ANIN gerçek karesi + zamanı gösterilir.
- * Kare, oynatıcıdan değil [VideoThumbnails] üzerinden ayrı bir kod çözücüden gelir; bu
- * yüzden oynatıcı sarma ile meşgulken bile önizleme gecikmez ve sahne atlamaz.
- */
-@Composable
-internal fun ScrubPreviewBubble(
-    source: String?,
-    timeMs: Long?,
-    modifier: Modifier = Modifier,
-    width: Dp = 156.dp,
-    height: Dp = 88.dp
-) {
-    if (source.isNullOrBlank() || timeMs == null) return
-    // Kısa bir dokunuşta baloncuk "flaş" gibi parlamasın: 140 ms sonra belirir.
-    // (Görünürlük alpha ile yönetilir; böylece kompozisyon koşullu olarak bozulmaz.)
-    var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(timeMs) {
-        if (!shown) {
-            delay(140)
-            shown = true
-        }
-    }
-    // 120 ms'lik kovalar: her küçük parmak hareketinde yeniden çözmez, ama sahne atlamaz.
-    val bucket = timeMs / 120L
-    var frame by remember(source) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(source, bucket) {
-        val next = VideoThumbnails.frameAt(source, bucket * 120L)
-        if (next != null) frame = next
-    }
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = modifier
-            .graphicsLayer { alpha = if (shown) 1f else 0f }
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xE6000000))
-            .padding(4.dp)
-    ) {
-        val bmp = frame
-        if (bmp != null) {
-            Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .width(width)
-                    .height(height)
-                    .clip(RoundedCornerShape(7.dp))
-            )
-        } else {
-            Box(
-                modifier = Modifier.width(width).height(height),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    color = PlayerTurquoise,
-                    strokeWidth = 2.dp
-                )
-            }
-        }
-        Text(
-            formatShortTime(timeMs),
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 3.dp, bottom = 1.dp)
-        )
-    }
-}
-
 @Composable
 internal fun ScaleButton(
     mode: ScaleMode,
@@ -2634,7 +2684,7 @@ private fun FullscreenPlayerDialog(
     onToggleMark: () -> Unit = {},
     onMarkEnd: () -> Unit = {},
     onUndoCut: () -> Unit = {},
-    previewSource: String? = null
+    frameClock: FrameClock = FrameClock.NONE
 ) {
     val context = LocalContext.current
     val cfg = LocalConfiguration.current
@@ -2677,8 +2727,7 @@ private fun FullscreenPlayerDialog(
     var controlsVisible by remember { mutableStateOf(true) }
     var interaction by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
-    // Sürükleme önizlemesi (çubukta) ve orta alanda yatay sürükleme HUD'u.
-    var scrubMs by remember { mutableStateOf<Long?>(null) }
+    // Orta alanda yatay sürükleme HUD'u (kare önizlemesi ana oynatıcıdadır).
     var dragSeekMs by remember { mutableStateOf<Long?>(null) }
     var dragDeltaMs by remember { mutableLongStateOf(0L) }
     var dragToken by remember { mutableIntStateOf(0) }
@@ -2807,10 +2856,12 @@ private fun FullscreenPlayerDialog(
                                         rangeStartState.value,
                                         rangeEndState.value.coerceAtLeast(rangeStartState.value)
                                     )
-                                    dragDeltaMs = ((target - baseMs) / 500L) * 500L
-                                    dragSeekMs = (target / 500L) * 500L
-                                    lastTargetMs = target
-                                    onSeekToState.value(target)
+                                    // Kare hassas hedef: HUD ve sarma aynı kareyi gösterir.
+                                    val snapped = frameClock.snap(target)
+                                    dragDeltaMs = snapped - baseMs
+                                    dragSeekMs = snapped
+                                    lastTargetMs = snapped
+                                    onSeekToState.value(snapped)
                                 },
                                 onDragEnd = {
                                     // Parmak kalkınca kesim noktası tam görünsün diye
@@ -2857,15 +2908,6 @@ private fun FullscreenPlayerDialog(
                             .padding(horizontal = 14.dp, vertical = 8.dp)
                     )
                 }
-
-                // Sürükleme sırasında parmağın altındaki anın karesi (YouTube tipi).
-                ScrubPreviewBubble(
-                    source = previewSource,
-                    timeMs = scrubMs,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = if (controlsVisible) 128.dp else 28.dp)
-                )
 
                 // Ortada yatay sürükleme göstergesi: hedef zaman + atlanan süre.
                 dragSeekMs?.let { target ->
@@ -2932,7 +2974,7 @@ private fun FullscreenPlayerDialog(
                             textColor = Color.White,
                             cutRanges = cutRanges,
                             markStartMs = markStartMs,
-                            onScrubMs = { scrubMs = it },
+                            snapToFrame = { ms -> frameClock.snap(ms) },
                             onRotateScreen = {
                                 interaction++
                                 val act = context.findActivity()
@@ -3085,6 +3127,14 @@ internal class SlotPlayerHolder(
     var cueText: String by mutableStateOf("")
     var buffering: Boolean by mutableStateOf(true)
     var errorText: String? by mutableStateOf(null)
+
+    /**
+     * Videonun GERÇEK kare zamanlaması (konteynerdeki Format.frameRate'ten okunur).
+     * Kare hassas sarma bununla hesaplanır: 30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms.
+     * Ek okuma, ek dekoder veya arka plan kare çıkarma YAPILMAZ.
+     */
+    var frameClock: FrameClock by mutableStateOf(FrameClock.NONE)
+    private var detectedFps: Float = 0f
     /** Bulut (Google Drive) hazırlık / indirme durumu metni; yalnızca yüklenirken dolu. */
     var cloudStatus: String? by mutableStateOf(null)
 
@@ -3158,6 +3208,9 @@ internal class SlotPlayerHolder(
         }
         override fun onTracksChanged(t: Tracks) {
             tracks = t
+            // Kare hızı konteynerden gelir (Format.frameRate): ücretsiz bilgi.
+            // Kare çözme, thumbnail üretme veya ek okuma gerekmez.
+            refreshFrameClock()
         }
         override fun onCues(cueGroup: CueGroup) {
             cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
@@ -3176,6 +3229,7 @@ internal class SlotPlayerHolder(
                 errorText = null
                 val d = player.duration
                 if (d != C.TIME_UNSET && d > 0) durationMs = d
+                refreshFrameClock()
                 if (System.currentTimeMillis() - pendingSeekTimestamp > 700L) {
                     positionMs = player.currentPosition.coerceAtLeast(0L)
                 }
@@ -3330,24 +3384,52 @@ internal class SlotPlayerHolder(
         }
     }
 
+    /**
+     * KARE HASSAS SARMA.
+     *
+     * Hedef önce videonun gerçek kare sınırına oturtulur, sonra toleranssız
+     * ([SeekParameters.EXACT]) sarma yapılır. Böylece anahtar kareye yuvarlanma
+     * ("sahne atlama") olmaz; yalnızca istenen kare gösterilir. Yeniden kodlama,
+     * önceden kare çıkarma veya kare önbelleği YOKTUR: yalnızca o kare dekoderden geçer.
+     *
+     * [isLiveScrub] sürükleme sırasındaki ara istekleri belirtir; aynı hassasiyet
+     * kullanılır çünkü kullanıcı parmağının altındaki kareyi görmek ister.
+     */
     fun seekTo(targetMs: Long, isLiveScrub: Boolean = false) {
         val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: durationMs
         if (d > 0L && durationMs != d) durationMs = d
         val safe = if (d > 0L) targetMs.coerceIn(0L, d) else targetMs.coerceAtLeast(0L)
-        pendingSeekTargetMs = safe
+        // Kareye oturt (kare hızı henüz bilinmiyorsa ham değer kullanılır).
+        val snapped = if (detectedFps > 0f) frameClock.snap(safe) else safe
+        pendingSeekTargetMs = snapped
         pendingSeekTimestamp = System.currentTimeMillis()
-        positionMs = safe
-        // Canlı parmak sürüklemesinde ±1.2sn toleranslı hızlı seek;
-        // parmak bırakıldığında, slider tamamlandığında veya çift tıklamada ±300ms hassas seek.
-        // Böylece uzun GOP'lu videolarda eski kareye yapışıp ileri/geri gitmeme sorunu %100 ortadan kalkar!
-        player.setSeekParameters(
-            if (isLiveScrub) SeekParameters(1_200_000L, 1_200_000L)
-            else SeekParameters(300_000L, 300_000L)
-        )
+        positionMs = snapped
+        player.setSeekParameters(SeekParameters.EXACT)
         if (player.playbackState == Player.STATE_IDLE) {
             player.prepare()
         }
-        player.seekTo(safe)
+        player.seekTo(snapped)
+    }
+
+    /** Sürükleme başladı: oynatmayı durdur, kare sabit kalsın (parmak kalkınca da kalır). */
+    fun pauseForScrub() {
+        if (player.playWhenReady) player.pause()
+    }
+
+    /**
+     * Kare saati: kare hızı konteynerden (Format.frameRate) ve süre oynatıcıdan alınır.
+     * Ek okuma, ek dekoder veya kare önbelleği KULLANILMAZ - sadece aritmetik.
+     */
+    private fun refreshFrameClock() {
+        if (detectedFps <= 0f) {
+            val fr = player.videoFormat?.frameRate ?: 0f
+            if (fr > 0f && fr <= 480f) detectedFps = fr
+        }
+        if (detectedFps <= 0f) return
+        val d = player.duration
+        val dur = if (d != C.TIME_UNSET && d > 0L) d else durationMs
+        val clock = FrameClock.of(detectedFps, dur)
+        if (clock != frameClock) frameClock = clock
     }
 
     fun seekBy(deltaMs: Long) {
@@ -4421,6 +4503,13 @@ private fun SingleOrFocusedPlayerContent(
                         },
                         onMenuOpen = onMenuOpen,
                         textColor = Color.White,
+                        // KARE HASSAS SÜRÜKLEME: parmak çubukta gezerken oynatma durur,
+                        // ana oynatıcı seçilen GERÇEK kareyi gösterir; parmak kalkınca
+                        // o karede kalınır. Ayrı önizleme/thumbnail üretilmez.
+                        onScrubChange = { dragging ->
+                            if (dragging) holder.pauseForScrub() else holder.seekTo(holder.positionMs)
+                        },
+                        snapToFrame = { ms -> holder.frameClock.snap(ms) },
                         onRotateScreen = {
                             onInteraction()
                             val act = context.findActivity()
@@ -4647,10 +4736,14 @@ private fun MultiGridVideoCell(
                         onInteraction()
                         holder.seekTo(target)
                     },
-                    onDragStateChange = { dragging -> isDraggingSlider = dragging },
+                    onDragStateChange = { dragging ->
+                        isDraggingSlider = dragging
+                        if (dragging) holder.pauseForScrub() else holder.seekTo(holder.positionMs)
+                    },
                     textColor = Color.White,
                     fontSizeSp = 10,
-                    rowHeight = 30.dp
+                    rowHeight = 30.dp,
+                    snapToFrame = { ms -> holder.frameClock.snap(ms) }
                 )
 
                 // 2. Satır: TAM ORTADA (Alignment.CenterHorizontally) ve rahat dokunulabilir büyük butonlar

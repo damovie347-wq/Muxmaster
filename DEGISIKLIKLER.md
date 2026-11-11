@@ -1,3 +1,75 @@
+# MuxMaster — Güncelleme 9 / Kare Hassas Sarma + Kare Hassas Kırpma
+
+7 dosya değişti (2 yeni, 1 silindi). Yeniden encode YOK, arka plan kare üretimi YOK.
+
+## 1) Kare hassas sarma (Frame-Accurate Scrubbing)
+- Yeni `data/FrameClock.kt`: videonun **gerçek** kare zamanlaması. Kare hızı ffprobe'un
+  `avg_frame_rate` değerinden (`TrackProber` içinde ek I/O olmadan), kare sayısı varsa
+  `nb_frames`'ten okunur. 30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms hassasiyet.
+- Sarma toleransı **sıfır**: `SeekParameters.EXACT`. Eskiden 350 ms (sürüklemede 40 ms,
+  ana oynatıcıda 1,2 sn) tolerans vardı; bu yüzden oynatıcı en yakın **keyframe**'e
+  yuvarlanıp yanlış kare gösterebiliyordu. Artık hedef, kare sınırına oturtulur ve
+  oynatıcı tam o kareyi gösterir.
+- Hedef an her zaman kare sınırına oturtulur (`FrameClock.snap`), böylece "kare arası"
+  bir ana sarma isteği gitmez.
+
+## 2) Dokunma ofseti (Touch Offset) — YouTube davranışı
+- `MuxSeekSlider` yeniden yazıldı: çubuğun herhangi bir yerine dokunup sürükleyebilirsiniz.
+  Dokunulan nokta ile tutamaç arasındaki mesafe **korunur**; tutamaç parmağın altına
+  **atlamaz**. Sürükleme göreli çalışır (parmak ne kadar giderse tutamaç o kadar gider).
+- Parmak kalkınca seçilen gerçek karede kalınır; oynatma sürükleme boyunca durur.
+- Küçük dokunuşlar (kaydırma olmadan) konumu değiştirmez — ofset korunduğu için yanlışlıkla
+  sıçrama olmaz.
+- Oynatma tutamacı kırmızı halka ile çizilir (kare hassas sürüklemede net görünür).
+
+## 3) Kare hassas kırpma + zoom (yeni `ui/components/FrameTimeline.kt`)
+- `FrameTrimTimeline`: zoom'lu zaman çizelgesi. İki tutamaç (A = başlangıç, B = bitiş)
+  **bağımsız** hareket eder, ikisi de dokunma ofsetini korur ve kare sınırına oturur.
+- Zoom: iki parmakla (pinch) veya paneldeki − / + düğmeleriyle 1X–60X. Boş alanı tek
+  parmakla sürükleyerek görünür pencere kaydırılır. "Tümü" ile tam video.
+- Tek kare ayar düğmeleri: **A −1 kare / A +1 kare / B −1 kare / B +1 kare**.
+- **A = bu kare / B = bu kare**: oynatıcıda gördüğünüz kareyi doğrudan kesim noktası yapar.
+- "A karesi / B karesi" numaraları canlı gösterilir. Thumbnail şeridi YOKTUR: hiçbir kare
+  çözülmez, hiçbir kare önbelleğe alınmaz; sadece kare çentikleri çizilir.
+
+## 4) Ana oynatıcıda anlık kare önizlemesi
+- Kırpma tutamacı veya sarma çubuğu sürüklenirken görüntü **ana video oynatıcısında**
+  güncellenir. Ayrı thumbnail popup / floating preview baloncuğu / video üstünde küçük
+  pencere **kaldırıldı** (`ScrubPreviewBubble` ve `VideoThumbnails` silindi).
+- Böylece ikinci bir `MediaMetadataRetriever` dekoderi artık çalışmıyor: CPU, GPU ve RAM
+  kullanımı düşer.
+
+## 5) Encode yok, kaynak tüketimi minimum
+- Sürükleme/kırpma sırasında FFmpeg, encoder, render veya toplu kare çıkarma **yok**.
+  Orijinal dosya değişmez; yalnızca ihtiyaç duyulan kare mevcut donanım dekoderinden
+  çözülür (`MediaCodecSelector` zaten donanım dekoderini öne alıyor).
+- Sarma istekleri ~20–24 ms'de bir birleştirilir; eskisi oynatıcı tarafından atılır,
+  yalnızca **en son** istenen kare işlenir. Parmak kalkınca tek kesin sarma yapılır ve
+  başka iş kalmaz.
+- Kare önbelleği tutulmaz (LRU'ya gerek yok): oynatıcının mevcut, sınırlı geri tamponu
+  (`setBackBuffer`) kullanılır; sürükleme bitince hiçbir kare bellekte tutulmaz.
+- Kırpma çıktısı hâlâ **stream copy** (`-c copy`). Yeniden kodlama yalnızca kullanıcı
+  dışa aktarmada "Başlangıcı tam hassas kes" seçeneğini açık bırakırsa, yalnızca baş
+  kısım için değerlendirilir (varsayılan davranış korunmuştur).
+
+## 6) VFR / keyframe notları
+- VFR videolarda kare sayısı varsa eşleme "kare sayısı / süre" üzerinden yapılır; bu,
+  nominal FPS'ten daha gerçekçidir. Sarma toleranssız olduğu için gösterilen görüntü,
+  o zaman damgasının içinde bulunduğu gerçek karedir.
+- Uzun GOP'lu dosyalarda artık keyframe'e atlama olmadığı için "yanlış kare" görünmez.
+
+## Değişen dosyalar
+1. `data/FrameClock.kt` **(yeni)** — gerçek kare zamanlaması (fps, kare süresi, snap/step).
+2. `ui/components/FrameTimeline.kt` **(yeni)** — zoom'lu, iki tutamaçlı kare hassas çizelge.
+3. `ui/components/Sliders.kt` — `MuxSeekSlider` dokunma ofseti + kare hassasiyeti;
+   kullanılmayan `MuxRangeSlider` kaldırıldı.
+4. `ui/screens/TrimScreen.kt` — kırpma paneli yeni çizelgeye geçti, kare adım düğmeleri,
+   zoom düğmeleri, önizleme baloncuğu kaldırıldı, sıfır toleranslı sarma.
+5. `viewmodel/TrimViewModel.kt` — `frameClock` + kırpma/kesim noktalarının kareye oturtulması.
+6. `data/TrackProber.kt` — `avg_frame_rate` / `nb_frames` okuma (ek ffprobe çağrısı yok).
+7. `model/Models.kt` — `VideoFile` içine `fps`, `frameCount`.
+8. `data/VideoThumbnails.kt` **(silindi)** — ikinci dekoder artık kullanılmıyor.
+
 # MuxMaster — Güncelleme 8 / Değişiklik Özeti
 
 4 dosya değişti (1 yeni). Proje **GitHub'da hatasız derleniyor** (AGP 8.3.0 / Kotlin 1.9.22 /

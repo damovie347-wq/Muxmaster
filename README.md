@@ -198,8 +198,10 @@ Hız (`build.yml` + `gradle.properties`):
 ### 2) Oynatıcı slider'ı sürüklenmiyordu (sadece dokunma)
 `ui/components/Sliders.kt`: jest artık **`PointerEventPass.Initial`** aşamasında yakalanıp
 her karede tüketiliyor. Böylece içinde bulunduğu dikey kaydırma (verticalScroll) kapsayıcısı
-hareketi çalamıyor; parmak slider'ı birebir takip ediyor, kalkınca kesin hedefe oturuyor.
-Aynı düzeltme `MuxRangeSlider` (başlangıç/bitiş aralığı) için de yapıldı. Dokunma çalışmaya devam eder.
+hareketi çalamıyor; parmak slider'ı takip ediyor, kalkınca kesin hedefe oturuyor.
+Dokunma ofseti korunur: tutamaç parmağın altına atlamaz, parmakla birlikte göreli kayar.
+Kırpma zaman çizelgesi `ui/components/FrameTimeline.kt` (`FrameTrimTimeline`) ile zoom'lu,
+iki bağımsız tutamaçlı ve kare hassastır (`data/FrameClock.kt`).
 
 ### 3) Makas (çoklu kesim) artık görünür ve kullanışlı
 - "Kırpma Aralığı" başlığının hemen sağına **Makasla kes** düğmesi eklendi: Başlangıç–Bitiş

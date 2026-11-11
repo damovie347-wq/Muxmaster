@@ -9,8 +9,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -27,18 +25,33 @@ import androidx.compose.ui.unit.dp
 import com.example.muxmaster.model.TimeRange
 import kotlin.math.abs
 
+/** Sürükleme sırasında oynatıcıya giden sarma isteği aralığı (ms).
+ *  ~24 ms: 60 Hz ekranda akıcı takip, dekoder boğulmaz, eski istekler düşer. */
+private const val SCRUB_SEEK_INTERVAL_MS = 24L
+
+/** Parmağın "sürükleme" sayılması için gereken en küçük hareket (px). */
+private const val SCRUB_SLOP_PX = 3f
+
 /**
  * Neden özel slider?
  *
- * Material3'ün hazır `Slider` / `RangeSlider` bileşenleri, dikey olarak kaydırılabilen
- * (verticalScroll) bir sütunun içinde, daraltılmış yükseklikte kullanıldığında bazı
- * cihazlarda sürükleme (drag) hareketini yutuyor; yalnızca tek dokunuş çalışıyordu.
+ * Material3'ün hazır `Slider` bileşenleri, dikey olarak kaydırılabilen (verticalScroll) bir
+ * sütunun içinde, daraltılmış yükseklikte kullanıldığında bazı cihazlarda sürükleme (drag)
+ * hareketini yutuyor; yalnızca tek dokunuş çalışıyordu.
  *
- * ÇÖZÜM (bu sürüm): jest, [PointerEventPass.Initial] aşamasında yakalanır ve HER karede
- * tüketilir (consume). Initial aşaması yukarıdan aşağıya dağıtıldığı için, üstteki
- * kaydırılabilir kapsayıcı Main aşamasında olayı "tüketilmiş" görür ve kendi kaydırma
- * jestini iptal eder. Böylece parmak slider'ın üzerindeyken ekran kaymaz, slider
- * parmağı birebir takip eder. Tek dokunuş da aynı yoldan çalışır.
+ * ÇÖZÜM: jest, [PointerEventPass.Initial] aşamasında yakalanır ve her karede tüketilir.
+ * Initial aşaması yukarıdan aşağıya dağıtıldığı için, üstteki kaydırılabilir kapsayıcı
+ * Main aşamasında olayı "tüketilmiş" görür ve kendi kaydırma jestini iptal eder.
+ *
+ * DOKUNMA OFSETİ (YouTube / profesyonel oynatıcı davranışı):
+ * Çubuğun herhangi bir yerine dokunup sürükleyebilirsiniz; dokunduğunuz nokta ile tutamaç
+ * arasındaki mesafe KORUNUR. Tutamaç parmağınızın altına atlamaz: parmak ne kadar
+ * hareket ederse tutamaç da o kadar hareket eder (göreli sürükleme). Parmak kalkınca
+ * seçilen GERÇEK karede kalır.
+ *
+ * KARE HASSASİYETİ: [snapToFrame] verildiğinde hedef an her zaman videonun gerçek kare
+ * başlangıcına oturtulur (30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms). Görüntü, oynatıcının
+ * kendi donanım dekoderinden gelir; ayrı bir önizleme/thumbnail üretilmez.
  */
 @Composable
 fun MuxSeekSlider(
@@ -59,10 +72,12 @@ fun MuxSeekSlider(
     /** A noktası damgası (ms). -1 = damga yok; damga ile tutamaç arası sarı gösterilir. */
     markStartMs: Long = -1L,
     /**
-     * Parmak çubuk üzerinde gezdiği anda oranı (0..1) bildirir; parmak kalkınca `null`.
-     * YouTube'daki gibi "parmağın altındaki anın karesini" göstermek için kullanılır.
+     * Kare hassasiyeti: ms -> en yakın kare başlangıcı (bkz. `FrameClock.snap`).
+     * `null` verilirse yuvarlama yapılmaz.
      */
-    onScrubFraction: (Float?) -> Unit = {}
+    snapToFrame: ((Long) -> Long)? = null,
+    /** Dokunulan nokta ile tutamaç arasındaki mesafeyi koru (parmak tutamağı çekmez). */
+    preserveTouchOffset: Boolean = true
 ) {
     val span = (endMs - startMs).coerceAtLeast(1L)
     // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
@@ -70,9 +85,10 @@ fun MuxSeekSlider(
 
     val onSeekState = rememberUpdatedState(onSeek)
     val onScrubState = rememberUpdatedState(onScrubChange)
-    val onScrubFractionState = rememberUpdatedState(onScrubFraction)
     val startState = rememberUpdatedState(startMs)
     val spanState = rememberUpdatedState(span)
+    val positionState = rememberUpdatedState(positionMs)
+    val snapState = rememberUpdatedState(snapToFrame)
 
     val shownFraction = if (dragFraction >= 0f) {
         dragFraction
@@ -84,58 +100,77 @@ fun MuxSeekSlider(
         modifier = modifier
             .fillMaxWidth()
             .height(sliderHeight)
-            .pointerInput(enabled) {
+            .pointerInput(enabled, preserveTouchOffset) {
                 if (!enabled) return@pointerInput
                 val thumbPx = thumbRadius.toPx()
 
-                fun fractionAt(x: Float): Float {
-                    val left = thumbPx
-                    val right = size.width - thumbPx
-                    if (right <= left) return 0f
-                    return ((x - left) / (right - left)).coerceIn(0f, 1f)
-                }
+                fun fractionOf(ms: Long): Float =
+                    ((ms - startState.value).toFloat() / spanState.value.toFloat()).coerceIn(0f, 1f)
 
                 fun msAt(fraction: Float): Long =
                     startState.value + (fraction * spanState.value.toFloat()).toLong()
+
+                fun snapped(ms: Long): Long {
+                    val last = startState.value + spanState.value
+                    val raw = ms.coerceIn(startState.value, last)
+                    val s = snapState.value?.invoke(raw) ?: raw
+                    return s.coerceIn(startState.value, last)
+                }
 
                 awaitEachGesture {
                     // Initial aşaması: üstteki verticalScroll bu olayları tüketilmiş görür.
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     down.consume()
 
-                    // YouTube davranışı: çubuğun NERESİNE basılırsa tutamaç ORAYA atlar
-                    // (parmağın en sağda olması, oynatıcının en solda olması fark etmez).
-                    var fraction = fractionAt(down.position.x)
-                    dragFraction = fraction
-                    onScrubState.value(true)
-                    onScrubFractionState.value(fraction)
-                    onSeekState.value(msAt(fraction))
-                    var lastSeekAt = System.currentTimeMillis()
+                    val usable = (size.width - thumbPx * 2f).coerceAtLeast(1f)
+                    // Dokunma anındaki tutamaç oranı. Ofset korunur: bu oran referans alınır,
+                    // parmağın nerede olduğu değil. Böylece tutamaç parmağın altına atlamaz.
+                    val baseFraction = fractionOf(positionState.value)
+                    val downX = down.position.x
+                    val thumbX = thumbPx + usable * baseFraction
+                    var fraction = baseFraction
+                    var moved = false
+                    var reported = false
+                    var lastSeekAt = 0L
 
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        fraction = fractionAt(change.position.x)
-                        dragFraction = fraction
                         change.consume()
-                        // Önizleme karesi HER harekette güncellenir (gecikme yok).
-                        onScrubFractionState.value(fraction)
-                        if (!change.pressed) {
-                            // Parmak kalktı: kesin hedefe tek seferde otur.
-                            onSeekState.value(msAt(fraction))
-                            break
+
+                        // Ofset korunurken parmağın toplam hareketi, tutamağın toplam
+                        // hareketine eşittir (göreli sürükleme).
+                        val dx = if (preserveTouchOffset) change.position.x - downX
+                        else change.position.x - thumbX
+                        if (!moved && abs(dx) > SCRUB_SLOP_PX) {
+                            moved = true
+                            reported = true
+                            // Sürükleme başladı: üst katman oynatmayı durdurup kareyi sabitler.
+                            onScrubState.value(true)
                         }
-                        // Oynatıcıya giden sarma isteği ~40 ms'de bir birleştirilir:
-                        // saniyede 25 güncelleme -> akıcı takip, dekoder boğulmaz.
-                        val now = System.currentTimeMillis()
-                        if (now - lastSeekAt >= 40L) {
-                            lastSeekAt = now
-                            onSeekState.value(msAt(fraction))
+                        if (moved) {
+                            fraction = (baseFraction + dx / usable).coerceIn(0f, 1f)
+                            val target = snapped(msAt(fraction))
+                            // Tutamaç, kareye oturmuş hedefe göre çizilir (kare kare ilerler).
+                            fraction = fractionOf(target)
+                            dragFraction = fraction
+                            val now = System.currentTimeMillis()
+                            if (!change.pressed || now - lastSeekAt >= SCRUB_SEEK_INTERVAL_MS) {
+                                lastSeekAt = now
+                                onSeekState.value(target)
+                            }
                         }
+                        if (!change.pressed) break
                     }
+
+                    if (moved) {
+                        // Parmak kalktı: seçilen GERÇEK kareye tek seferde otur.
+                        val target = snapped(msAt(fraction))
+                        dragFraction = fractionOf(target)
+                        onSeekState.value(target)
+                    }
+                    if (reported) onScrubState.value(false)
                     dragFraction = -1f
-                    onScrubState.value(false)
-                    onScrubFractionState.value(null)
                 }
             }
     ) {
@@ -163,7 +198,7 @@ fun MuxSeekSlider(
             )
         }
 
-        // ── KESİM İŞARETLERİ (YouTube benzeri çubuk) ────────────────────────
+        // ── KESİM İŞARETLERİ ────────────────────────────────────────────────
         // Damgalanmış kesim aralıkları kırmızı, henüz bitişi seçilmemiş A noktası
         // ile tutamaç arası sarı gösterilir. Böylece "ne kesiliyor" tek bakışta görünür.
         val markerHeight = stroke * 3.2f
@@ -201,149 +236,11 @@ fun MuxSeekSlider(
                 cap = StrokeCap.Round
             )
         }
+        // Oynatma tutamacı: kırmızı halka + beyaz gövde.
+        // Halka, kare hassas sürüklemede tutamağın nerede olduğunu net gösterir.
         drawCircle(color = activeColor.copy(alpha = 0.28f), radius = thumbPx * 1.9f, center = Offset(thumbX, centerY))
-        drawCircle(color = Color.White, radius = thumbPx, center = Offset(thumbX, centerY))
-    }
-}
-
-/**
- * İki tutamaçlı (başlangıç + bitiş) aralık slider'ı. Her iki tutamaç da parmakla
- * sürüklenebilir; tutamaçlardan uzak bir yere dokunulursa en yakın tutamaç oraya taşınır.
- * Jest yönetimi [MuxSeekSlider] ile aynıdır (Initial aşamasında tüketim).
- */
-@Composable
-fun MuxRangeSlider(
-    startMs: Long,
-    endMs: Long,
-    durationMs: Long,
-    onRangeChange: (Long, Long) -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    activeColor: Color = Color(0xFF7C6FE0),
-    inactiveColor: Color = Color(0xFF2A2A35),
-    minGapMs: Long = 100L,
-    thumbRadius: Dp = 9.dp,
-    sliderHeight: Dp = 44.dp
-) {
-    val safeDuration = durationMs.coerceAtLeast(minGapMs + 1L)
-
-    var dragActive by remember { mutableStateOf(false) }
-    var dragStartMs by remember { mutableLongStateOf(startMs) }
-    var dragEndMs by remember { mutableLongStateOf(endMs) }
-
-    val onRangeState = rememberUpdatedState(onRangeChange)
-    val durationState = rememberUpdatedState(safeDuration)
-    val gapState = rememberUpdatedState(minGapMs)
-    val startState = rememberUpdatedState(startMs)
-    val endState = rememberUpdatedState(endMs)
-
-    val shownStart = if (dragActive) dragStartMs else startMs
-    val shownEnd = if (dragActive) dragEndMs else endMs
-
-    Canvas(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(sliderHeight)
-            .pointerInput(enabled, durationMs) {
-                if (!enabled) return@pointerInput
-                val thumbPx = thumbRadius.toPx()
-
-                fun fractionAt(x: Float): Float {
-                    val left = thumbPx
-                    val right = size.width - thumbPx
-                    if (right <= left) return 0f
-                    return ((x - left) / (right - left)).coerceIn(0f, 1f)
-                }
-
-                fun msAt(fraction: Float): Long =
-                    (fraction * durationState.value.toFloat()).toLong()
-
-                fun pxOf(ms: Long): Float {
-                    val left = thumbPx
-                    val right = size.width - thumbPx
-                    val f = (ms.toFloat() / durationState.value.toFloat()).coerceIn(0f, 1f)
-                    return left + (right - left) * f
-                }
-
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                    down.consume()
-
-                    val gap = gapState.value
-                    val dur = durationState.value
-                    val x = down.position.x
-                    var s = startState.value
-                    var e = endState.value
-                    val distStart = abs(x - pxOf(s))
-                    val distEnd = abs(x - pxOf(e))
-                    val handle = if (distStart <= distEnd) 0 else 1
-                    val touchPx = thumbPx * 2.6f
-
-                    // Tutamaçlardan uzak bir yere dokunuldu: en yakın tutamaç oraya taşınır.
-                    if (minOf(distStart, distEnd) > touchPx) {
-                        val target = msAt(fractionAt(x))
-                        if (handle == 0) s = target.coerceIn(0L, (e - gap).coerceAtLeast(0L))
-                        else e = target.coerceIn((s + gap).coerceAtMost(dur), dur)
-                    }
-
-                    dragActive = true
-                    dragStartMs = s
-                    dragEndMs = e
-                    onRangeState.value(s, e)
-
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        val target = msAt(fractionAt(change.position.x))
-                        if (handle == 0) {
-                            s = target.coerceIn(0L, (e - gap).coerceAtLeast(0L))
-                        } else {
-                            e = target.coerceIn((s + gap).coerceAtMost(dur), dur)
-                        }
-                        dragStartMs = s
-                        dragEndMs = e
-                        onRangeState.value(s, e)
-                        change.consume()
-                        if (!change.pressed) break
-                    }
-                    dragActive = false
-                }
-            }
-    ) {
-        val centerY = size.height / 2f
-        val thumbPx = thumbRadius.toPx()
-        val left = thumbPx
-        val right = size.width - thumbPx
-        val trackHeightPx = 5.dp.toPx()
-
-        fun xOf(ms: Long): Float {
-            val f = (ms.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
-            return left + (right - left) * f
-        }
-
-        val startX = xOf(shownStart)
-        val endX = xOf(shownEnd)
-
-        drawLine(
-            color = inactiveColor,
-            start = Offset(left, centerY),
-            end = Offset(right, centerY),
-            strokeWidth = trackHeightPx,
-            cap = StrokeCap.Round
-        )
-        if (endX > startX) {
-            drawLine(
-                color = activeColor,
-                start = Offset(startX, centerY),
-                end = Offset(endX, centerY),
-                strokeWidth = trackHeightPx,
-                cap = StrokeCap.Round
-            )
-        }
-        drawCircle(color = activeColor, radius = thumbPx, center = Offset(startX, centerY))
-        drawCircle(color = Color.White, radius = thumbPx * 0.42f, center = Offset(startX, centerY))
-        drawCircle(color = activeColor, radius = thumbPx, center = Offset(endX, centerY))
-        drawCircle(color = Color.White, radius = thumbPx * 0.42f, center = Offset(endX, centerY))
+        drawCircle(color = Color(0xFFE24B4A), radius = thumbPx * 1.18f, center = Offset(thumbX, centerY))
+        drawCircle(color = Color.White, radius = thumbPx * 0.82f, center = Offset(thumbX, centerY))
     }
 }
 

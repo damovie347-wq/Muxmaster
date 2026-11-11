@@ -11,6 +11,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.example.muxmaster.data.AppPreferences
+import com.example.muxmaster.data.FrameClock
 import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.TrackProber
 import com.example.muxmaster.model.TimeRange
@@ -183,9 +184,10 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     fun addCutRangeExact(startMs: Long, endMs: Long): Int {
         val dur = videoFile?.durationMs ?: return -1
         if (dur <= MIN_CUT_MS || isTrimming) return -1
-        var s = minOf(startMs, endMs).coerceIn(0L, dur)
-        var e = maxOf(startMs, endMs).coerceIn(0L, dur)
-        if (e - s < MIN_CUT_MS) return -1
+        val clock = frameClock
+        var s = clock.snap(minOf(startMs, endMs)).coerceIn(0L, dur)
+        var e = clock.snap(maxOf(startMs, endMs)).coerceIn(0L, dur)
+        if (e - s < maxOf(MIN_CUT_MS, clock.frameStepMs)) return -1
         if (s >= dur - MIN_CUT_MS) {
             // Damgalar videonun en sonunda: aralığı sona yasla.
             e = dur
@@ -278,10 +280,14 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     fun updateCutRange(index: Int, startMs: Long, endMs: Long) {
         val dur = videoFile?.durationMs ?: return
         if (index !in cutRanges.indices) return
-        var s = startMs.coerceIn(0L, dur)
-        var e = endMs.coerceIn(0L, dur)
-        if (e - s < MIN_CUT_MS) {
-            if (s + MIN_CUT_MS <= dur) e = s + MIN_CUT_MS else s = (dur - MIN_CUT_MS).coerceAtLeast(0L)
+        val clock = frameClock
+        val minGap = maxOf(MIN_CUT_MS, clock.frameStepMs)
+        var s = clock.snap(startMs).coerceIn(0L, dur)
+        var e = clock.snap(endMs).coerceIn(0L, dur)
+        if (e - s < minGap) {
+            if (s + minGap <= dur) e = clock.snap(s + minGap).coerceIn(0L, dur)
+            else s = clock.snap((dur - minGap).coerceAtLeast(0L)).coerceIn(0L, dur)
+            if (e - s < minGap) e = (s + minGap).coerceAtMost(dur)
         }
         val list = cutRanges.toMutableList()
         list[index] = TimeRange(s, e)
@@ -441,7 +447,9 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 durationMs = probe.durationMs, fileSizeMb = sizeMb,
                 videoStreamIndex = probe.videoStreamIndex,
                 isAudioOnly = audioOnly,
-                pixFmt = probe.pixFmt
+                pixFmt = probe.pixFmt,
+                fps = probe.fps,
+                frameCount = probe.frameCount
             )
             trimStartMs = 0L
             trimEndMs = probe.durationMs
@@ -482,13 +490,37 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Slider veya manuel giriş her değiştiğinde çağrılır; sınırları ve minimum aralığı garanti eder. */
+    /**
+     * Videonun GERÇEK kare zamanlaması. Kare hassas sarma/kırpma bundan hesaplanır:
+     * 30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms. Kare bilgisi yoksa [FrameClock.NONE].
+     */
+    val frameClock: FrameClock
+        get() {
+            val v = videoFile ?: return FrameClock.NONE
+            return FrameClock.of(v.fps, v.durationMs, v.frameCount)
+        }
+
+    /**
+     * Slider, zaman çizelgesi veya manuel giriş her değiştiğinde çağrılır.
+     *
+     * KARE HASSASİYETİ: gelen değerler videonun gerçek kare sınırlarına oturtulur.
+     * Böylece kesim noktası "kare arası" bir ana denk gelmez; çıktı da kare hizalı olur.
+     */
     fun setTrimRange(startMs: Long, endMs: Long) {
-        val dur = videoFile?.durationMs ?: return
-        var s = startMs.coerceIn(0L, dur)
-        var e = endMs.coerceIn(0L, dur)
-        if (e - s < MIN_GAP_MS) {
-            if (s + MIN_GAP_MS <= dur) e = s + MIN_GAP_MS else s = (dur - MIN_GAP_MS).coerceAtLeast(0L)
+        val video = videoFile ?: return
+        val dur = video.durationMs
+        if (dur <= 0L) return
+        val clock = frameClock
+        val minGap = maxOf(MIN_GAP_MS, clock.frameStepMs)
+        var s = clock.snap(startMs).coerceIn(0L, dur)
+        var e = clock.snap(endMs).coerceIn(0L, dur)
+        if (e - s < minGap) {
+            if (s + minGap <= dur) {
+                e = clock.snap(s + minGap).coerceIn(0L, dur)
+            } else {
+                s = clock.snap((dur - minGap).coerceAtLeast(0L)).coerceIn(0L, dur)
+            }
+            if (e - s < minGap) e = (s + minGap).coerceAtMost(dur)
         }
         trimStartMs = s
         trimEndMs = e

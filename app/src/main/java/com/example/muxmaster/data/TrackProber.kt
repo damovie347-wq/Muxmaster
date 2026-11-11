@@ -20,7 +20,11 @@ object TrackProber {
         val durationMs: Long,
         val videoStreamIndex: Int = 0, // mkvmerge -d için: kaynaktaki gerçek video track id'si
         val hasVideo: Boolean = true,
-        val pixFmt: String = ""
+        val pixFmt: String = "",
+        /** Gerçek ortalama kare hızı (avg_frame_rate). 0 = bilinmiyor. */
+        val fps: Float = 0f,
+        /** Toplam kare sayısı (nb_frames). 0 = konteynerde yazmıyor (ör. MKV). */
+        val frameCount: Int = 0
     )
 
     data class ExistingAudio(
@@ -74,6 +78,8 @@ object TrackProber {
         var videoStreamIndex = 0
         var hasVideo = false
         var pixFmt = ""
+        var fps = 0f
+        var frameCount = 0
 
         for (i in 0 until streams.length()) {
             val stream = streams.getJSONObject(i)
@@ -98,6 +104,15 @@ object TrackProber {
                         videoStreamIndex = index
                         hasVideo = true
                         pixFmt = stream.optString("pix_fmt", "")
+                        // KARE HASSASİYETİ: gerçek kare hızı ve kare sayısı.
+                        // avg_frame_rate -> ortalama (VFR videolarda da gerçekçi),
+                        // r_frame_rate   -> konteynerin nominal hızı (yedek).
+                        val rate = parseFrameRate(stream.optString("avg_frame_rate", ""))
+                            .takeIf { it > 0f }
+                            ?: parseFrameRate(stream.optString("r_frame_rate", ""))
+                        if (rate > 0f) fps = rate
+                        val nb = stream.optString("nb_frames", "").toIntOrNull() ?: 0
+                        if (nb > 0) frameCount = nb
                     }
                 }
                 "audio" -> {
@@ -148,7 +163,25 @@ object TrackProber {
             durationMs = probeAudioDurationMsFallback(videoPath)
         }
 
-        ProbeResult(audioList, subList, videoCodec, resolution, durationMs, videoStreamIndex, hasVideo, pixFmt)
+        ProbeResult(
+            audioList, subList, videoCodec, resolution, durationMs,
+            videoStreamIndex, hasVideo, pixFmt, fps, frameCount
+        )
+    }
+
+    /**
+     * ffprobe'un "30000/1001" biçimindeki kare hızı metnini ondalık sayıya çevirir.
+     * Geçersiz / "0/0" değerlerde 0 döner (çağıran taraf yedeğe geçer).
+     */
+    private fun parseFrameRate(raw: String): Float {
+        val text = raw.trim()
+        if (text.isEmpty() || text == "0/0" || text == "N/A") return 0f
+        val parts = text.split('/')
+        val num = parts.getOrNull(0)?.toDoubleOrNull() ?: return 0f
+        val den = parts.getOrNull(1)?.toDoubleOrNull() ?: 1.0
+        if (den <= 0.0) return 0f
+        val v = num / den
+        return if (v.isFinite() && v > 0.1 && v <= 480.0) v.toFloat() else 0f
     }
 
     /**
