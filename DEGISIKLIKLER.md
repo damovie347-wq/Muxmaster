@@ -1,3 +1,65 @@
+# MuxMaster — Güncelleme 8 / Değişiklik Özeti
+
+4 dosya değişti (1 yeni). Proje **GitHub'da hatasız derleniyor** (AGP 8.3.0 / Kotlin 1.9.22 /
+Gradle 8.5 / compileSdk 34). Bu sürümde `assembleRelease` (R8 + resource shrink +
+lintVital) yerelde de çalıştırıldı: **BUILD SUCCESSFUL**.
+
+## 1) Klasör seçince video artık kendiliğinden tam ekrana GEÇMİYOR
+- `TrimPlayer` içindeki "video seçilince otomatik tam ekran" etkisi kaldırıldı.
+- Tam ekran yalnızca kullanıcı sağdaki **tam ekran düğmesine** basınca açılır.
+
+## 2) Yatay (landscape) kırpma ekranı baştan düzenlendi
+- Önceden her şey tek bir dikey kaydırma sütunundaydı: telefon yataya çevrilince
+  oynatıcı 260 dp'ye sıkışıyor, slider/kesim alanları ekranın altına taşıyordu.
+- Yeni yerleşim (`TrimScreen`):
+  - **Yatay:** solda kalan yüksekliğin **tamamını** kullanan oynatıcı, sağda kendi
+    içinde kaydırılan kontrol paneli (genişlik ekranın %36'sı, 290–420 dp).
+  - **Dikey:** eski düzen aynen korunur.
+- `TrimPlayer(fillHeight = true)` parametresi eklendi: yatayda video kutusu sabit
+  260 dp yerine `weight(1f)` ile tüm boşluğu doldurur.
+
+## 3) Tam ekranda döndürme hatası düzeltildi
+- Video tam ekranda dikey → yatay çevrilince görüntü bozuluyor, ancak ekrana iki kez
+  dokununca düzeliyordu (Dialog penceresi yeni ölçüye geçmiyor, video yüzeyi eski
+  boyutta kalıyordu).
+- `FullscreenPlayerDialog` artık:
+  - `Application.registerComponentCallbacks` ile yön değişimini dinler (`configTick`),
+  - yön/ölçü değişince pencereyi yeniden `MATCH_PARENT` yapar ve `requestLayout()` çağırır,
+  - içeriği `key(layoutKey)` ile yeniden kurar (video yüzeyi yeni ölçüyle oluşur).
+- Sonuç: dikey tam ekrandan yatay tam ekrana geçişte görüntü tek karede doğru yerleşir.
+
+## 4) Slider YouTube gibi + tam ekranda sağ üstte "B" düğmesi
+- `MuxSeekSlider`: çubuğun **neresine** basılırsa tutamaç oraya atlar ve parmağı
+  birebir takip eder (eski 70 ms'lik sıçramalı güncelleme kaldırıldı; sarma isteği
+  ~40 ms'de bir birleştirilir).
+- Tam ekranda **sol üst = A (makas)**, **sağ üst = B** düğmesi. A konunca B düğmesi
+  sarıya döner; B'ye basınca A–B aralığı kesilecekler listesine eklenir.
+- A konmadan B'ye basılırsa "önce A noktasını koy" uyarısı görünür.
+
+## 5) Sürüklemede sahne atlaması ve bekleme bitti
+- Sürükleme sırasında `SeekParameters.CLOSEST_SYNC` yerine **40 ms tolerans**
+  (`SEEK_SCRUB`) kullanılıyor: oynatıcı anahtar kareye değil, hedef ana oturuyor.
+  (Sahne atlamasının sebebi buydu.) Parmak kalkınca 350 ms toleranslı kare hassas
+  konuma geçilir, kesim noktası tam görünür.
+- Yeni `data/VideoThumbnails.kt`: sürükleme sırasında parmağın altındaki anın
+  **gerçek karesini** üretir (`MediaMetadataRetriever`, `OPTION_CLOSEST`, 480 px,
+  LRU önbellek, tek retriever + `Mutex`, iptal edilen istekler düşer).
+- `ScrubPreviewBubble`: çubuğun üstünde küçük kare + zaman etiketi gösterilir.
+  Böylece 20 dakikalık videoda bile her yarım saniyedeki sahne görülebilir.
+
+## 6) Tam ekranda ortada yatay sürükleme = ileri/geri sarma
+- `FullscreenPlayerDialog` içinde ikinci jest tanıyıcı (`detectHorizontalDragGestures`)
+  eklendi: ekranın ortasında parmakla sağa/sola sürükleyince video takip eder.
+- Sürükleme tüm video süresine ölçeklenir; ortada hedef zaman ve `+/- N sn` göstergesi
+  çıkar. Bırakınca kare hassas konuma oturur. Çift dokunma (±10 sn) ve tek dokunma
+  (kontroller) davranışı aynen korunur.
+
+## Değişen dosyalar
+1. `app/src/main/java/com/example/muxmaster/ui/screens/TrimScreen.kt`
+2. `app/src/main/java/com/example/muxmaster/ui/components/Sliders.kt`
+3. `app/src/main/java/com/example/muxmaster/data/VideoThumbnails.kt` **(yeni)**
+4. `DEGISIKLIKLER.md`
+
 # MuxMaster — Güncelleme 7 / Değişiklik Özeti
 
 5 dosya değişti. Proje **GitHub'da hatasız derleniyor** (AGP 8.3.0 / Kotlin 1.9.22 /

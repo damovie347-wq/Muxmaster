@@ -2,9 +2,11 @@ package com.example.muxmaster.ui.screens
 
 import android.app.Activity
 import android.content.Context
+import android.content.ComponentCallbacks
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
@@ -15,6 +17,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -69,7 +72,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -120,6 +125,7 @@ import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.mp4.Mp4Extractor
 import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.data.InputAccess
+import com.example.muxmaster.data.VideoThumbnails
 import com.example.muxmaster.model.TimeRange
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.components.CutTimelineBar
@@ -136,6 +142,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.material.icons.filled.FastForward
@@ -160,6 +167,16 @@ internal val PlayerTurquoise = Color(0xFF66C2B4)
  * kullanılıp görüntünün ANINDA gelmesi sağlanır.)
  */
 private val SEEK_EXACT = SeekParameters(350_000L, 350_000L)
+
+/**
+ * Sürükleme (scrub) sırasında kullanılan sarma toleransı.
+ *
+ * Önceden sürükleme boyunca [SeekParameters.CLOSEST_SYNC] kullanılıyordu; bu yüzden
+ * oynatıcı yalnızca anahtar karelere (keyframe) atlıyor ve çubuk her 2-3 saniyede bir
+ * sahne gösteriyordu. 40 ms toleransla hedefe neredeyse tam oturulur: kare kare takip
+ * eder, yine de anahtar kareden çok uzun çözme yapmaz.
+ */
+private val SEEK_SCRUB = SeekParameters(40_000L, 40_000L)
 
 private fun formatClock(ms: Long): String {
     val safe = ms.coerceAtLeast(0L)
@@ -232,16 +249,20 @@ fun TrimScreen(
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            if (video != null) {
+        val cfg = LocalConfiguration.current
+        val isLandscape = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+        // ── DÜZELTME (2): YATAY (LANDSCAPE) YERLEŞİM ──────────────────────────
+        // Önceden her şey tek bir dikey kaydırma sütunundaydı; telefon yataya
+        // çevrilince oynatıcı 260 dp'ye sıkışıyor, slider ve kesim alanları ekranın
+        // altına taşıp iç içe giriyordu. Artık yatayda ekran ikiye ayrılır:
+        //   SOL  -> kalan yüksekliğin tamamını kullanan oynatıcı,
+        //   SAĞ  -> kendi içinde kaydırılan derli toplu kontrol paneli.
+        val playerBlock: @Composable (Boolean) -> Unit = { fill ->
+            val v = video
+            if (v != null) {
                 TrimPlayer(
-                    video = video,
+                    video = v,
                     // Çoklu kesim modunda oynatıcı TÜM videoyu kapsar (tek aralık sınırı uygulanmaz).
                     startMs = if (viewModel.isMultiCut) 0L else viewModel.trimStartMs,
                     endMs = if (viewModel.isMultiCut) durationMs else viewModel.trimEndMs,
@@ -251,11 +272,13 @@ fun TrimScreen(
                     seekRequestMs = seekRequest,
                     cutRanges = viewModel.cutRanges,
                     onAddCut = { s, e -> viewModel.addCutRangeExact(s, e) },
-                    onRemoveLastCut = viewModel::removeLastCutRange
+                    onRemoveLastCut = viewModel::removeLastCutRange,
+                    fillHeight = fill
                 )
-                Spacer(Modifier.height(12.dp))
             }
+        }
 
+        val controls: @Composable ColumnScope.() -> Unit = {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(
                     onClick = onPickFolder,
@@ -645,6 +668,45 @@ fun TrimScreen(
                 Spacer(Modifier.height(24.dp))
             } else {
                 Spacer(Modifier.height(24.dp))
+            }
+        }
+
+        if (isLandscape && video != null) {
+            // YATAY: solda oynatıcı, sağda kaydırılabilir kontrol paneli.
+            val panelWidth = (cfg.screenWidthDp * 0.36f).dp.coerceIn(290.dp, 420.dp)
+            Row(modifier = Modifier.padding(padding).fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .padding(start = 10.dp, top = 8.dp, end = 6.dp, bottom = 8.dp)
+                ) {
+                    playerBlock(true)
+                }
+                Column(
+                    modifier = Modifier
+                        .width(panelWidth)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState())
+                        .padding(start = 2.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)
+                ) {
+                    controls()
+                }
+            }
+        } else {
+            // DİKEY (eski düzen): oynatıcı + kontroller tek sütunda, yukarıdan aşağı.
+            Column(
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                if (video != null) {
+                    playerBlock(false)
+                    Spacer(Modifier.height(12.dp))
+                }
+                controls()
             }
         }
     }
@@ -1155,7 +1217,12 @@ private fun TrimPlayer(
     seekRequestMs: androidx.compose.runtime.MutableLongState = remember { mutableLongStateOf(-1L) },
     cutRanges: List<TimeRange> = emptyList(),
     onAddCut: (Long, Long) -> Int = { _, _ -> -1 },
-    onRemoveLastCut: () -> Unit = {}
+    onRemoveLastCut: () -> Unit = {},
+    /**
+     * Yatay (landscape) yerleşimde oynatıcı ekranın SOL yarısını kaplar; bu durumda
+     * video kutusu sabit 260 dp yerine kalan tüm yüksekliği kullanır.
+     */
+    fillHeight: Boolean = false
 ) {
     val context = LocalContext.current
     val player = remember { buildFastPlayer(context, isMultiView = false) }
@@ -1172,7 +1239,8 @@ private fun TrimPlayer(
     // HIZLI KESİM: A noktası damgası (-1 = damga yok) ve kısa geri bildirim metni.
     var markStartMs by remember { mutableLongStateOf(-1L) }
     var markHint by remember { mutableStateOf<String?>(null) }
-    var autoFullscreenFor by remember { mutableStateOf<String?>(null) }
+    // Sürükleme sırasında parmağın altındaki an (YouTube tipi önizleme için). null = sürükleme yok.
+    var scrubMs by remember { mutableStateOf<Long?>(null) }
     val hostView = LocalView.current
     DisposableEffect(hostView) {
         hostView.keepScreenOn = true
@@ -1352,15 +1420,9 @@ private fun TrimPlayer(
         }
     }
 
-    // TAM EKRAN: video seçildiği anda oynatıcı YouTube gibi tam ekran açılır.
-    // (Aynı video için bir kez; kullanıcı geri okuyla çıktıysa tekrar açılmaz.)
-    LaunchedEffect(video.uri, video.isAudioOnly) {
-        val key = video.uri.toString()
-        if (!video.isAudioOnly && autoFullscreenFor != key) {
-            autoFullscreenFor = key
-            fullscreen = true
-        }
-    }
+    // DÜZELTME (1): Video/klasör seçildiğinde oynatıcı ARTIK kendiliğinden tam ekrana
+    // GEÇMEZ. Kullanıcı isterse sağdaki tam ekran düğmesiyle açar. Böylece klasörden
+    // video seçince "neden birden tam ekran oldu?" durumu ortadan kalkar.
 
     // Geri bildirim metni kısa süre sonra kaybolur.
     LaunchedEffect(markHint) {
@@ -1371,29 +1433,49 @@ private fun TrimPlayer(
     }
 
     /**
-     * A–B damgası: ilk dokunuş A'yı, ikinci dokunuş B'yi koyar ve aradaki bölüm
-     * otomatik olarak kesilecekler listesine eklenir. Dakika girmeye gerek yok.
+     * A–B damgası: A yoksa A'yı koyar; A varsa verilen konumu B yapar ve aradaki bölümü
+     * otomatik olarak kesilecekler listesine ekler. Dakika/saniye girmeye gerek yok.
+     */
+    fun commitMarkAt(posRaw: Long) {
+        val pos = posRaw.coerceAtLeast(0L)
+        if (markStartMs < 0L) {
+            markStartMs = pos
+            markHint = "A: ${formatShortTime(pos)} · şimdi B noktasını koy"
+            return
+        }
+        val s = minOf(markStartMs, pos)
+        val e = maxOf(markStartMs, pos)
+        if (e - s < 700L) {
+            markHint = "Aralık çok kısa (en az 1 sn)"
+        } else {
+            val idx = onAddCut(s, e)
+            markHint = if (idx >= 0) {
+                "Kesim eklendi: ${formatShortTime(s)} – ${formatShortTime(e)}"
+            } else {
+                null
+            }
+        }
+        markStartMs = -1L
+    }
+
+    /**
+     * Makas düğmesi: A yoksa A'yı koyar, A varsa B'yi koyup aralığı ekler.
      */
     val toggleMark: () -> Unit = {
+        if (!isTrimming) commitMarkAt(positionMs)
+    }
+
+    /**
+     * DÜZELTME (4b): Tam ekranda SAĞ üstteki "B" düğmesi. Sol üstteki makas A noktasını
+     * koyar; sağdaki düğme B noktasını (bitiş) koyar. A konmadan basılırsa kullanıcı
+     * kısa bir uyarı görür (önce A, sonra B).
+     */
+    val markEnd: () -> Unit = {
         if (!isTrimming) {
-            val pos = positionMs.coerceAtLeast(0L)
             if (markStartMs < 0L) {
-                markStartMs = pos
-                markHint = "A: ${formatShortTime(pos)} · bitişi seç"
+                markHint = "Önce sol üstteki makasla A noktasını koy"
             } else {
-                val s = minOf(markStartMs, pos)
-                val e = maxOf(markStartMs, pos)
-                if (e - s < 700L) {
-                    markHint = "Aralık çok kısa (en az 1 sn)"
-                } else {
-                    val idx = onAddCut(s, e)
-                    markHint = if (idx >= 0) {
-                        "Kesim eklendi: ${formatShortTime(s)} – ${formatShortTime(e)}"
-                    } else {
-                        null
-                    }
-                }
-                markStartMs = -1L
+                commitMarkAt(positionMs)
             }
         }
     }
@@ -1401,13 +1483,17 @@ private fun TrimPlayer(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
             .background(Surface, RoundedCornerShape(16.dp))
             .padding(bottom = 6.dp)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 260.dp)
+                .then(
+                    if (fillHeight) Modifier.weight(1f)
+                    else Modifier.heightIn(max = 260.dp)
+                )
                 .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
                 .background(Color.Black)
                 .clipToBounds(),
@@ -1418,16 +1504,40 @@ private fun TrimPlayer(
                     Icon(Icons.Filled.MusicNote, null, tint = PurpleLight, modifier = Modifier.size(48.dp))
                 }
             } else if (!fullscreen) {
-                BoxWithConstraints(modifier = Modifier.fillMaxWidth().clipToBounds()) {
-                    val byWidth = maxWidth / aspect.coerceAtLeast(0.1f)
-                    val h = if (byWidth < 260.dp) byWidth else 260.dp
-                    Box(modifier = Modifier.fillMaxWidth().height(h).clipToBounds()) {
+                if (fillHeight) {
+                    // Yatay yerleşim: kalan yüksekliğin tamamı video.
+                    Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
                         VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
                         SubtitleOverlay(cueText, Modifier.align(Alignment.BottomCenter))
                         MarkHintChip(
                             markHint,
                             Modifier.align(Alignment.TopStart).padding(8.dp)
                         )
+                        ScrubPreviewBubble(
+                            source = video.cachePath,
+                            timeMs = scrubMs,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+                        )
+                    }
+                } else {
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth().clipToBounds()) {
+                        val byWidth = maxWidth / aspect.coerceAtLeast(0.1f)
+                        val h = if (byWidth < 260.dp) byWidth else 260.dp
+                        Box(modifier = Modifier.fillMaxWidth().height(h).clipToBounds()) {
+                            VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
+                            SubtitleOverlay(cueText, Modifier.align(Alignment.BottomCenter))
+                            MarkHintChip(
+                                markHint,
+                                Modifier.align(Alignment.TopStart).padding(8.dp)
+                            )
+                            ScrubPreviewBubble(
+                                source = video.cachePath,
+                                timeMs = scrubMs,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                                width = 118.dp,
+                                height = 66.dp
+                            )
+                        }
                     }
                 }
             } else {
@@ -1449,17 +1559,19 @@ private fun TrimPlayer(
             onScaleChange = { scaleMode = it },
             showScale = !video.isAudioOnly,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+            // DÜZELTME (4a/5): Sürükleme boyunca oynatıcı parmağı KARE KARE takip eder
+            // (40 ms tolerans). Parmak kalkınca kare hassas konuma oturulur ki kesim
+            // noktası tam görünsün. Önizleme karesi ayrıca [ScrubPreviewBubble] ile
+            // parmağın üstünde gösterilir; böylece sahne atlaması hissi kalmaz.
             onScrubChange = { dragging ->
-                // HIZ: sürükleme sırasında en yakın anahtar kareye atlanır -> görüntü
-                // ANINDA gelir (20 dakikalık videoda bile bekleme yok). Parmak kalkınca
-                // kare hassas konuma oturulur ki kesim noktası tam görünsün.
                 if (dragging) {
-                    player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                    player.setSeekParameters(SEEK_SCRUB)
                 } else {
                     player.setSeekParameters(SEEK_EXACT)
                     player.seekTo(positionMs)
                 }
             },
+            onScrubMs = { scrubMs = it },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TrackMenuButtons(player, tracks, TextPrimary)
@@ -1509,8 +1621,10 @@ private fun TrimPlayer(
             markStartMs = markStartMs,
             markHint = markHint,
             onToggleMark = toggleMark,
+            onMarkEnd = markEnd,
             onUndoCut = onRemoveLastCut,
-            showLoading = !playerReady
+            showLoading = !playerReady,
+            previewSource = video.cachePath
         )
     }
 }
@@ -1534,7 +1648,9 @@ internal fun SmoothVideoSlider(
     fontSizeSp: Int = 12,
     rowHeight: Dp = 34.dp,
     cutRanges: List<TimeRange> = emptyList(),
-    markStartMs: Long = -1L
+    markStartMs: Long = -1L,
+    /** Parmak çubukta gezdiği an (YouTube tipi kare önizlemesi için); kalkınca `null`. */
+    onScrubMs: (Long?) -> Unit = {}
 ) {
     val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     val enabled = endMs > startMs
@@ -1564,6 +1680,16 @@ internal fun SmoothVideoSlider(
             inactiveColor = Color(0x55FFFFFF),
             markedRanges = cutRanges,
             markStartMs = markStartMs,
+            onScrubFraction = { f ->
+                if (f == null) {
+                    onScrubMs(null)
+                } else {
+                    // 100 ms'lik kovalara yuvarlanır: önizleme akıcı kalır ama
+                    // gereksiz yeniden çizim (saniyede 60 kez) yapılmaz.
+                    val ms = startMs + (f.toDouble() * (safeEnd - startMs)).toLong()
+                    onScrubMs((ms / 100L) * 100L)
+                }
+            },
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 6.dp)
@@ -1601,7 +1727,9 @@ internal fun PlayerControls(
     leadingBottom: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     cutRanges: List<TimeRange> = emptyList(),
-    markStartMs: Long = -1L
+    markStartMs: Long = -1L,
+    /** Sürükleme sırasında parmağın altındaki an (ms); parmak kalkınca `null`. */
+    onScrubMs: (Long?) -> Unit = {}
 ) {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { loadSkipSeconds(ctx) }
@@ -1637,7 +1765,8 @@ internal fun PlayerControls(
             fontSizeSp = 12,
             rowHeight = 36.dp,
             cutRanges = cutRanges,
-            markStartMs = markStartMs
+            markStartMs = markStartMs,
+            onScrubMs = onScrubMs
         )
 
         // 2. Satır: Solda (+ Ekle), Ortada En-Boy Oranı, -10sn, Oynat/Duraklat, +10sn, Döndür, Hız (1X)
@@ -2103,6 +2232,34 @@ internal fun CutMarkButton(
     }
 }
 
+/**
+ * DÜZELTME (4b): Tam ekranda SAĞ üstteki "B" (bitiş) düğmesi.
+ * A noktası konduğunda sarıya döner: "şimdi bitişi seç".
+ */
+@Composable
+internal fun CutEndButton(
+    ready: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    buttonSize: Dp = 40.dp
+) {
+    Box(
+        modifier = Modifier
+            .size(buttonSize)
+            .clip(CircleShape)
+            .background(if (ready) Amber else Color(0x66000000))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            "B",
+            color = if (ready) Color.Black else Color.White.copy(alpha = if (enabled) 1f else 0.4f),
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
 /** Hızlı kesim sırasında kısa süreli görünen geri bildirim baloncuğu. */
 @Composable
 internal fun MarkHintChip(text: String?, modifier: Modifier = Modifier) {
@@ -2119,6 +2276,79 @@ internal fun MarkHintChip(text: String?, modifier: Modifier = Modifier) {
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1
+        )
+    }
+}
+
+/**
+ * YouTube tipi sürükleme önizlemesi.
+ *
+ * Çubukta parmak gezdiği sürece parmağın altındaki ANIN gerçek karesi + zamanı gösterilir.
+ * Kare, oynatıcıdan değil [VideoThumbnails] üzerinden ayrı bir kod çözücüden gelir; bu
+ * yüzden oynatıcı sarma ile meşgulken bile önizleme gecikmez ve sahne atlamaz.
+ */
+@Composable
+internal fun ScrubPreviewBubble(
+    source: String?,
+    timeMs: Long?,
+    modifier: Modifier = Modifier,
+    width: Dp = 156.dp,
+    height: Dp = 88.dp
+) {
+    if (source.isNullOrBlank() || timeMs == null) return
+    // Kısa bir dokunuşta baloncuk "flaş" gibi parlamasın: 140 ms sonra belirir.
+    // (Görünürlük alpha ile yönetilir; böylece kompozisyon koşullu olarak bozulmaz.)
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(timeMs) {
+        if (!shown) {
+            delay(140)
+            shown = true
+        }
+    }
+    // 120 ms'lik kovalar: her küçük parmak hareketinde yeniden çözmez, ama sahne atlamaz.
+    val bucket = timeMs / 120L
+    var frame by remember(source) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(source, bucket) {
+        val next = VideoThumbnails.frameAt(source, bucket * 120L)
+        if (next != null) frame = next
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .graphicsLayer { alpha = if (shown) 1f else 0f }
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xE6000000))
+            .padding(4.dp)
+    ) {
+        val bmp = frame
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .width(width)
+                    .height(height)
+                    .clip(RoundedCornerShape(7.dp))
+            )
+        } else {
+            Box(
+                modifier = Modifier.width(width).height(height),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    color = PlayerTurquoise,
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+        Text(
+            formatShortTime(timeMs),
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 3.dp, bottom = 1.dp)
         )
     }
 }
@@ -2402,12 +2632,57 @@ private fun FullscreenPlayerDialog(
     markStartMs: Long = -1L,
     markHint: String? = null,
     onToggleMark: () -> Unit = {},
-    onUndoCut: () -> Unit = {}
+    onMarkEnd: () -> Unit = {},
+    onUndoCut: () -> Unit = {},
+    previewSource: String? = null
 ) {
     val context = LocalContext.current
+    val cfg = LocalConfiguration.current
+    val isLandscape = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    // ── DÜZELTME (3): DÖNME HATASI ────────────────────────────────────────────
+    // Ekran yatay/dikey çevrildiğinde Dialog penceresi yeni ölçüye geçmiyor, içerideki
+    // video yüzeyi (TextureView) eski boyutta kalıyordu; video küçücük bir dikdörtgene
+    // sıkışıp ancak ekrana iki kez dokununca düzeliyordu. Artık yön/ölçü değişince
+    // pencere yeniden tam ekran ölçüsüne oturtulur ve içerik anahtarlanıp tazelenir.
+    // Compose'un yanı sıra Application seviyesinden de yön değişimini dinliyoruz:
+    // bazı cihazlarda Dialog penceresi yeni Configuration'ı içeriye iletmiyor.
+    val hostActivity = context.findActivity()
+    var configTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(hostActivity) {
+        val callbacks = object : ComponentCallbacks {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                configTick++
+            }
+
+            override fun onLowMemory() {}
+        }
+        hostActivity?.application?.registerComponentCallbacks(callbacks)
+        onDispose { hostActivity?.application?.unregisterComponentCallbacks(callbacks) }
+    }
+    // GÜVENLİK AĞI: callback'i iletmeyen üretici ROM'ları için yön/ölçü ayrıca
+    // 250 ms'de bir Activity kaynaklarından izlenir (tam ekran açıkken ihmal edilebilir).
+    LaunchedEffect(Unit) {
+        var last = ""
+        while (true) {
+            val c = hostActivity?.resources?.configuration
+            val sig = if (c == null) "" else "${c.orientation}:${c.screenWidthDp}x${c.screenHeightDp}"
+            if (last.isNotEmpty() && sig != last) configTick++
+            last = sig
+            delay(250)
+        }
+    }
+    val layoutKey = "${cfg.orientation}:${cfg.screenWidthDp}x${cfg.screenHeightDp}:$configTick"
+
     var controlsVisible by remember { mutableStateOf(true) }
     var interaction by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
+    // Sürükleme önizlemesi (çubukta) ve orta alanda yatay sürükleme HUD'u.
+    var scrubMs by remember { mutableStateOf<Long?>(null) }
+    var dragSeekMs by remember { mutableStateOf<Long?>(null) }
+    var dragDeltaMs by remember { mutableLongStateOf(0L) }
+    var dragToken by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
 
     DisposableEffect(Unit) {
         val activity = context.findActivity()
@@ -2459,164 +2734,300 @@ private fun FullscreenPlayerDialog(
             }
         }
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black)
-        ) {
-            VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
+        // Yön değişince pencereyi yeniden ekran ölçüsüne oturt (dönme düzeltmesi).
+        LaunchedEffect(layoutKey) {
+            delay(60)
+            val w = (view.parent as? DialogWindowProvider)?.window
+            w?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            view.requestLayout()
+        }
 
-            val toggleControlsState = rememberUpdatedState { controlsVisible = !controlsVisible }
-            val onTogglePlayState = rememberUpdatedState(onTogglePlay)
-            val onSeekByState = rememberUpdatedState(onSeekBy)
+        key(layoutKey) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectTapGestures(
-                            onTap = { toggleControlsState.value() },
-                            onDoubleTap = { offset ->
-                                val w = size.width.coerceAtLeast(1)
-                                val skipMs = skipSecondsState.intValue * 1000L
-                                when {
-                                    offset.x < w / 3f -> onSeekByState.value(-skipMs)
-                                    offset.x > (w * 2f) / 3f -> onSeekByState.value(skipMs)
-                                    else -> onTogglePlayState.value()
+                    .background(Color.Black)
+            ) {
+                VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
+
+                val toggleControlsState = rememberUpdatedState { controlsVisible = !controlsVisible }
+                val onTogglePlayState = rememberUpdatedState(onTogglePlay)
+                val onSeekByState = rememberUpdatedState(onSeekBy)
+                val onSeekToState = rememberUpdatedState(onSeekTo)
+                val posState = rememberUpdatedState(positionMs)
+                val rangeStartState = rememberUpdatedState(startMs)
+                val rangeEndState = rememberUpdatedState(endMs)
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onTap = { toggleControlsState.value() },
+                                onDoubleTap = { offset ->
+                                    val w = size.width.coerceAtLeast(1)
+                                    val skipMs = skipSecondsState.intValue * 1000L
+                                    when {
+                                        offset.x < w / 3f -> onSeekByState.value(-skipMs)
+                                        offset.x > (w * 2f) / 3f -> onSeekByState.value(skipMs)
+                                        else -> onTogglePlayState.value()
+                                    }
+                                }
+                            )
+                        }
+                        // ── DÜZELTME (6): ORTADA YATAY SÜRÜKLEME = İLERİ/GERİ SARMA ──
+                        // Video tam ekrandayken parmak ekranın ortasındayken sağa/sola
+                        // sürüklenince video takip eder (YouTube'daki gibi). Sürükleme
+                        // miktarı tüm video süresine ölçeklenir; ortada hedef zaman +
+                        // kaç saniye atlandığı gösterilir.
+                        .pointerInput(Unit) {
+                            var baseMs = 0L
+                            var accumulated = 0f
+                            var lastTargetMs = 0L
+                            detectHorizontalDragGestures(
+                                onDragStart = {
+                                    interaction++
+                                    accumulated = 0f
+                                    baseMs = posState.value.coerceAtLeast(0L)
+                                    lastTargetMs = baseMs
+                                    // Sürükleme boyunca kare kare takip (anahtar kareye
+                                    // atlamaz) -> sahne atlaması hissi oluşmaz.
+                                    player.setSeekParameters(SEEK_SCRUB)
+                                    dragDeltaMs = 0L
+                                    dragSeekMs = baseMs
+                                },
+                                onHorizontalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    accumulated += dragAmount
+                                    val w = size.width.coerceAtLeast(1).toFloat()
+                                    val span = (rangeEndState.value - rangeStartState.value)
+                                        .coerceAtLeast(1L)
+                                    val delta = (accumulated / w * span).toLong()
+                                    val target = (baseMs + delta).coerceIn(
+                                        rangeStartState.value,
+                                        rangeEndState.value.coerceAtLeast(rangeStartState.value)
+                                    )
+                                    dragDeltaMs = ((target - baseMs) / 500L) * 500L
+                                    dragSeekMs = (target / 500L) * 500L
+                                    lastTargetMs = target
+                                    onSeekToState.value(target)
+                                },
+                                onDragEnd = {
+                                    // Parmak kalkınca kesim noktası tam görünsün diye
+                                    // kare hassas konuma otur.
+                                    player.setSeekParameters(SEEK_EXACT)
+                                    player.seekTo(lastTargetMs)
+                                    val token = ++dragToken
+                                    scope.launch {
+                                        delay(700)
+                                        if (dragToken == token) {
+                                            dragSeekMs = null
+                                            dragDeltaMs = 0L
+                                        }
+                                    }
+                                },
+                                onDragCancel = {
+                                    player.setSeekParameters(SEEK_EXACT)
+                                    dragSeekMs = null
+                                    dragDeltaMs = 0L
+                                }
+                            )
+                        }
+                )
+
+                SubtitleOverlay(
+                    cueText,
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = if (controlsVisible) 120.dp else 24.dp)
+                )
+
+                if (showLoading && overlayText == null) {
+                    LoadingRing(Modifier.align(Alignment.Center))
+                }
+                if (overlayText != null) {
+                    Text(
+                        overlayText,
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
+
+                // Sürükleme sırasında parmağın altındaki anın karesi (YouTube tipi).
+                ScrubPreviewBubble(
+                    source = previewSource,
+                    timeMs = scrubMs,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = if (controlsVisible) 128.dp else 28.dp)
+                )
+
+                // Ortada yatay sürükleme göstergesi: hedef zaman + atlanan süre.
+                dragSeekMs?.let { target ->
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 18.dp, vertical = 10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (dragDeltaMs < 0) Icons.Filled.FastRewind else Icons.Filled.FastForward,
+                                null,
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                formatShortTime(target),
+                                color = Color.White,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            if (dragDeltaMs >= 0) "+${dragDeltaMs / 1000} sn"
+                            else "-${(-dragDeltaMs) / 1000} sn",
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                if (controlsVisible) {
+                    IconButton(
+                        onClick = onExit,
+                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
+                    ) {
+                        Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White)
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.68f))
+                            .padding(horizontal = if (isLandscape) 22.dp else 14.dp, vertical = 6.dp)
+                    ) {
+                        PlayerControls(
+                            isPlaying = isPlaying,
+                            positionMs = positionMs,
+                            startMs = startMs,
+                            endMs = endMs,
+                            onTogglePlay = { interaction++; onTogglePlay() },
+                            onSeekBy = { interaction++; onSeekBy(it) },
+                            onSeekTo = { interaction++; onSeekTo(it) },
+                            speed = speed,
+                            onSpeedChange = { interaction++; onSpeedChange(it) },
+                            scaleMode = scaleMode,
+                            onScaleChange = { interaction++; onScaleChange(it) },
+                            onMenuOpen = { menuOpen = it },
+                            textColor = Color.White,
+                            cutRanges = cutRanges,
+                            markStartMs = markStartMs,
+                            onScrubMs = { scrubMs = it },
+                            onRotateScreen = {
+                                interaction++
+                                val act = context.findActivity()
+                                if (act != null) {
+                                    val landscape = act.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+                                    act.requestedOrientation = if (landscape)
+                                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                                    else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                }
+                            },
+                            trailing = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    TrackMenuButtons(player, tracks, Color.White) { menuOpen = it }
+                                    IconButton(onClick = {
+                                        interaction++
+                                        onExit()
+                                    }, modifier = Modifier.size(34.dp)) {
+                                        Icon(
+                                            Icons.Filled.FullscreenExit,
+                                            "Tam ekrandan çık",
+                                            tint = Color.White, modifier = Modifier.size(22.dp)
+                                        )
+                                    }
                                 }
                             }
                         )
                     }
-            )
-
-            SubtitleOverlay(
-                cueText,
-                Modifier.align(Alignment.BottomCenter).padding(bottom = if (controlsVisible) 110.dp else 24.dp)
-            )
-
-            if (showLoading && overlayText == null) {
-                LoadingRing(Modifier.align(Alignment.Center))
-            }
-            if (overlayText != null) {
-                Text(
-                    overlayText,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xCC000000))
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                )
-            }
-
-            if (controlsVisible) {
-                IconButton(
-                    onClick = onExit,
-                    modifier = Modifier.align(Alignment.TopStart).padding(8.dp)
-                ) {
-                    Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White)
                 }
 
+                // ── SOL ÜST: A NOKTASI (hızlı kesim) ──────────────────────────────
+                // Kontroller gizlense de görünür kalır: parmağı ekrana değdirmeden
+                // doğrudan damga konabilir. Geri okunun hemen altında (çok yukarıda değil).
                 Column(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .background(Color.Black.copy(alpha = 0.68f))
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .align(Alignment.TopStart)
+                        .padding(start = 12.dp, top = 58.dp),
+                    horizontalAlignment = Alignment.Start
                 ) {
-                    PlayerControls(
-                        isPlaying = isPlaying,
-                        positionMs = positionMs,
-                        startMs = startMs,
-                        endMs = endMs,
-                        onTogglePlay = { interaction++; onTogglePlay() },
-                        onSeekBy = { interaction++; onSeekBy(it) },
-                        onSeekTo = { interaction++; onSeekTo(it) },
-                        speed = speed,
-                        onSpeedChange = { interaction++; onSpeedChange(it) },
-                        scaleMode = scaleMode,
-                        onScaleChange = { interaction++; onScaleChange(it) },
-                        onMenuOpen = { menuOpen = it },
-                        textColor = Color.White,
-                        cutRanges = cutRanges,
-                        markStartMs = markStartMs,
-                        onRotateScreen = {
-                            interaction++
-                            val act = context.findActivity()
-                            if (act != null) {
-                                val landscape = act.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-                                act.requestedOrientation = if (landscape)
-                                    ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-                                else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                            }
-                        },
-                        trailing = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CutMarkButton(
+                            active = markStartMs >= 0L,
+                            enabled = true,
+                            onClick = { interaction++; onToggleMark() },
+                            buttonSize = 42.dp
+                        )
+                        if (cutRanges.isNotEmpty()) {
+                            Spacer(Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(Color(0x66000000))
+                                    .clickable { interaction++; onUndoCut() }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp)
                             ) {
-                                TrackMenuButtons(player, tracks, Color.White) { menuOpen = it }
-                                IconButton(onClick = {
-                                    interaction++
-                                    onExit()
-                                }, modifier = Modifier.size(34.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
-                                        Icons.Filled.FullscreenExit,
-                                        "Tam ekrandan çık",
-                                        tint = Color.White, modifier = Modifier.size(22.dp)
+                                        Icons.Filled.Undo,
+                                        "Son kesimi geri al",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "${cutRanges.size} kesim",
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
                                     )
                                 }
                             }
                         }
-                    )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    MarkHintChip(markHint)
                 }
-            }
 
-            // ── SOL ÜST: HIZLI KESİM (A–B damgası) ────────────────────────────
-            // Kontroller gizlense de görünür kalır: parmağı ekrana değdirmeden
-            // doğrudan damga konabilir. Geri okunun hemen altında (çok yukarıda değil).
-            Column(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 12.dp, top = 58.dp),
-                horizontalAlignment = Alignment.Start
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CutMarkButton(
-                        active = markStartMs >= 0L,
+                // ── SAĞ ÜST: B NOKTASI (bitiş) ────────────────────────────────────
+                // DÜZELTME (4b): Sol üstteki makas A'yı koyar; sağ üstteki B düğmesi
+                // bitişi koyar. A konmuşsa düğme sarıya döner (sıra sende).
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(end = 12.dp, top = 58.dp),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    CutEndButton(
+                        ready = markStartMs >= 0L,
                         enabled = true,
-                        onClick = { interaction++; onToggleMark() },
+                        onClick = { interaction++; onMarkEnd() },
                         buttonSize = 42.dp
                     )
-                    if (cutRanges.isNotEmpty()) {
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(Color(0x66000000))
-                                .clickable { interaction++; onUndoCut() }
-                                .padding(horizontal = 10.dp, vertical = 8.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    Icons.Filled.Undo,
-                                    "Son kesimi geri al",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    "${cutRanges.size} kesim",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
-                        }
-                    }
                 }
-                Spacer(Modifier.height(8.dp))
-                MarkHintChip(markHint)
             }
         }
     }

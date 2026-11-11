@@ -57,7 +57,12 @@ fun MuxSeekSlider(
     /** Kesilecek (çıkarılacak) aralıklar: çubuk üzerinde kırmızı gösterilir. */
     markedRanges: List<TimeRange> = emptyList(),
     /** A noktası damgası (ms). -1 = damga yok; damga ile tutamaç arası sarı gösterilir. */
-    markStartMs: Long = -1L
+    markStartMs: Long = -1L,
+    /**
+     * Parmak çubuk üzerinde gezdiği anda oranı (0..1) bildirir; parmak kalkınca `null`.
+     * YouTube'daki gibi "parmağın altındaki anın karesini" göstermek için kullanılır.
+     */
+    onScrubFraction: (Float?) -> Unit = {}
 ) {
     val span = (endMs - startMs).coerceAtLeast(1L)
     // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
@@ -65,6 +70,7 @@ fun MuxSeekSlider(
 
     val onSeekState = rememberUpdatedState(onSeek)
     val onScrubState = rememberUpdatedState(onScrubChange)
+    val onScrubFractionState = rememberUpdatedState(onScrubFraction)
     val startState = rememberUpdatedState(startMs)
     val spanState = rememberUpdatedState(span)
 
@@ -97,11 +103,14 @@ fun MuxSeekSlider(
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     down.consume()
 
+                    // YouTube davranışı: çubuğun NERESİNE basılırsa tutamaç ORAYA atlar
+                    // (parmağın en sağda olması, oynatıcının en solda olması fark etmez).
                     var fraction = fractionAt(down.position.x)
                     dragFraction = fraction
                     onScrubState.value(true)
+                    onScrubFractionState.value(fraction)
                     onSeekState.value(msAt(fraction))
-                    var lastPreviewAt = System.currentTimeMillis()
+                    var lastSeekAt = System.currentTimeMillis()
 
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -109,19 +118,24 @@ fun MuxSeekSlider(
                         fraction = fractionAt(change.position.x)
                         dragFraction = fraction
                         change.consume()
+                        // Önizleme karesi HER harekette güncellenir (gecikme yok).
+                        onScrubFractionState.value(fraction)
                         if (!change.pressed) {
                             // Parmak kalktı: kesin hedefe tek seferde otur.
                             onSeekState.value(msAt(fraction))
                             break
                         }
+                        // Oynatıcıya giden sarma isteği ~40 ms'de bir birleştirilir:
+                        // saniyede 25 güncelleme -> akıcı takip, dekoder boğulmaz.
                         val now = System.currentTimeMillis()
-                        if (now - lastPreviewAt >= 70L) {
-                            lastPreviewAt = now
+                        if (now - lastSeekAt >= 40L) {
+                            lastSeekAt = now
                             onSeekState.value(msAt(fraction))
                         }
                     }
                     dragFraction = -1f
                     onScrubState.value(false)
+                    onScrubFractionState.value(null)
                 }
             }
     ) {
