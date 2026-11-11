@@ -48,6 +48,12 @@ SONAME_PKG_OVERRIDES = {
     "libz.so": ["zlib"],
     "libc++_shared.so": ["ndk-multilib", "libc++"],
     "libQt6Core.so.6": ["qt6-qtbase"],
+    # Contents indeksi bu iki kutuphane icin ilk eslesme olarak 36 MB'lik
+    # awscli'yi oneriyordu. Ayni dosyalar kucuk paketlerde de var (SHA-256
+    # dogrulandi: birebir ayni), boylece ~33 MB indirme ortadan kalkiyor.
+    "libcrypto.so.3": ["openssl"],
+    "libssl.so.3": ["openssl"],
+    "libzstd.so.1": ["zstd"],
 }
 
 EXHALE_TARBALLS = [
@@ -273,7 +279,7 @@ def fetch(url: str) -> bytes:
     for attempt in range(3):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "muxmaster-ci/1.0"})
-            with urllib.request.urlopen(req, timeout=90) as r:
+            with urllib.request.urlopen(req, timeout=45) as r:
                 return r.read()
         except Exception as e:  # agdalgalanmalarina karsi 3 deneme
             last_err = e
@@ -311,42 +317,75 @@ def parse_packages_text(text):
     return pkgs
 
 
+def decode_index(data, url):
+    """Packages/Contents indeksini uzantisi ne olursa olsun metne cevirir."""
+    if url.endswith(".xz"):
+        import lzma
+        return lzma.decompress(data).decode("utf-8", "replace")
+    if url.endswith(".gz"):
+        return gzip.decompress(data).decode("utf-8", "replace")
+    return data.decode("utf-8", "replace")
+
+
+def fetch_index_parallel(rel_paths_for_dist):
+    """Her dagitim icin verilen indeks yollarini PARALEL indirir.
+
+    Siralı indirme Termux aynasinda ~17 saniye suruyordu; indeksler birbirinden
+    bagimsiz oldugu icin paralel cekiliyor.
+    """
+    import concurrent.futures
+
+    results = {}
+
+    def one(item):
+        dist, bases, rel_paths = item
+        return dist, fetch_first_ok(bases, rel_paths)
+
+    jobs = [(dist, bases, rel_paths_for_dist(dist)) for bases, dist in REPOS]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
+        futures = {pool.submit(one, job): job[0] for job in jobs}
+        for fut in concurrent.futures.as_completed(futures):
+            dist = futures[fut]
+            try:
+                results[dist] = fut.result()[1]
+            except Exception as e:
+                log(f"UYARI: {dist} indeksi okunamadi: {e}")
+    return results
+
+
 def load_all_packages():
     combined = {}
+    fetched = fetch_index_parallel(lambda dist: [
+        f"dists/{dist}/main/binary-{ARCH}/Packages.xz",
+        f"dists/{dist}/main/binary-{ARCH}/Packages.gz",
+        f"dists/{dist}/main/binary-{ARCH}/Packages",
+    ])
     for bases, dist in REPOS:
+        if dist not in fetched:
+            continue
+        data, url = fetched[dist]
         try:
-            data, url = fetch_first_ok(bases, [
-                f"dists/{dist}/main/binary-{ARCH}/Packages.xz",
-                f"dists/{dist}/main/binary-{ARCH}/Packages.gz",
-                f"dists/{dist}/main/binary-{ARCH}/Packages",
-            ])
-            if url.endswith(".xz"):
-                import lzma
-                text = lzma.decompress(data).decode("utf-8", "replace")
-            elif url.endswith(".gz"):
-                text = gzip.decompress(data).decode("utf-8", "replace")
-            else:
-                text = data.decode("utf-8", "replace")
-            pkgs = parse_packages_text(text)
-            repo_base = url.split(f"/dists/{dist}/")[0]
-            for name, stanza in pkgs.items():
-                if name not in combined:
-                    combined[name] = (stanza, repo_base)
+            pkgs = parse_packages_text(decode_index(data, url))
         except Exception as e:
-            log(f"UYARI: {dist} Packages indeksi okunamadi: {e}")
+            log(f"UYARI: {dist} Packages indeksi acilamadi: {e}")
+            continue
+        repo_base = url.split(f"/dists/{dist}/")[0]
+        for name, stanza in pkgs.items():
+            if name not in combined:
+                combined[name] = (stanza, repo_base)
     return combined
 
 
 def load_contents_map():
     mapping = {}
+    fetched = fetch_index_parallel(lambda dist: [f"dists/{dist}/Contents-{ARCH}.gz"])
     for bases, dist in REPOS:
-        try:
-            data, url = fetch_first_ok(bases, [f"dists/{dist}/Contents-{ARCH}.gz"])
-        except Exception as e:
-            log(f"UYARI: {dist} Contents indeksi alinamadi: {e}")
+        if dist not in fetched:
+            log(f"UYARI: {dist} Contents indeksi alinamadi.")
             continue
+        data, url = fetched[dist]
         try:
-            text = gzip.decompress(data).decode("utf-8", "replace")
+            text = decode_index(data, url)
         except Exception as e:
             log(f"UYARI: {dist} Contents indeksi acilamadi: {e}")
             continue
@@ -807,38 +846,54 @@ def main():
     opusenc_dst = os.path.join(OUT_DIR, "libopusenc.so")
     build_opusenc_binary(cxx, opus_so_dst, opusenc_dst)
 
-    # --- Ozyinemeli bagimlilik cozumlemesi ---
+    # --- Ozyinemeli bagimlilik cozumlemesi (paralel indirme) ---
+    # ONEMLI: Once her katmandaki TUM paketler paralel indirilir, sonra ELF
+    # NEEDED kayitlari okunur. Sirali indirme Termux aynasinda 20+ ardisik
+    # istek yapiyor ve CI'da dakikalar aliyordu.
+    import concurrent.futures
+
+    def ensure_packages_extracted_parallel(pkg_names):
+        todo = []
+        for p in pkg_names:
+            if p not in extracted_pkg_cache and p not in todo:
+                todo.append(p)
+        if not todo:
+            return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(ensure_package_extracted, todo))
+
     log("== Calisma-zamani bagimliliklari ozyinemeli olarak cozumleniyor ==")
     ENTRY_POINTS = {"libmkvmerge.so", "libmkvextract.so", "libexhale.so", "libopusenc.so"}
     resolved_sonames = set(ENTRY_POINTS) | {"libopus.so"}
     unresolved_sonames = set()
-    queue = [os.path.join(OUT_DIR, fn) for fn in resolved_sonames]
-    processed_files = set()
+    frontier = [os.path.join(OUT_DIR, fn) for fn in sorted(resolved_sonames)]
 
-    while queue:
-        current = queue.pop()
-        if current in processed_files:
-            continue
-        processed_files.add(current)
+    while frontier:
+        wanted = {}  # soname -> aday paket listesi (sirayla)
+        for current in frontier:
+            for soname in get_needed(current):
+                if soname in resolved_sonames or soname in SKIP_SONAMES or soname in wanted:
+                    continue
+                # Once bilinen/tercih edilen paketler, sonra Contents indeksinin onerdigi paket.
+                candidates = list(SONAME_PKG_OVERRIDES.get(soname, []))
+                from_contents = contents_map.get(soname)
+                if from_contents and from_contents not in candidates:
+                    candidates.append(from_contents)
+                if not candidates:
+                    log(f"  ! {soname}: Contents indeksinde bulunamadi (paket bilinmiyor)")
+                    unresolved_sonames.add(soname)
+                    continue
+                wanted[soname] = candidates
 
-        for soname in get_needed(current):
-            if soname in resolved_sonames or soname in SKIP_SONAMES:
-                continue
+        ensure_packages_extracted_parallel(
+            [pkg for cands in wanted.values() for pkg in cands]
+        )
 
-            # Once bilinen/tercih edilen paketler, sonra Contents indeksinin onerdigi paket.
-            candidates = list(SONAME_PKG_OVERRIDES.get(soname, []))
-            from_contents = contents_map.get(soname)
-            if from_contents and from_contents not in candidates:
-                candidates.append(from_contents)
-
-            if not candidates:
-                log(f"  ! {soname}: Contents indeksinde bulunamadi (paket bilinmiyor)")
-                unresolved_sonames.add(soname)
-                continue
-
+        next_frontier = []
+        for soname, candidates in wanted.items():
             src, used_pkg = None, None
             for pkg_name in candidates:
-                extract_root = ensure_package_extracted(pkg_name)
+                extract_root = extracted_pkg_cache.get(pkg_name)
                 if not extract_root:
                     log(f"  ! {soname}: paketi '{pkg_name}' indirilemedi/acilamadi (diger aday denenecek)")
                     continue
@@ -858,7 +913,8 @@ def main():
                 log(f"  + {soname}  (paket: {used_pkg})")
             resolved_sonames.add(soname)
             unresolved_sonames.discard(soname)
-            queue.append(dst)
+            next_frontier.append(dst)
+        frontier = next_frontier
 
     # --- Ilk dogrulama ---
     log("== Ilk dogrulama: tum bagimliliklar karsilaniyor mu? ==")
