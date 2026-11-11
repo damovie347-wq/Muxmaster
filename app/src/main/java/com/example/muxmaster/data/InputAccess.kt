@@ -17,6 +17,7 @@ import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
+import androidx.documentfile.provider.DocumentFile
 import androidx.media3.datasource.DefaultHttpDataSource
 import java.io.File
 import java.io.FileInputStream
@@ -25,6 +26,14 @@ import java.io.RandomAccessFile
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
+
+/** SAF klasöründe tek sorguda okunan alt öğe (bkz. [InputAccess.listMediaChildren]). */
+data class MediaChild(
+    val uri: Uri,
+    val name: String,
+    val mimeType: String,
+    val sizeBytes: Long
+)
 
 /**
  * Girdi dosyalarına KOPYALAMADAN erişim.
@@ -147,6 +156,72 @@ object InputAccess {
             } else -1L
         } ?: -1L
     } catch (_: Throwable) { -1L }
+
+    /**
+     * SAF klasörünün (tree URI) TÜM alt öğelerini TEK sorguda listeler.
+     *
+     * ESKİ YÖNTEM (yavaş): `DocumentFile.fromTreeUri(...).listFiles()` her öğe için
+     * ayrı ayrı content sağlayıcı sorgusu yapıyordu; `isFile`, `name`, `type`
+     * çağrıları da dosya başına 3-4 ek sorgu demekti. 150-200 videoluk bir klasörde
+     * bu, yüzlerce sorgu → "Klasör taranıyor..." ekranında uzun bekleme.
+     *
+     * YENİ YÖNTEM (hızlı): `DocumentsContract.buildChildDocumentsUriUsingTree` ile
+     * alt öğe tablosu TEK cursor'da okunur (ad + mime + boyut aynı satırda gelir).
+     * Yüzlerce dosya milisaniyeler içinde listelenir.
+     */
+    fun listMediaChildren(context: Context, treeUri: Uri): List<MediaChild> {
+        val out = ArrayList<MediaChild>(256)
+        val childrenUri = runCatching {
+            DocumentsContract.buildChildDocumentsUriUsingTree(
+                treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+            )
+        }.getOrNull()
+
+        if (childrenUri != null) {
+            runCatching {
+                context.contentResolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_SIZE
+                    ),
+                    null, null, null
+                )?.use { c ->
+                    val idIdx = 0
+                    val nameIdx = 1
+                    val mimeIdx = 2
+                    val sizeIdx = 3
+                    while (c.moveToNext()) {
+                        val docId = c.getString(idIdx) ?: continue
+                        val name = c.getString(nameIdx) ?: continue
+                        val mime = c.getString(mimeIdx).orEmpty()
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) continue
+                        val size = if (c.isNull(sizeIdx)) -1L else c.getLong(sizeIdx)
+                        out += MediaChild(
+                            uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId),
+                            name = name,
+                            mimeType = mime,
+                            sizeBytes = size
+                        )
+                    }
+                }
+            }
+        }
+
+        // Bazı üretici sağlayıcıları hızlı sorguyu reddeder: eski (yavaş ama uyumlu) yola dön.
+        if (out.isEmpty()) {
+            runCatching {
+                DocumentFile.fromTreeUri(context, treeUri)?.listFiles()?.forEach { d ->
+                    if (d.isFile) {
+                        out += MediaChild(d.uri, d.name.orEmpty(), d.type.orEmpty(), d.length())
+                    }
+                }
+            }
+        }
+        return out
+    }
 
     private fun direct(context: Context, uri: Uri, needChildRead: Boolean): String? {
         var pfd: ParcelFileDescriptor? = null

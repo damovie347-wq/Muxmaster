@@ -152,12 +152,13 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             isLoading = true
             loadingMessage = "Klasör taranıyor..."
+            // HIZ: klasör TEK cursor sorgusuyla listelenir (bkz. InputAccess.listMediaChildren).
             val items = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentFile.fromTreeUri(app, treeUri)?.listFiles()
-                        ?.filter { it.isFile && isVideoDoc(it) }
-                        ?.sortedBy { (it.name ?: "").lowercase() }
-                        ?.map { TrimQueueEntry(it.uri, it.name ?: "video.mkv") }
+                    InputAccess.listMediaChildren(app, treeUri)
+                        .filter { isVideoName(it.name, it.mimeType) }
+                        .sortedBy { it.name.lowercase() }
+                        .map { TrimQueueEntry(it.uri, it.name.ifBlank { "video.mkv" }) }
                 }.getOrNull() ?: emptyList()
             }
             isLoading = false
@@ -189,9 +190,9 @@ class MuxViewModel(private val app: Application) : AndroidViewModel(app) {
         onVideoSelected(e.uri, e.name, fromQueue = true)
     }
 
-    private fun isVideoDoc(d: DocumentFile): Boolean {
-        if (d.type.orEmpty().startsWith("video/")) return true
-        return extensionFromName(d.name.orEmpty()) in VIDEO_EXTS
+    private fun isVideoName(name: String, mime: String): Boolean {
+        if (mime.orEmpty().startsWith("video/")) return true
+        return extensionFromName(name) in VIDEO_EXTS
     }
 
     fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {

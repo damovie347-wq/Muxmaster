@@ -1,3 +1,44 @@
+# MuxMaster — Güncelleme 7 / Değişiklik Özeti
+
+5 dosya değişti. Proje **GitHub'da hatasız derleniyor** (AGP 8.3.0 / Kotlin 1.9.22 /
+Gradle 8.5 / compileSdk 34).
+
+## 1) Kırpma: video tam ekran + YouTube gibi slider + A–B hızlı damgalama
+- Video seçildiği an oynatıcı **otomatik tam ekran** açılıyor (`TrimPlayer` →
+  `LaunchedEffect(video.uri)`). Geri okuyla kırpma ekranına dönülür.
+- Tam ekranda slider YouTube gibi: parmak çubuğa inince oynatıcı takip eder
+  (`MuxSeekSlider` sürükleme jesti zaten Initial aşamasında tüketiliyor).
+- Oynatıcının **sol üst köşesinde** (geri okunun hemen altında) makas düğmesi:
+  - 1. dokunuş → o anı **A** olarak damgalar (düğme sarıya döner, çubukta sarı
+    bölge A ile tutamaç arasını gösterir).
+  - 2. dokunuş → **B** damgası; aradaki bölüm otomatik olarak kesilecekler
+    listesine girer. Dakika/saniye yazmaya gerek yok.
+  - `TrimViewModel.addCutRangeExact(start, end)` eklendi; yanlış damga için
+    `removeLastCutRange()` ve tam ekranda "N kesim" düğmesi (geri al).
+- Kesilecek aralıklar artık oynatıcı çubuğunda **kırmızı** gösteriliyor
+  (`MuxSeekSlider(markedRanges, markStartMs)`), böylece ne kesildiği tek bakışta görünüyor.
+- Aynı makas düğmesi tam ekran dışındaki oynatıcıda da var (sağ üst sırada).
+
+## 2) Klasör anında açılıyor (150–200 video bile)
+- `DocumentFile.listFiles()` her dosya için ayrı sağlayıcı sorgusu yapıyordu
+  (`isFile` + `name` + `type` → dosya başına 3-4 sorgu).
+- Yeni `InputAccess.listMediaChildren()` klasörü **tek cursor sorgusuyla** okuyor
+  (`DocumentsContract.buildChildDocumentsUriUsingTree`; ad + mime + boyut aynı satırda).
+- Kırpma (`TrimViewModel`) ve mux (`MuxViewModel`) klasör seçimi bu hızlı yola geçti.
+  Sağlayıcı hızlı sorguyu reddederse eski yola otomatik dönülür.
+
+## 3) Tam ekran gerçekten tam ekran
+- `FullscreenPlayerDialog`: dialog penceresinin arkası **opak siyah** yapıldı
+  (`Window.setBackgroundDrawable`) ve karartma `dimAmount = 1.0`.
+  Önceden yarı saydam pencere yüzünden arkadaki kırpma seçenekleri görünüyordu.
+- İlk kare gelene kadar siyah ekran yerine yükleme halkası (`showLoading`).
+
+## 4) Hızlı kesim akışı (özet)
+1. Klasör Seç → video otomatik tam ekran açılır.
+2. Makas düğmesi (sol üst) → A, slider'ı/oynatıcıyı ilerlet → makas → B.
+3. Aralık kırmızı olarak çubukta görünür; istenirse "N kesim" ile son damga geri alınır.
+4. Geri oku → "ÇOKLU KESİMİ UYGULA".
+
 # MuxMaster — Güncelleme 6 / Değişiklik Özeti
 
 11 dosya değişti. Proje **GitHub'da hatasız derleniyor** (AGP 8.3.0 / Kotlin 1.9.22 /

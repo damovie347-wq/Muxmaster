@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.view.SurfaceView
@@ -56,6 +57,7 @@ import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.SubtitlesOff
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -246,7 +248,10 @@ fun TrimScreen(
                     isTrimming = viewModel.isTrimming,
                     followRangeChange = !viewModel.isMultiCut,
                     playheadRef = playheadRef,
-                    seekRequestMs = seekRequest
+                    seekRequestMs = seekRequest,
+                    cutRanges = viewModel.cutRanges,
+                    onAddCut = { s, e -> viewModel.addCutRangeExact(s, e) },
+                    onRemoveLastCut = viewModel::removeLastCutRange
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -1147,7 +1152,10 @@ private fun TrimPlayer(
     isTrimming: Boolean,
     followRangeChange: Boolean,
     playheadRef: androidx.compose.runtime.MutableLongState,
-    seekRequestMs: androidx.compose.runtime.MutableLongState = remember { mutableLongStateOf(-1L) }
+    seekRequestMs: androidx.compose.runtime.MutableLongState = remember { mutableLongStateOf(-1L) },
+    cutRanges: List<TimeRange> = emptyList(),
+    onAddCut: (Long, Long) -> Int = { _, _ -> -1 },
+    onRemoveLastCut: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val player = remember { buildFastPlayer(context, isMultiView = false) }
@@ -1161,6 +1169,10 @@ private fun TrimPlayer(
     var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
     var speed by remember { mutableFloatStateOf(1f) }
     var fullscreen by remember { mutableStateOf(false) }
+    // HIZLI KESİM: A noktası damgası (-1 = damga yok) ve kısa geri bildirim metni.
+    var markStartMs by remember { mutableLongStateOf(-1L) }
+    var markHint by remember { mutableStateOf<String?>(null) }
+    var autoFullscreenFor by remember { mutableStateOf<String?>(null) }
     val hostView = LocalView.current
     DisposableEffect(hostView) {
         hostView.keepScreenOn = true
@@ -1168,6 +1180,8 @@ private fun TrimPlayer(
     }
     var tracks by remember { mutableStateOf(Tracks.EMPTY) }
     var cueText by remember { mutableStateOf("") }
+    // Oynatıcı hazır mı? (tam ekran ilk açıldığında siyah ekran yerine halka gösterilir)
+    var playerReady by remember { mutableStateOf(false) }
 
     val startState = rememberUpdatedState(startMs)
     val endState = rememberUpdatedState(endMs)
@@ -1194,6 +1208,7 @@ private fun TrimPlayer(
                 }
             }
             override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) playerReady = true
                 if (state == Player.STATE_ENDED) {
                     player.pause()
                     player.seekTo(startState.value)
@@ -1218,6 +1233,7 @@ private fun TrimPlayer(
     }
 
     LaunchedEffect(video.uri, video.cachePath) {
+        playerReady = false
         // HIZ: dosya yolu zaten çözüldüyse (TrimViewModel -> InputAccess) doğrudan
         // ondan oynatılır. Böylece her video geçişinde içerik sağlayıcısına tekrar
         // sorulmaz, "önbelleğe alınıyor" beklemesi oluşmaz.
@@ -1336,6 +1352,52 @@ private fun TrimPlayer(
         }
     }
 
+    // TAM EKRAN: video seçildiği anda oynatıcı YouTube gibi tam ekran açılır.
+    // (Aynı video için bir kez; kullanıcı geri okuyla çıktıysa tekrar açılmaz.)
+    LaunchedEffect(video.uri, video.isAudioOnly) {
+        val key = video.uri.toString()
+        if (!video.isAudioOnly && autoFullscreenFor != key) {
+            autoFullscreenFor = key
+            fullscreen = true
+        }
+    }
+
+    // Geri bildirim metni kısa süre sonra kaybolur.
+    LaunchedEffect(markHint) {
+        if (markHint != null) {
+            delay(2600)
+            markHint = null
+        }
+    }
+
+    /**
+     * A–B damgası: ilk dokunuş A'yı, ikinci dokunuş B'yi koyar ve aradaki bölüm
+     * otomatik olarak kesilecekler listesine eklenir. Dakika girmeye gerek yok.
+     */
+    val toggleMark: () -> Unit = {
+        if (!isTrimming) {
+            val pos = positionMs.coerceAtLeast(0L)
+            if (markStartMs < 0L) {
+                markStartMs = pos
+                markHint = "A: ${formatShortTime(pos)} · bitişi seç"
+            } else {
+                val s = minOf(markStartMs, pos)
+                val e = maxOf(markStartMs, pos)
+                if (e - s < 700L) {
+                    markHint = "Aralık çok kısa (en az 1 sn)"
+                } else {
+                    val idx = onAddCut(s, e)
+                    markHint = if (idx >= 0) {
+                        "Kesim eklendi: ${formatShortTime(s)} – ${formatShortTime(e)}"
+                    } else {
+                        null
+                    }
+                }
+                markStartMs = -1L
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1362,6 +1424,10 @@ private fun TrimPlayer(
                     Box(modifier = Modifier.fillMaxWidth().height(h).clipToBounds()) {
                         VideoSurface(player, aspect, videoWpx, videoHpx, scaleMode, Modifier.fillMaxSize())
                         SubtitleOverlay(cueText, Modifier.align(Alignment.BottomCenter))
+                        MarkHintChip(
+                            markHint,
+                            Modifier.align(Alignment.TopStart).padding(8.dp)
+                        )
                     }
                 }
             } else {
@@ -1398,6 +1464,14 @@ private fun TrimPlayer(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TrackMenuButtons(player, tracks, TextPrimary)
                     if (!video.isAudioOnly) {
+                        CutMarkButton(
+                            active = markStartMs >= 0L,
+                            enabled = !isTrimming,
+                            onClick = toggleMark,
+                            tint = TextPrimary,
+                            buttonSize = 32.dp
+                        )
+                        Spacer(Modifier.width(6.dp))
                         IconButton(onClick = {
                             fullscreen = true
                         }, modifier = Modifier.size(34.dp)) {
@@ -1405,7 +1479,9 @@ private fun TrimPlayer(
                         }
                     }
                 }
-            }
+            },
+            cutRanges = cutRanges,
+            markStartMs = markStartMs
         )
     }
 
@@ -1428,7 +1504,13 @@ private fun TrimPlayer(
             onTogglePlay = togglePlay,
             onSeekBy = seekBy,
             onSeekTo = seekTo,
-            onExit = { fullscreen = false }
+            onExit = { fullscreen = false },
+            cutRanges = cutRanges,
+            markStartMs = markStartMs,
+            markHint = markHint,
+            onToggleMark = toggleMark,
+            onUndoCut = onRemoveLastCut,
+            showLoading = !playerReady
         )
     }
 }
@@ -1450,7 +1532,9 @@ internal fun SmoothVideoSlider(
     onDragStateChange: (Boolean) -> Unit = {},
     textColor: Color = Color.White,
     fontSizeSp: Int = 12,
-    rowHeight: Dp = 34.dp
+    rowHeight: Dp = 34.dp,
+    cutRanges: List<TimeRange> = emptyList(),
+    markStartMs: Long = -1L
 ) {
     val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     val enabled = endMs > startMs
@@ -1478,6 +1562,8 @@ internal fun SmoothVideoSlider(
             onScrubChange = onDragStateChange,
             activeColor = PlayerTurquoise,
             inactiveColor = Color(0x55FFFFFF),
+            markedRanges = cutRanges,
+            markStartMs = markStartMs,
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 6.dp)
@@ -1513,7 +1599,9 @@ internal fun PlayerControls(
     modifier: Modifier = Modifier,
     onRotateScreen: (() -> Unit)? = null,
     leadingBottom: (@Composable () -> Unit)? = null,
-    trailing: (@Composable () -> Unit)? = null
+    trailing: (@Composable () -> Unit)? = null,
+    cutRanges: List<TimeRange> = emptyList(),
+    markStartMs: Long = -1L
 ) {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { loadSkipSeconds(ctx) }
@@ -1547,7 +1635,9 @@ internal fun PlayerControls(
             },
             textColor = textColor,
             fontSizeSp = 12,
-            rowHeight = 36.dp
+            rowHeight = 36.dp,
+            cutRanges = cutRanges,
+            markStartMs = markStartMs
         )
 
         // 2. Satır: Solda (+ Ekle), Ortada En-Boy Oranı, -10sn, Oynat/Duraklat, +10sn, Döndür, Hız (1X)
@@ -1977,6 +2067,62 @@ internal fun TransientLabel(text: String?, onDone: () -> Unit) {
     }
 }
 
+/**
+ * HIZLI KESİM İŞARETİ (A–B damgası).
+ *
+ * Dokunulduğunda oynatıcının bulunduğu anı "A" olarak damgalar; ikinci dokunuşta
+ * o anı "B" yapar ve aradaki bölüm otomatik olarak kesilecekler listesine girer.
+ * Dakika/saniye yazmaya gerek kalmaz (YouTube'daki hızlı kesim akışı).
+ */
+@Composable
+internal fun CutMarkButton(
+    active: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    tint: Color = Color.White,
+    buttonSize: Dp = 40.dp
+) {
+    Box(
+        modifier = Modifier
+            .size(buttonSize)
+            .clip(CircleShape)
+            .background(if (active) Amber else Color(0x66000000))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        if (active) {
+            Text("A", color = Color.Black, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        } else {
+            Icon(
+                Icons.Filled.ContentCut,
+                "Kesim işareti koy (A–B)",
+                tint = if (enabled) tint else tint.copy(alpha = 0.4f),
+                modifier = Modifier.size(21.dp)
+            )
+        }
+    }
+}
+
+/** Hızlı kesim sırasında kısa süreli görünen geri bildirim baloncuğu. */
+@Composable
+internal fun MarkHintChip(text: String?, modifier: Modifier = Modifier) {
+    if (text.isNullOrBlank()) return
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xCC000000))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text,
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
+        )
+    }
+}
+
 @Composable
 internal fun ScaleButton(
     mode: ScaleMode,
@@ -2251,7 +2397,12 @@ private fun FullscreenPlayerDialog(
     onSeekTo: (Long) -> Unit,
     onExit: () -> Unit,
     overlayText: String? = null,
-    showLoading: Boolean = false
+    showLoading: Boolean = false,
+    cutRanges: List<TimeRange> = emptyList(),
+    markStartMs: Long = -1L,
+    markHint: String? = null,
+    onToggleMark: () -> Unit = {},
+    onUndoCut: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var controlsVisible by remember { mutableStateOf(true) }
@@ -2286,6 +2437,12 @@ private fun FullscreenPlayerDialog(
             activityWindow?.addFlags(flag)
             window?.let { w ->
                 WindowCompat.setDecorFitsSystemWindows(w, false)
+                // GERÇEK TAM EKRAN: pencere arkası tamamen opak siyah yapılır ve
+                // karartma (dim) 1.0'a çekilir. Önceden dialog yarı saydam kaldığı
+                // için arkadaki kırpma ekranı (seçenekler) görünüyordu.
+                w.setBackgroundDrawable(ColorDrawable(android.graphics.Color.BLACK))
+                w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                w.setDimAmount(1f)
                 w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                 if (Build.VERSION.SDK_INT >= 28) {
                     val lp = w.attributes
@@ -2359,6 +2516,7 @@ private fun FullscreenPlayerDialog(
                 ) {
                     Icon(Icons.Filled.ArrowBack, "Geri", tint = Color.White)
                 }
+
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -2380,6 +2538,8 @@ private fun FullscreenPlayerDialog(
                         onScaleChange = { interaction++; onScaleChange(it) },
                         onMenuOpen = { menuOpen = it },
                         textColor = Color.White,
+                        cutRanges = cutRanges,
+                        markStartMs = markStartMs,
                         onRotateScreen = {
                             interaction++
                             val act = context.findActivity()
@@ -2410,6 +2570,53 @@ private fun FullscreenPlayerDialog(
                         }
                     )
                 }
+            }
+
+            // ── SOL ÜST: HIZLI KESİM (A–B damgası) ────────────────────────────
+            // Kontroller gizlense de görünür kalır: parmağı ekrana değdirmeden
+            // doğrudan damga konabilir. Geri okunun hemen altında (çok yukarıda değil).
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 58.dp),
+                horizontalAlignment = Alignment.Start
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CutMarkButton(
+                        active = markStartMs >= 0L,
+                        enabled = true,
+                        onClick = { interaction++; onToggleMark() },
+                        buttonSize = 42.dp
+                    )
+                    if (cutRanges.isNotEmpty()) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(Color(0x66000000))
+                                .clickable { interaction++; onUndoCut() }
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Filled.Undo,
+                                    "Son kesimi geri al",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "${cutRanges.size} kesim",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                MarkHintChip(markHint)
             }
         }
     }

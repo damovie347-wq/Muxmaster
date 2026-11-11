@@ -53,7 +53,11 @@ fun MuxSeekSlider(
     trackHeight: Dp = 4.dp,
     thumbRadius: Dp = 7.dp,
     sliderHeight: Dp = 36.dp,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    /** Kesilecek (çıkarılacak) aralıklar: çubuk üzerinde kırmızı gösterilir. */
+    markedRanges: List<TimeRange> = emptyList(),
+    /** A noktası damgası (ms). -1 = damga yok; damga ile tutamaç arası sarı gösterilir. */
+    markStartMs: Long = -1L
 ) {
     val span = (endMs - startMs).coerceAtLeast(1L)
     // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
@@ -141,6 +145,45 @@ fun MuxSeekSlider(
                 start = Offset(left, centerY),
                 end = Offset(thumbX, centerY),
                 strokeWidth = stroke,
+                cap = StrokeCap.Round
+            )
+        }
+
+        // ── KESİM İŞARETLERİ (YouTube benzeri çubuk) ────────────────────────
+        // Damgalanmış kesim aralıkları kırmızı, henüz bitişi seçilmemiş A noktası
+        // ile tutamaç arası sarı gösterilir. Böylece "ne kesiliyor" tek bakışta görünür.
+        val markerHeight = stroke * 3.2f
+        val markerTop = centerY - markerHeight / 2f
+        if (markedRanges.isNotEmpty() && span > 0L) {
+            markedRanges.forEach { r ->
+                val f1 = ((r.startMs - startMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+                val f2 = ((r.endMs - startMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+                val x1 = left + (right - left) * f1
+                val x2 = left + (right - left) * f2
+                if (x2 - x1 > 0.5f) {
+                    drawRect(
+                        color = Color(0xFFE24B4A),
+                        topLeft = Offset(x1, markerTop),
+                        size = Size(x2 - x1, markerHeight)
+                    )
+                }
+            }
+        }
+        if (markStartMs >= 0L && span > 0L) {
+            val fA = ((markStartMs - startMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+            val xA = left + (right - left) * fA
+            if (abs(xA - thumbX) > 0.5f) {
+                drawRect(
+                    color = Color(0x99FFC24B),
+                    topLeft = Offset(minOf(xA, thumbX), markerTop),
+                    size = Size(abs(thumbX - xA), markerHeight)
+                )
+            }
+            drawLine(
+                color = Color(0xFFFFC24B),
+                start = Offset(xA, centerY - markerHeight),
+                end = Offset(xA, centerY + markerHeight),
+                strokeWidth = 2.5.dp.toPx(),
                 cap = StrokeCap.Round
             )
         }

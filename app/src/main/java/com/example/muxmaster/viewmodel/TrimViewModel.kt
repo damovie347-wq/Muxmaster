@@ -175,6 +175,35 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * TAM ARALIKLA kesim ekler (A–B işaretleme): oynatıcıda başlangıç ve bitiş
+     * damgalanır, aradaki bölüm doğrudan kesilecekler listesine girer. Dakika/saniye
+     * yazmaya gerek yoktur. Aralık videonun sınırlarına kırpılır; iki damga arası
+     * [MIN_CUT_MS]'den kısaysa reddedilir (-1 döner).
+     */
+    fun addCutRangeExact(startMs: Long, endMs: Long): Int {
+        val dur = videoFile?.durationMs ?: return -1
+        if (dur <= MIN_CUT_MS || isTrimming) return -1
+        var s = minOf(startMs, endMs).coerceIn(0L, dur)
+        var e = maxOf(startMs, endMs).coerceIn(0L, dur)
+        if (e - s < MIN_CUT_MS) return -1
+        if (s >= dur - MIN_CUT_MS) {
+            // Damgalar videonun en sonunda: aralığı sona yasla.
+            e = dur
+            s = (dur - MIN_CUT_MS).coerceAtLeast(0L)
+        }
+        val range = TimeRange(s, e)
+        val list = (cutRanges + range).sortedBy { it.startMs }
+        cutRanges = list
+        return list.indexOfFirst { it.startMs == s && it.endMs == e }
+    }
+
+    /** Son eklenen kesim aralığını geri alır (hızlı işaretlemede yanlış damga için). */
+    fun removeLastCutRange() {
+        if (isTrimming || cutRanges.isEmpty()) return
+        cutRanges = cutRanges.dropLast(1)
+    }
+
+    /**
      * Çoklu kesimde seçili aralığın BAŞLANGICINI oynatıcının bulunduğu ana taşır.
      * (Tek dokunuş: videoyu istenen yere kadar oynat → "Başlangıç" düğmesi.)
      */
@@ -317,12 +346,15 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             isLoading = true
             loadingMessage = "Klasör taranıyor..."
+            // HIZ: klasör TEK bir cursor sorgusuyla listelenir (bkz.
+            // InputAccess.listMediaChildren). 200 videoluk klasör bile anında açılır;
+            // dosya başına ayrı sağlayıcı sorgusu yapılmaz.
             val items = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentFile.fromTreeUri(app, treeUri)?.listFiles()
-                        ?.filter { it.isFile && isMediaDoc(it) }
-                        ?.sortedBy { (it.name ?: "").lowercase() }
-                        ?.map { TrimQueueEntry(it.uri, it.name ?: "video.mkv") }
+                    InputAccess.listMediaChildren(app, treeUri)
+                        .filter { isMediaName(it.name, it.mimeType) }
+                        .sortedBy { it.name.lowercase() }
+                        .map { TrimQueueEntry(it.uri, it.name.ifBlank { "video.mkv" }) }
                 }.getOrNull() ?: emptyList()
             }
             isLoading = false
@@ -354,10 +386,10 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         onVideoSelected(e.uri, e.name, fromQueue = true)
     }
 
-    private fun isMediaDoc(d: DocumentFile): Boolean {
-        val t = d.type.orEmpty()
+    private fun isMediaName(name: String, mime: String): Boolean {
+        val t = mime.orEmpty()
         if (t.startsWith("video/") || t.startsWith("audio/")) return true
-        return extensionFromName(d.name.orEmpty()) in MEDIA_EXTS
+        return extensionFromName(name) in MEDIA_EXTS
     }
 
     fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
