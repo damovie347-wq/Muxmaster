@@ -20,6 +20,7 @@ import com.example.muxmaster.service.MuxCancelBus
 import com.example.muxmaster.service.MuxForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -80,6 +81,8 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
         private set
     var folderName by mutableStateOf("")
         private set
+    /** Açık klasörün kimliği: kalınan video numarası bu anahtarla hatırlanır. */
+    private var currentFolderKey = ""
     /** Başlangıcı tam istenen kareden başlat (başlangıç–ilk keyframe arası yeniden kodlanır). */
     var preciseCut by mutableStateOf(true)
         private set
@@ -309,6 +312,24 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     val hasNextInQueue: Boolean get() = queueIndex >= 0 && queueIndex < folderQueue.size - 1
     val hasPrevInQueue: Boolean get() = queueIndex > 0 && folderQueue.isNotEmpty()
 
+    /**
+     * KUYRUĞUN İSTENEN VİDEOSUNA ATLA (1 tabanlı numara).
+     *
+     * 300 videoluk klasörde 50. videoda kaldıysan tek tek "sonraki"ye basmak yerine
+     * numarayı yazıp doğrudan o videoya gidilir. Numara klasör sınırlarına kırpılır;
+     * aynı videoya gidilecekse hiçbir şey yapılmaz (gereksiz yeniden yükleme olmaz).
+     */
+    fun jumpToQueueIndex(oneBasedIndex: Int): Boolean {
+        if (isTrimming || isLoading) return false
+        if (folderQueue.isEmpty()) return false
+        val idx = (oneBasedIndex - 1).coerceIn(0, folderQueue.size - 1)
+        if (idx == queueIndex) return true
+        queueIndex = idx
+        val e = folderQueue[idx]
+        onVideoSelected(e.uri, e.name, fromQueue = true)
+        return true
+    }
+
     private var trimJob: Job? = null
 
     private fun workDir(): File = File(app.cacheDir, "trim_work").also { it.mkdirs() }
@@ -370,10 +391,14 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
                 return@launch
             }
             folderQueue = items
-            queueIndex = 0
+            currentFolderKey = treeUri.toString()
+            // KALDIĞIN YERDEN DEVAM: aynı klasör yeniden seçildiğinde (uygulama kapatılıp
+            // açıldığında dahil) en son açık olan video numarasından başlanır.
+            val resumeIndex = prefs.loadQueuePosition(currentFolderKey).coerceIn(0, items.size - 1)
+            queueIndex = resumeIndex
             folderName = runCatching { DocumentFile.fromTreeUri(app, treeUri)?.name }.getOrNull()
                 ?: (treeUri.lastPathSegment ?: "")
-            onVideoSelected(items[0].uri, items[0].name, fromQueue = true)
+            onVideoSelected(items[resumeIndex].uri, items[resumeIndex].name, fromQueue = true)
         }
     }
 
@@ -399,16 +424,24 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     fun onVideoSelected(uri: Uri, displayName: String, fromQueue: Boolean = false) {
-        if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1; folderName = "" }
+        if (!fromQueue) { folderQueue = emptyList(); queueIndex = -1; folderName = ""; currentFolderKey = "" }
+        if (fromQueue) prefs.saveQueuePosition(currentFolderKey, queueIndex)
         val key = uri.toString()
         viewModelScope.launch {
             isLoading = true
             loadingMessage = "Dosya analiz ediliyor..."
             resultMessage = null; isSuccess = false
-            val old = videoFile?.cachePath
-            videoFile = null // eski dosyanın oynatıcısı kapansın (cache silinecek)
+            // ── DÜZELTME: "SONRAKİ VİDEO"DA YUKARI ZIPLAMA ANİMASYONU ────────────
+            // Eskiden videoFile burada null yapılıyordu. O anda oynatıcı ve tüm kırpma
+            // kontrolleri kompozisyondan çıkıyor, sayfa içeriği kısalıyor, kaydırma
+            // konumu yukarı kırpılıyor ve yeni video gelince ekran "yukarı gidip geliyordu".
+            // Klasör içinde gezinirken eski video EKRANDA KALIR; yeni dosya hazır olunca
+            // tek seferde değişir. Böylece hiçbir sıçrama/animasyon oluşmaz.
+            val previous = videoFile
+            val oldPath = previous?.cachePath
+            if (!fromQueue) videoFile = null // tek dosya modunda eski oynatıcı hemen kapanır
             withContext(Dispatchers.IO) {
-                if (old != null) runCatching { InputAccess.release(old) }
+                if (!fromQueue && oldPath != null) runCatching { InputAccess.release(oldPath) }
                 runCatching {
                     workDir().listFiles()
                         ?.filter { !it.name.startsWith("input_video") }?.forEach { it.delete() }
@@ -460,6 +493,16 @@ class TrimViewModel(private val app: Application) : AndroidViewModel(app) {
 
             isLoading = false
             prefetchQueueNeighbors()
+
+            // Klasör geçişinde eski dosyanın cache'i, oynatıcı yeni dosyaya geçtikten
+            // sonra bırakılır (ekranda kalan eski görüntü bir anda kararmasın).
+            if (fromQueue && oldPath != null && oldPath != cacheFile) {
+                val releasePath: String = oldPath
+                viewModelScope.launch {
+                    delay(1200)
+                    withContext(Dispatchers.IO) { runCatching { InputAccess.release(releasePath) } }
+                }
+            }
         }
     }
 

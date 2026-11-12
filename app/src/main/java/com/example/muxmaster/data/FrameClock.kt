@@ -83,6 +83,20 @@ data class FrameClock(
     /** Verilen anı en yakın kare başlangıcına oturtur. */
     fun snap(ms: Long): Long = frameTimeMs(frameIndexAt(ms))
 
+    /**
+     * Sürükleme örnekleme ızgarası: hedef anı önce en yakın [sampleMs] katına (varsayılan
+     * 500 ms), sonra videonun GERÇEK kare sınırına oturtur.
+     *
+     * Örnek: 1350 ms -> 1500 ms (0,5 sn ızgarası) -> 1500 ms çevresindeki gerçek kare (1496 ms).
+     * 0,5 sn bir "kare" değildir; yalnızca görüntülenecek örnek noktasıdır. Ekrana basılan
+     * kare her zaman videoda gerçekten var olan bir karedir.
+     */
+    fun snapToSample(ms: Long, sampleMs: Long = SCRUB_SAMPLE_MS): Long {
+        if (sampleMs <= 1L) return snap(ms)
+        val grid = ((ms.coerceAtLeast(0L) + sampleMs / 2L) / sampleMs) * sampleMs
+        return snap(grid)
+    }
+
     /** Kare kare ilerle/geri git (negatif = geri). */
     fun step(ms: Long, frames: Int): Long = frameTimeMs(frameIndexAt(ms) + frames)
 
@@ -90,6 +104,9 @@ data class FrameClock(
     fun frameNumber(ms: Long): Long = frameIndexAt(ms) + 1L
 
     companion object {
+        /** Sürükleme örnekleme adımı: her 500 ms'de bir gerçek kare. */
+        const val SCRUB_SAMPLE_MS = 500L
+
         /** Kare bilgisi yok: yuvarlama yapılmaz, 30 FPS varsayılır. */
         val NONE = FrameClock()
 

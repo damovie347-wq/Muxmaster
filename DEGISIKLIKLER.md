@@ -1,3 +1,55 @@
+# MuxMaster — Güncelleme 10 / 500 ms Kare Sarması + Klasörde Video Numarasına Git
+
+6 dosya değişti (1 yeni). Yeniden encode YOK, thumbnail/kare önbelleği YOK.
+
+## 1) Sürükleme sorununun KÖK NEDENİ: CLOSEST_SYNC (anahtar kare) sarması
+- Eskiden sürükleme sırasında `SeekParameters.CLOSEST_SYNC` kullanılıyordu. Bu ayar
+  oynatıcıyı her zaman en yakın **anahtar kareye** gönderir. Anahtar kareler arası
+  2–15 sn olduğu için parmak kaydırıldığında görüntü ya hiç değişmiyordu ("aynı kare
+  kalıyor") ya da 15–20 sn'lik adımlarla atlıyordu.
+- Kırpma ekranında sürükleme artık **EXACT** (tolerans 0) sarma kullanır: hedefin
+  GERÇEK karesi çözülür. Çoklu video oynatıcısı (1–4 video) hız için eski davranışta kalır.
+
+## 2) Her 500 ms'de bir gerçek kare (yeni `data/ScrubSeeker.kt`)
+- `FrameClock.snapToSample(ms, 500)`: hedef önce en yakın 0,5 sn noktasına (1,35 sn →
+  1,5 sn), sonra videonun gerçek kare sınırına oturur. 0,5 sn bir "kare" sayılmaz.
+- `ScrubSeeker`: **"en son istek kazanır"** sarma motoru. Parmak hızlı hareket ederken
+  ara istekler atlanır, EN SON istenen an her zaman uygulanır; istek kuyruğu birikmez,
+  geç biten eski bir sarma güncel karenin üzerine yazmaz.
+- Her sarmadan sonra dekoderin kareyi hazırlaması beklenir (en fazla 140 ms), böylece
+  görüntü parmağın gerisinde kalmaz.
+- Sürükleme sırasındaki 80 ms'lik zaman kısıtlaması (throttle) **kaldırıldı**.
+- Görüntü her zaman **ana oynatıcının içinde** güncellenir: thumbnail popup, floating
+  preview veya baloncuk yoktur. Tam ekranda sürükleme göstergesi kareyi kapatmasın diye
+  üst ortaya alındı.
+
+## 3) Çift sarma isteği giderildi
+- Tutamaç sürüklenirken hem zaman çizelgesi hem `LaunchedEffect(startMs/endMs)` sarma
+  gönderiyordu (60 ms gecikmeli, ikinci kez). Sürükleme sırasında bu efektler devre dışı;
+  sarmayı yalnızca zaman çizelgesi gönderiyor. Dekoder iki kez meşgul edilmiyor.
+
+## 4) Tam ekranda sağa/sola sürükleme hızı
+- Hedef an artık parmağın **mutlak** konumundan hesaplanıyor (eskiden biriktirilen delta
+  kullanılıyordu; jest yeniden başladığında sıfırlanıp sürükleme 15–20 sn'de takılıyordu).
+- Bir ekran genişliği 120 sn yerine **180 sn** tarar; 0,5 sn örnekleri görünür kalır.
+- Sürükleme başında oynatma durur, bırakınca son örnek kesin (kare hassas) uygulanır.
+
+## 5) Klasörde video numarasına git + kaldığın yerden devam
+- Klasör çubuğundaki "50/300" artık **dokunulabilir**: numarayı yaz, GİT.
+- Aynı klasör yeniden seçildiğinde (uygulama kapatılıp açıldığında dahil) **kaldığın video
+  numarasından** devam edilir (SharedPreferences).
+
+## 6) "Sonraki video"da yukarı zıplama animasyonu
+- `onVideoSelected` eskiden `videoFile = null` yapıyordu; oynatıcı ve kontroller
+  kompozisyondan çıkıp sayfa kısalıyor, kaydırma yukarı kırpılıyordu. Artık klasör
+  içinde gezinirken eski video ekranda kalır, yeni dosya hazır olunca tek seferde değişir.
+  Kaydırma konumları da ekranın üstünde tutuluyor.
+
+## 7) Yanlışlıkla klasörden çıkma
+- Çarpı düğmesi "Sonraki video"nun altından satırın **soluna** taşındı ve artık onay ister.
+
+---
+
 # MuxMaster — Güncelleme 9 / Kare Hassas Sarma + Kare Hassas Kırpma
 
 7 dosya değişti (2 yeni, 1 silindi). Yeniden encode YOK, arka plan kare üretimi YOK.

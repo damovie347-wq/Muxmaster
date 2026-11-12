@@ -25,10 +25,6 @@ import androidx.compose.ui.unit.dp
 import com.example.muxmaster.model.TimeRange
 import kotlin.math.abs
 
-/** Sürükleme sırasında oynatıcıya giden en sık sarma isteği aralığı (ms).
- *  Arayüz her dokunuşta hareket eder; dekodere saniyede en fazla ~12 ara arama gider. */
-private const val SCRUB_SEEK_INTERVAL_MS = 80L
-
 /** Parmağın "sürükleme" sayılması için gereken en küçük hareket (px). */
 private const val SCRUB_SLOP_PX = 3f
 
@@ -51,6 +47,14 @@ private const val SCRUB_SLOP_PX = 3f
  *
  * KARE HASSASİYETİ: [snapToFrame] verildiğinde hedef an her zaman videonun gerçek kare
  * başlangıcına oturtulur. Ara önizlemeler hızlıdır; parmak bırakılınca hedef kare kesin aranır.
+ *
+ * 500 MS ÖRNEKLEME: [sampleMs] > 0 verildiğinde hedef an önce bu ızgaranın en yakın katına
+ * (örn. 1,35 sn -> 1,5 sn), sonra gerçek kare sınırına oturtulur. Böylece sürükleme boyunca
+ * 0,0 -> 0,5 -> 1,0 -> 1,5 ... noktalarının GERÇEK kareleri görülebilir.
+ *
+ * GECİKME: Sürükleme sırasında istekler ARTIK zamanla kısıtlanmaz (eski 80 ms kısıtlama
+ * kaldırıldı); her yeni örnek anında iletilir. İstek birikmesini ve eski karenin yeni karenin
+ * üzerine yazılmasını `ScrubSeeker` "en son istek kazanır" mantığıyla engeller.
  */
 @Composable
 fun MuxSeekSlider(
@@ -75,6 +79,11 @@ fun MuxSeekSlider(
      * `null` verilirse yuvarlama yapılmaz.
      */
     snapToFrame: ((Long) -> Long)? = null,
+    /**
+     * Sürükleme örnekleme adımı (ms). 500 = her yarım saniyede bir gerçek kare.
+     * 0 = ızgara yok (yalnızca kare sınırına oturtulur).
+     */
+    sampleMs: Long = 0L,
     /** Dokunulan nokta ile tutamaç arasındaki mesafeyi koru (parmak tutamağı çekmez). */
     preserveTouchOffset: Boolean = true
 ) {
@@ -88,6 +97,7 @@ fun MuxSeekSlider(
     val spanState = rememberUpdatedState(span)
     val positionState = rememberUpdatedState(positionMs)
     val snapState = rememberUpdatedState(snapToFrame)
+    val sampleState = rememberUpdatedState(sampleMs)
 
     val shownFraction = if (dragFraction >= 0f) {
         dragFraction
@@ -116,6 +126,14 @@ fun MuxSeekSlider(
                     return s.coerceIn(startState.value, last)
                 }
 
+                /** 500 ms ızgarası + gerçek kare sınırı. */
+                fun quantized(ms: Long): Long {
+                    val g = sampleState.value
+                    if (g <= 1L) return snapped(ms)
+                    val grid = ((ms.coerceAtLeast(0L) + g / 2L) / g) * g
+                    return snapped(grid)
+                }
+
                 awaitEachGesture {
                     // Initial aşaması: üstteki verticalScroll bu olayları tüketilmiş görür.
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
@@ -130,7 +148,9 @@ fun MuxSeekSlider(
                     var fraction = baseFraction
                     var moved = false
                     var reported = false
-                    var lastSeekAt = 0L
+                    // Aynı örnek noktası için tekrar tekrar istek gönderilmez; yeni örnek
+                    // noktasına geçildiği ANDA gönderilir (gecikme yok, kısıtlama yok).
+                    var lastSentMs = Long.MIN_VALUE
 
                     while (true) {
                         val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -149,13 +169,12 @@ fun MuxSeekSlider(
                         }
                         if (moved) {
                             fraction = (baseFraction + dx / usable).coerceIn(0f, 1f)
-                            val target = snapped(msAt(fraction))
+                            val target = quantized(msAt(fraction))
                             // Tutamaç, kareye oturmuş hedefe göre çizilir (kare kare ilerler).
                             fraction = fractionOf(target)
                             dragFraction = fraction
-                            val now = System.currentTimeMillis()
-                            if (change.pressed && now - lastSeekAt >= SCRUB_SEEK_INTERVAL_MS) {
-                                lastSeekAt = now
+                            if (change.pressed && target != lastSentMs) {
+                                lastSentMs = target
                                 onSeekState.value(target)
                             }
                         }
@@ -164,9 +183,9 @@ fun MuxSeekSlider(
 
                     if (moved) {
                         // Parmak kalktı: seçilen GERÇEK kareye tek seferde otur.
-                        val target = snapped(msAt(fraction))
+                        val target = quantized(msAt(fraction))
                         dragFraction = fractionOf(target)
-                        onSeekState.value(target)
+                        if (target != lastSentMs) onSeekState.value(target)
                     }
                     if (reported) onScrubState.value(false)
                     dragFraction = -1f

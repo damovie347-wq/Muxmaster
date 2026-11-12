@@ -122,6 +122,7 @@ import androidx.media3.extractor.mp4.Mp4Extractor
 import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.FrameClock
+import com.example.muxmaster.data.ScrubSeeker
 import com.example.muxmaster.model.TimeRange
 import com.example.muxmaster.model.VideoFile
 import com.example.muxmaster.ui.components.CutTimelineBar
@@ -158,10 +159,22 @@ import kotlinx.coroutines.withContext
 /** Yüklenme halkası (LoadingRing) ve oynatıcı slider'ı için turkuaz vurgu rengi. */
 internal val PlayerTurquoise = Color(0xFF66C2B4)
 
-/** Parmak sürüklenirken hızlı önizleme için anahtar kareye atla; bırakınca kesin ara. */
+/** Kare hassas arama: tolerans sıfır. Oynatıcı istenen kareyi birebir gösterir. */
 private val SEEK_EXACT = SeekParameters.EXACT
-private val SEEK_SCRUB = SeekParameters.CLOSEST_SYNC
-private const val LIVE_SCRUB_INTERVAL_MS = 80L
+/**
+ * Kırpma ekranındaki sürükleme de KESİN (EXACT) sarma kullanır.
+ *
+ * KÖK NEDEN: eskiden sürükleme sırasında `SeekParameters.CLOSEST_SYNC` kullanılıyordu.
+ * Bu ayar oynatıcıyı her zaman en yakın ANAHTAR KAREYE (keyframe) gönderir. Anahtar kareler
+ * arası 2-15 sn olduğu için parmak kaydırıldığında görüntü ya hiç değişmiyor ("aynı kare
+ * kalıyor") ya da 15-20 sn'lik adımlarla atlıyordu. Artık sürükleme boyunca da hedefin
+ * GERÇEK karesi çözülür.
+ */
+private val SEEK_SCRUB = SeekParameters.EXACT
+/** Çoklu video oynatıcısı: sürüklemede anahtar kareye atlar (4 dekoder aynı anda çalışır). */
+private val SEEK_SCRUB_STREAM = SeekParameters.CLOSEST_SYNC
+/** Sürükleme sırasında görüntülenecek örnekleme adımı: her 500 ms'de bir gerçek kare. */
+private const val SCRUB_SAMPLE_MS = FrameClock.SCRUB_SAMPLE_MS
 
 /**
  * Zoom sonrası görünür pencerenin başlangıcı: verilen an (ör. seçimin başı) pencerenin
@@ -215,6 +228,18 @@ fun TrimScreen(
     // Kare hassas kırpma: zaman çizelgesi zoom'u ve görünür pencerenin başı.
     var trimZoom by remember { mutableFloatStateOf(1f) }
     var trimWindowStart by remember { mutableLongStateOf(0L) }
+
+    // Sürükleme oturumu: 0 = sürükleme yok, 1 = zaman çizelgesi tutamacı sürükleniyor.
+    // Sürükleme sırasında oynatıcı istekleri tek tek değil, "en son istek kazanır"
+    // motoru üzerinden uygulanır (görüntü parmağın gerisinde kalmaz).
+    val scrubSession = remember { mutableIntStateOf(0) }
+
+    // Klasör kuyruğu: "video numarasına git" ve "klasörü kapat" onay pencereleri.
+    var jumpDialogOpen by remember { mutableStateOf(false) }
+    var confirmCloseQueue by remember { mutableStateOf(false) }
+    // Kaydırma konumları burada tutulur: video değişince sayfa yerinden oynamaz.
+    val panelScroll = rememberScrollState()
+    val pageScroll = rememberScrollState()
 
     // Videonun GERÇEK kare zamanlaması (ffprobe avg_frame_rate + nb_frames).
     val frameClock = viewModel.frameClock
@@ -283,7 +308,8 @@ fun TrimScreen(
                     onAddCut = { s, e -> viewModel.addCutRangeExact(s, e) },
                     onRemoveLastCut = viewModel::removeLastCutRange,
                     fillHeight = fill,
-                    frameClock = frameClock
+                    frameClock = frameClock,
+                    scrubSessionRef = scrubSession
                 )
             }
         }
@@ -327,22 +353,45 @@ fun TrimScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(SurfaceHigh, RoundedCornerShape(10.dp))
-                        .padding(start = 12.dp, end = 4.dp)
+                        .padding(start = 2.dp, end = 6.dp)
                 ) {
-                    Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
+                    // ── DÜZELTME: "İLERİ" DÜĞMESİNİN YANINDAKİ ÇARPI ──────────────
+                    // Çarpı eskiden satırın SAĞINDA, "Sonraki video" düğmesinin hemen
+                    // altındaydı; hızlı hızlı ileri basarken yanlışlıkla klasörden
+                    // çıkılıyordu. Artık çarpı satırın SOL başında ve basınca ONAY ister.
+                    IconButton(
+                        onClick = { if (!busy) confirmCloseQueue = true },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(Icons.Filled.Close, "Klasörü kapat", tint = TextSec, modifier = Modifier.size(18.dp))
+                    }
+                    Icon(Icons.Filled.Folder, null, tint = Amber, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text(
                         viewModel.folderName.ifBlank { "Klasör" },
                         color = TextPrimary, fontSize = 13.sp, maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
-                    Text(
-                        "${viewModel.queueIndex + 1}/${viewModel.folderQueue.size}",
-                        color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.Medium
-                    )
-                    IconButton(onClick = viewModel::clearFolderQueue) {
-                        Icon(Icons.Filled.Close, "Klasörü kapat", tint = TextSec, modifier = Modifier.size(20.dp))
+                    // VİDEO NUMARASINA GİT: "50/300" çipine dokun, numarayı yaz, git.
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Purple.copy(alpha = 0.18f))
+                            .clickable(enabled = !busy) { jumpDialogOpen = true }
+                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "${viewModel.queueIndex + 1}/${viewModel.folderQueue.size}",
+                                color = PurpleLight, fontSize = 12.sp, fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Icon(
+                                Icons.Filled.Edit, "Video numarasına git",
+                                tint = PurpleLight, modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -500,7 +549,12 @@ fun TrimScreen(
                             trimZoom = z
                             trimWindowStart = w
                         },
-                        onHandleDrag = { _, ms -> seekRequest.longValue = ms },
+                        onHandleDrag = { _, ms ->
+                            // Tutamaç sürükleniyor: oynatıcı istek motoru devreye girer.
+                            if (scrubSession.intValue == 0) scrubSession.intValue = 1
+                            seekRequest.longValue = ms
+                        },
+                        onDragEnd = { scrubSession.intValue = 0 },
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -818,7 +872,7 @@ fun TrimScreen(
                     modifier = Modifier
                         .width(panelWidth)
                         .fillMaxHeight()
-                        .verticalScroll(rememberScrollState())
+                        .verticalScroll(panelScroll)
                         .padding(start = 2.dp, end = 12.dp, top = 8.dp, bottom = 12.dp)
                 ) {
                     controls()
@@ -830,7 +884,7 @@ fun TrimScreen(
                 modifier = Modifier
                     .padding(padding)
                     .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(pageScroll)
                     .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
                 if (video != null) {
@@ -839,6 +893,102 @@ fun TrimScreen(
                 }
                 controls()
             }
+        }
+
+        // ── VİDEO NUMARASINA GİT ────────────────────────────────────────────
+        // 300 videoluk klasörde 50. videoyu tek tek geçmek yerine numarayı yaz.
+        if (jumpDialogOpen) {
+            var input by remember { mutableStateOf((viewModel.queueIndex + 1).toString()) }
+            val total = viewModel.folderQueue.size
+            AlertDialog(
+                onDismissRequest = { jumpDialogOpen = false },
+                containerColor = Surface,
+                title = {
+                    Text("Video numarasına git", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Column {
+                        Text("Klasörde $total video var.", color = TextSec, fontSize = 12.sp)
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = input,
+                            onValueChange = { t -> input = t.filter { it.isDigit() }.take(6) },
+                            singleLine = true,
+                            label = { Text("Video numarası (1 – $total)", fontSize = 11.sp) },
+                            textStyle = TextStyle(fontSize = 16.sp),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Go
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onGo = {
+                                    val n = input.toIntOrNull()
+                                    if (n != null) {
+                                        viewModel.jumpToQueueIndex(n)
+                                        jumpDialogOpen = false
+                                    }
+                                }
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Purple, unfocusedBorderColor = Outline,
+                                focusedTextColor = TextPrimary, unfocusedTextColor = TextPrimary
+                            )
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val n = input.toIntOrNull()
+                            if (n != null) {
+                                viewModel.jumpToQueueIndex(n)
+                                jumpDialogOpen = false
+                            }
+                        }
+                    ) {
+                        Text("GİT", color = PurpleLight, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { jumpDialogOpen = false }) {
+                        Text("Vazgeç", color = TextSec)
+                    }
+                }
+            )
+        }
+
+        // ── KLASÖRÜ KAPAT ONAYI (yanlışlıkla çıkmayı engeller) ───────────────
+        if (confirmCloseQueue) {
+            AlertDialog(
+                onDismissRequest = { confirmCloseQueue = false },
+                containerColor = Surface,
+                title = {
+                    Text("Klasörü kapat?", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Text(
+                        "Klasör listesi kapanır, açık video ekranda kalır. Kaldığın video numarası " +
+                            "hatırlanır: aynı klasörü yeniden seçtiğinde oradan devam eder.",
+                        color = TextSec, fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            confirmCloseQueue = false
+                            viewModel.clearFolderQueue()
+                        }
+                    ) {
+                        Text("Kapat", color = Red, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmCloseQueue = false }) {
+                        Text("Vazgeç", color = TextSec)
+                    }
+                }
+            )
         }
     }
 }
@@ -1358,13 +1508,24 @@ private fun TrimPlayer(
      * Videonun gerçek kare zamanlaması. Sürükleme sırasında hedef an bu saat ile
      * kare sınırına oturtulur (30 FPS -> 33,33 ms, 60 FPS -> 16,67 ms).
      */
-    frameClock: FrameClock = FrameClock.NONE
+    frameClock: FrameClock = FrameClock.NONE,
+    /**
+     * 0 = sürükleme yok, >0 = zaman çizelgesi tutamacı sürükleniyor. Sürükleme boyunca
+     * oynatıcı sarma istekleri "en son istek kazanır" motorundan geçer.
+     */
+    scrubSessionRef: androidx.compose.runtime.MutableIntState = remember { mutableIntStateOf(0) }
 ) {
     val context = LocalContext.current
     // Kare hassas sarma: tolerans SIFIR. Oynatıcı anahtar kareye değil, istenen kareye
     // oturur; yalnızca o kareye ulaşmak için gereken kareler dekoderden geçer.
     val player = remember {
         buildFastPlayer(context, isMultiView = false).apply { setSeekParameters(SEEK_EXACT) }
+    }
+    // Sürükleme sarması: "en son istek kazanır". Eski istekler iptal edilir, ekrana her
+    // zaman EN SON istenen 500 ms örneğinin gerçek karesi gider.
+    val scrubber = remember(player) { ScrubSeeker(player) }
+    DisposableEffect(scrubber) {
+        onDispose { scrubber.release() }
     }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableLongStateOf(0L) }
@@ -1460,8 +1621,12 @@ private fun TrimPlayer(
     }
 
     LaunchedEffect(startMs) {
-        if (abs(startMs - lastAppliedStartMs) > 30L) {
-            lastAppliedStartMs = startMs
+        // Tutamaç sürüklenirken sarmayı zaman çizelgesi gönderir (onHandleDrag). Burada
+        // ikinci bir sarma daha göndermek dekoderi gereksiz meşgul edip görüntüyü
+        // geciktiriyordu; sürükleme sırasında bu efekt devre dışı.
+        val changed = abs(startMs - lastAppliedStartMs) > 30L
+        lastAppliedStartMs = startMs
+        if (changed && !scrubber.isScrubbing) {
             pendingSeekTargetMs = startMs
             pendingSeekAt = System.currentTimeMillis()
             positionMs = startMs
@@ -1475,9 +1640,11 @@ private fun TrimPlayer(
             lastAppliedEndMs = endMs
             return@LaunchedEffect
         }
-        if (abs(endMs - lastAppliedEndMs) > 30L) {
-            lastAppliedEndMs = endMs
-            // Bitiş tutamacı sürüklenirken O kare gösterilir (kare hassas kesim noktası).
+        val changed = abs(endMs - lastAppliedEndMs) > 30L
+        lastAppliedEndMs = endMs
+        // Bitiş tutamacı sürüklenirken O kare gösterilir; sürükleme sırasında sarmayı
+        // zaman çizelgesi (onHandleDrag) gönderdiği için burada tekrar gönderilmez.
+        if (changed && !scrubber.isScrubbing) {
             val target = frameClock.snap(endMs).coerceAtLeast(startState.value)
             pendingSeekTargetMs = target
             pendingSeekAt = System.currentTimeMillis()
@@ -1547,7 +1714,29 @@ private fun TrimPlayer(
         pendingSeekTargetMs = clamped
         pendingSeekAt = System.currentTimeMillis()
         positionMs = clamped
-        player.seekTo(clamped)
+        // Sürükleme sürüyorsa istek motoru üzerinden gider (kuyruk birikmez, eski kare
+        // yeni karenin üzerine yazılmaz). Dokunma/düğme atlamaları doğrudan uygulanır.
+        if (scrubber.isScrubbing) scrubber.request(clamped) else player.seekTo(clamped)
+    }
+
+    // Sürükleme başladı / bitti: son hedef kesin olarak (kare hassas) uygulanır.
+    val scrubStart: () -> Unit = { scrubber.begin() }
+    val scrubFinish: (Long) -> Unit = { ms ->
+        val safeEnd = if (endState.value > startState.value) endState.value else player.duration.coerceAtLeast(1L)
+        val clamped = frameClock.snap(ms).coerceIn(startState.value, safeEnd)
+        pendingSeekTargetMs = clamped
+        pendingSeekAt = System.currentTimeMillis()
+        positionMs = clamped
+        scrubber.end(clamped)
+    }
+
+    // Zaman çizelgesi tutamacı sürüklenmeye başladı / bitti.
+    LaunchedEffect(scrubSessionRef.intValue) {
+        if (scrubSessionRef.intValue > 0) {
+            scrubStart()
+        } else if (scrubber.isScrubbing) {
+            scrubFinish(positionMs)
+        }
     }
 
     // DIŞARIDAN gelen sarma isteği (zaman çizelgesine dokunma / aralık satırını seçme).
@@ -1686,17 +1875,20 @@ private fun TrimPlayer(
             onScaleChange = { scaleMode = it },
             showScale = !video.isAudioOnly,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-            // Sürüklerken hızlı anahtar-kare önizlemesi, bırakınca kesin kare araması.
+            // Sürükleme boyunca HER 500 ms örneğin gerçek karesi ana oynatıcıda gösterilir;
+            // parmak kalkınca son hedef kesin olarak oturur.
             onScrubChange = { dragging ->
                 if (dragging) {
                     player.setSeekParameters(SEEK_SCRUB)
                     player.pause()
+                    scrubStart()
                 } else {
                     player.setSeekParameters(SEEK_EXACT)
-                    player.seekTo(positionMs)
+                    scrubFinish(positionMs)
                 }
             },
             snapToFrame = { ms -> frameClock.snap(ms) },
+            scrubSampleMs = SCRUB_SAMPLE_MS,
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TrackMenuButtons(player, tracks, TextPrimary)
@@ -1749,7 +1941,9 @@ private fun TrimPlayer(
             onMarkEnd = markEnd,
             onUndoCut = onRemoveLastCut,
             showLoading = !playerReady,
-            frameClock = frameClock
+            frameClock = frameClock,
+            onScrubStart = scrubStart,
+            onScrubFinish = scrubFinish
         )
     }
 }
@@ -1775,7 +1969,9 @@ internal fun SmoothVideoSlider(
     cutRanges: List<TimeRange> = emptyList(),
     markStartMs: Long = -1L,
     /** Kare hassasiyeti: hedef an bu fonksiyonla gerçek kare sınırına oturtulur. */
-    snapToFrame: ((Long) -> Long)? = null
+    snapToFrame: ((Long) -> Long)? = null,
+    /** Sürükleme örnekleme adımı (ms). 500 = her yarım saniyede bir gerçek kare. */
+    sampleMs: Long = 0L
 ) {
     val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     val enabled = endMs > startMs
@@ -1806,6 +2002,7 @@ internal fun SmoothVideoSlider(
             markedRanges = cutRanges,
             markStartMs = markStartMs,
             snapToFrame = snapToFrame,
+            sampleMs = sampleMs,
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 6.dp)
@@ -1845,7 +2042,9 @@ internal fun PlayerControls(
     cutRanges: List<TimeRange> = emptyList(),
     markStartMs: Long = -1L,
     /** Kare hassasiyeti: hedef an gerçek kare sınırına oturtulur. */
-    snapToFrame: ((Long) -> Long)? = null
+    snapToFrame: ((Long) -> Long)? = null,
+    /** Sürükleme örnekleme adımı (ms). 500 = her yarım saniyede bir gerçek kare. 0 = kapalı. */
+    scrubSampleMs: Long = 0L
 ) {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { loadSkipSeconds(ctx) }
@@ -1882,7 +2081,8 @@ internal fun PlayerControls(
             rowHeight = 36.dp,
             cutRanges = cutRanges,
             markStartMs = markStartMs,
-            snapToFrame = snapToFrame
+            snapToFrame = snapToFrame,
+            sampleMs = scrubSampleMs
         )
 
         // 2. Satır: Solda (+ Ekle), Ortada En-Boy Oranı, -10sn, Oynat/Duraklat, +10sn, Döndür, Hız (1X)
@@ -2677,7 +2877,11 @@ private fun FullscreenPlayerDialog(
     onToggleMark: () -> Unit = {},
     onMarkEnd: () -> Unit = {},
     onUndoCut: () -> Unit = {},
-    frameClock: FrameClock = FrameClock.NONE
+    frameClock: FrameClock = FrameClock.NONE,
+    /** Yatay sürükleme başladı: oynatma durur, sarma motoru devreye girer. */
+    onScrubStart: () -> Unit = {},
+    /** Yatay sürükleme bitti: son hedef kesin (kare hassas) uygulanır. */
+    onScrubFinish: (Long) -> Unit = {}
 ) {
     val context = LocalContext.current
     val cfg = LocalConfiguration.current
@@ -2799,6 +3003,9 @@ private fun FullscreenPlayerDialog(
                 val posState = rememberUpdatedState(positionMs)
                 val rangeStartState = rememberUpdatedState(startMs)
                 val rangeEndState = rememberUpdatedState(endMs)
+                val clockState = rememberUpdatedState(frameClock)
+                val onScrubStartState = rememberUpdatedState(onScrubStart)
+                val onScrubFinishState = rememberUpdatedState(onScrubFinish)
 
                 Box(
                     modifier = Modifier
@@ -2817,60 +3024,56 @@ private fun FullscreenPlayerDialog(
                                 }
                             )
                         }
-                        // ── DÜZELTME (6): ORTADA YATAY SÜRÜKLEME = İLERİ/GERİ SARMA ──
-                        // Video tam ekrandayken parmak ekranın ortasındayken sağa/sola
-                        // sürüklenince video takip eder (YouTube'daki gibi). Sürükleme
-                        // miktarı en fazla 120 saniyelik bir pencereye ölçeklenir; ortada hedef zaman +
-                        // kaç saniye atlandığı gösterilir.
+                        // ── ORTADA YATAY SÜRÜKLEME = İLERİ/GERİ SARMA (500 ms örnekleme) ──
+                        // Kök neden düzeltmesi: hedef an artık parmağın TOPLAM yer değiştirmesi
+                        // üzerinden (mutlak konum) hesaplanır. Eskiden her olayda biriktirilen
+                        // delta kullanılıyordu; jest yeniden başladığında biriken değer sıfırlanıp
+                        // sürükleme "15-20 sn"de takılıyordu. Mutlak hesapta bir ekran genişliği
+                        // 180 saniyeyi tarar; hedef her zaman 500 ms ızgarasına ve gerçek kare
+                        // sınırına oturur, görüntü ANA OYNATICI içinde güncellenir.
                         .pointerInput(Unit) {
                             var baseMs = 0L
-                            var accumulated = 0f
+                            var startX = 0f
                             var lastTargetMs = 0L
-                            var lastLiveSeekAt = 0L
                             detectHorizontalDragGestures(
-                                onDragStart = {
+                                onDragStart = { offset ->
                                     interaction++
-                                    accumulated = 0f
                                     baseMs = posState.value.coerceAtLeast(0L)
-                                    lastTargetMs = baseMs
-                                    lastLiveSeekAt = 0L
-                                    // Sürükleme sırasında hızlı anahtar-kare önizlemesi;
-                                    // bırakınca tam kareye kesin arama yapılır.
+                                    startX = offset.x
+                                    lastTargetMs = clockState.value.snapToSample(baseMs, SCRUB_SAMPLE_MS)
+                                    dragDeltaMs = lastTargetMs - baseMs
+                                    dragSeekMs = lastTargetMs
                                     player.setSeekParameters(SEEK_SCRUB)
-                                    dragDeltaMs = 0L
-                                    dragSeekMs = baseMs
+                                    player.pause()
+                                    onScrubStartState.value()
                                 },
-                                onHorizontalDrag = { change, dragAmount ->
+                                onHorizontalDrag = { change, _ ->
                                     change.consume()
-                                    accumulated += dragAmount
                                     val w = size.width.coerceAtLeast(1).toFloat()
                                     val span = (rangeEndState.value - rangeStartState.value)
                                         .coerceAtLeast(1L)
-                                    // Bir ekran genişliği en fazla 120 saniyeyi tarar.
-                                    // Uzun videolarda tam süreyi tek sürüklemeye yaymak,
-                                    // birkaç santimetrelik harekette dakikalar atlatıyordu.
-                                    val scrubWindowMs = span.coerceAtMost(120_000L)
-                                    val delta = (accumulated / w * scrubWindowMs.toFloat()).toLong()
+                                    // Bir ekran genişliği en fazla 180 saniyeyi tarar: hem uzun
+                                    // videoda hızlı ilerler hem de 0,5 sn'lik kareler görünür kalır.
+                                    val scrubWindowMs = span.coerceAtMost(180_000L)
+                                    val dx = change.position.x - startX
+                                    val delta = (dx / w * scrubWindowMs.toFloat()).toLong()
                                     val target = (baseMs + delta).coerceIn(
                                         rangeStartState.value,
                                         rangeEndState.value.coerceAtLeast(rangeStartState.value)
                                     )
-                                    // Kare hassas hedef: HUD ve sarma aynı kareyi gösterir.
-                                    val snapped = frameClock.snap(target)
+                                    // 0,5 sn ızgarası + videonun gerçek kare sınırı.
+                                    val snapped = clockState.value.snapToSample(target, SCRUB_SAMPLE_MS)
+                                    lastTargetMs = snapped
                                     dragDeltaMs = snapped - baseMs
                                     dragSeekMs = snapped
-                                    lastTargetMs = snapped
-                                    val now = System.currentTimeMillis()
-                                    if (now - lastLiveSeekAt >= LIVE_SCRUB_INTERVAL_MS) {
-                                        lastLiveSeekAt = now
-                                        onSeekToState.value(snapped)
-                                    }
+                                    // Her yeni örnek anında gönderilir; kısıtlama (throttle) yok.
+                                    onSeekToState.value(snapped)
                                 },
                                 onDragEnd = {
-                                    // Parmak kalkınca kesim noktası tam görünsün diye
-                                    // kare hassas konuma otur.
+                                    // Parmak kalkınca son örnek kesin (kare hassas) uygulanır.
                                     player.setSeekParameters(SEEK_EXACT)
                                     onSeekToState.value(lastTargetMs)
+                                    onScrubFinishState.value(lastTargetMs)
                                     val token = ++dragToken
                                     scope.launch {
                                         delay(700)
@@ -2883,6 +3086,7 @@ private fun FullscreenPlayerDialog(
                                 onDragCancel = {
                                     player.setSeekParameters(SEEK_EXACT)
                                     onSeekToState.value(lastTargetMs)
+                                    onScrubFinishState.value(lastTargetMs)
                                     dragSeekMs = null
                                     dragDeltaMs = 0L
                                 }
@@ -2913,12 +3117,15 @@ private fun FullscreenPlayerDialog(
                     )
                 }
 
-                // Ortada yatay sürükleme göstergesi: hedef zaman + atlanan süre.
+                // Sürükleme göstergesi: hedef zaman + atlanan süre.
+                // Kare görüntüsünü kapatmamak için ÜST ORTAYA alındı; ayrı önizleme
+                // kutusu/baloncuk yoktur, görüntü doğrudan ana oynatıcıda değişir.
                 dragSeekMs?.let { target ->
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .align(Alignment.Center)
+                            .align(Alignment.TopCenter)
+                            .padding(top = 70.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .background(Color(0xCC000000))
                             .padding(horizontal = 18.dp, vertical = 10.dp)
@@ -3400,7 +3607,9 @@ internal class SlotPlayerHolder(
         pendingSeekTargetMs = snapped
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = snapped
-        player.setSeekParameters(if (liveScrub) SEEK_SCRUB else SEEK_EXACT)
+        // ÇOKLU OYNATICI: burada 1-4 video aynı anda çözüldüğü için sürükleme sırasında
+        // anahtar kare önizlemesi (hız) korunur; kırpma ekranı ise kare hassas çalışır.
+        player.setSeekParameters(if (liveScrub) SEEK_SCRUB_STREAM else SEEK_EXACT)
         if (player.playbackState == Player.STATE_IDLE) {
             player.prepare()
         }
@@ -3410,7 +3619,7 @@ internal class SlotPlayerHolder(
     /** Sürükleme başladı: oynatmayı durdur ve ara aramaları hızlandır. */
     fun pauseForScrub() {
         scrubActive = true
-        player.setSeekParameters(SEEK_SCRUB)
+        player.setSeekParameters(SEEK_SCRUB_STREAM)
         if (player.playWhenReady) player.pause()
     }
 
