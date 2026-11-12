@@ -2081,3 +2081,6 @@ diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/res/val
 +    <string name="open_with_merge">Merge</string>
 +    <string name="open_with_convert">Convert audio</string>
  </resources>
+
+## Sürüklemede sahne görünmeme düzeltmesi
+- ScrubSeeker: kare algılama `onRenderedFirstFrame` (yalnızca bir kez tetiklenir) yerine `VideoFrameMetadataListener` ile her karede yapılır; sarma zaman aşımı 2500 ms. Video kesme ve oynatıcıda sürüklerken 0,5 sn karelerin hepsi görünür.

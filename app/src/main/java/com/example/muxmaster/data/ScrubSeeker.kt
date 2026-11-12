@@ -2,7 +2,10 @@ package com.example.muxmaster.data
 
 import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.common.Format
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,7 +37,7 @@ import kotlinx.coroutines.launch
 class ScrubSeeker(
     private val player: ExoPlayer,
     /** Bir sarmanın karesinin ekrana gelmesi için beklenecek en uzun süre (ms). */
-    private val settleTimeoutMs: Long = 700L,
+    private val settleTimeoutMs: Long = 2500L,
     /** Art arda iki sarma arasındaki en küçük boşluk (ms). */
     private val minGapMs: Long = 0L
 ) {
@@ -55,7 +58,7 @@ class ScrubSeeker(
     private var readySinceSeek = false
     private val listener = object : Player.Listener {
         override fun onRenderedFirstFrame() {
-            frameRendered = true
+            renderedFrames.incrementAndGet()
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -65,8 +68,21 @@ class ScrubSeeker(
             }
         }
     }
+    /**
+     * ASIL KÖK NEDEN: `onRenderedFirstFrame` ExoPlayer'da her sarmada DEĞİL, yalnızca
+     * renderer etkinleştirildiğinde / yüzey değiştiğinde BİR KEZ çağrılır. Bu yüzden
+     * sürüklemede her sarma "kare gelmedi" sanılıp zaman aşımına düşüyor, araya giren yeni
+     * `seekTo` dekoderi sıfırlıyor ve hiçbir sahne ekrana gelmiyordu.
+     * `VideoFrameMetadataListener` ise ekrana gönderilen HER kare için çağrılır (duraklatılmış
+     * hâlde sarmadan sonraki ilk kare dahil). Kare sayacı bununla tutulur.
+     */
+    private val renderedFrames = AtomicLong(0L)
+    private val frameListener = VideoFrameMetadataListener { _: Long, _: Long, _: Format, _: android.media.MediaFormat? ->
+        renderedFrames.incrementAndGet()
+    }
     init {
         runCatching { player.addListener(listener) }
+        runCatching { player.setVideoFrameMetadataListener(frameListener) }
     }
 
     /** Sürükleme sürüyor mu? Sürükleme bitince yapılan sarma kesin (kare hassas) yapılır. */
@@ -113,6 +129,7 @@ class ScrubSeeker(
         pumpJob?.cancel()
         pumpJob = null
         runCatching { player.removeListener(listener) }
+        runCatching { player.clearVideoFrameMetadataListener(frameListener) }
         scope.cancel()
     }
 
@@ -139,6 +156,7 @@ class ScrubSeeker(
         if (t == lastAppliedMs && frameRendered) return
         frameRendered = false
         readySinceSeek = false
+        val framesBefore = renderedFrames.get()
         if (!runCatching { player.seekTo(t) }.isSuccess) return
         lastAppliedMs = t
         val hasVideo = runCatching { player.videoSize.width > 0 }.getOrDefault(true)
@@ -148,7 +166,7 @@ class ScrubSeeker(
         val deadline = System.currentTimeMillis() + settleTimeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (released) return
-            if (frameRendered) break
+            if (renderedFrames.get() != framesBefore) { frameRendered = true; break }
             if (!hasVideo && readySinceSeek) break
             if (!isScrubbing && pendingMs >= 0L) break
             delay(4L)
