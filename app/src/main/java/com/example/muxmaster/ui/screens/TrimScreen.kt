@@ -171,8 +171,6 @@ private val SEEK_EXACT = SeekParameters.EXACT
  * GERÇEK karesi çözülür.
  */
 private val SEEK_SCRUB = SeekParameters.EXACT
-/** Çoklu video oynatıcısı: sürüklemede anahtar kareye atlar (4 dekoder aynı anda çalışır). */
-private val SEEK_SCRUB_STREAM = SeekParameters.CLOSEST_SYNC
 /** Sürükleme sırasında görüntülenecek örnekleme adımı: her 500 ms'de bir gerçek kare. */
 private const val SCRUB_SAMPLE_MS = FrameClock.SCRUB_SAMPLE_MS
 
@@ -219,6 +217,17 @@ fun TrimScreen(
     // Oynatıcının anlık konumu. Sadece makas düğmesi ve zaman çizelgesi okur;
     // her saniye tüm ekranın yeniden çizilmemesi için State olarak tutulur.
     val playheadRef = remember { mutableLongStateOf(0L) }
+
+    // ── EKRAN DÖNDÜRME: OYNATICI OTURUMU ──────────────────────────────────────
+    // Yatay/dikey yerleşim iki ayrı Compose dalıdır. Telefon döndürüldüğünde TrimPlayer
+    // diğer dala taşınıp yeniden kuruluyordu; ExoPlayer da onunla birlikte çöp olup
+    // video 0. saniyeden başlıyordu. Oturum TrimScreen seviyesinde tutulduğu için aynı
+    // oynatıcı örneği korunur: video başa dönmez, hız/ses/en-boy oranı korunur.
+    val playerContext = LocalContext.current.applicationContext
+    val playerSession = remember { TrimPlayerSession(playerContext) }
+    DisposableEffect(playerSession) {
+        onDispose { playerSession.release() }
+    }
 
     // Oynatıcıya DIŞARIDAN sarma isteği (zaman çizelgesine dokunma, aralık seçme,
     // kırpma tutamacı sürükleme). -1 = istek yok. Değer yazıldığında oynatıcı o ana
@@ -309,7 +318,8 @@ fun TrimScreen(
                     onRemoveLastCut = viewModel::removeLastCutRange,
                     fillHeight = fill,
                     frameClock = frameClock,
-                    scrubSessionRef = scrubSession
+                    scrubSessionRef = scrubSession,
+                    session = playerSession
                 )
             }
         }
@@ -1487,6 +1497,69 @@ internal fun SubtitleOverlay(text: String, modifier: Modifier = Modifier, fontSc
     )
 }
 
+/**
+ * EKRAN DÖNDÜRMEYE DAYANIKLI OYNATICI OTURUMU.
+ *
+ * KÖK NEDEN: `TrimScreen` yatay/dikey yerleşimi iki ayrı Compose dalıdır. Telefon
+ * döndürüldüğünde `TrimPlayer` farklı bir dalda yeniden kuruluyor, içindeki
+ * `remember { ExoPlayer... }` çöp oluyor, yeni oynatıcı dosyayı 0. saniyeden açıyordu.
+ *
+ * ÇÖZÜM: ExoPlayer ve tüm oynatma durumu `TrimScreen` seviyesinde yaşayan bu oturumda
+ * tutulur. Yerleşim değişse de AYNI oynatıcı örneği kullanılır: dosya yeniden
+ * yüklenmez, dekoder yeniden kurulmaz, video başa dönmez; konum, hız, ses ve
+ * en-boy oranı korunur.
+ */
+internal class TrimPlayerSession(context: Context) {
+    val player: ExoPlayer = buildFastPlayer(context, isMultiView = false).apply {
+        setSeekParameters(SEEK_EXACT)
+    }
+    /** Yüklenmiş dosyanın anahtarı (yol veya uri). Aynı dosya ise yeniden yüklenmez. */
+    var mediaKey: String = ""
+    var mediaLoaded: Boolean = false
+    /** Son bilinen oynatma konumu (ms). */
+    var positionMs: Long = 0L
+    /** Oynatma niyeti: true = oynuyor, false = duraklatılmış. */
+    var wasPlaying: Boolean = false
+    var speed: Float = 1f
+    var scaleMode: ScaleMode = ScaleMode.FIT
+    var aspect: Float = 16f / 9f
+    var videoWpx: Int = 0
+    var videoHpx: Int = 0
+    var fullscreen: Boolean = false
+    var markStartMs: Long = -1L
+    private var released = false
+
+    fun release() {
+        if (released) return
+        released = true
+        runCatching { player.release() }
+    }
+}
+
+/**
+ * Oynatma hızını uygular.
+ *
+ * ExoPlayer'ın ses hattı (Sonic zaman ölçekleyici) 8x'e kadar ses üretir. 8x üzerinde
+ * (9x) ses hattı devre dışı bırakılır: video tam hızda oynamaya devam eder, ses
+ * duyulmaz. Böylece yüksek hızda ses glitch'i/çökmesi olmaz ve görüntü akıcı kalır.
+ * 8x ve altındaki tüm hızlarda uygulamanın mevcut ses davranışı aynen korunur.
+ */
+internal fun applyPlaybackSpeed(player: ExoPlayer, speed: Float) {
+    val s = speed.coerceIn(0.1f, 9f)
+    val audioOff = s > 8.0001f
+    runCatching {
+        val params = player.trackSelectionParameters
+        // Yalnızca gerçekten değişmesi gerekiyorsa dokunulur: gereksiz track yeniden
+        // seçimi (ve ses kesintisi) oluşmaz. Ses hattı 8x'in altına inince geri açılır.
+        if (params.disabledTrackTypes.contains(C.TRACK_TYPE_AUDIO) != audioOff) {
+            player.trackSelectionParameters = params.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, audioOff)
+                .build()
+        }
+    }
+    runCatching { player.setPlaybackSpeed(s) }
+}
+
 @Composable
 private fun TrimPlayer(
     video: VideoFile,
@@ -1513,42 +1586,48 @@ private fun TrimPlayer(
      * 0 = sürükleme yok, >0 = zaman çizelgesi tutamacı sürükleniyor. Sürükleme boyunca
      * oynatıcı sarma istekleri "en son istek kazanır" motorundan geçer.
      */
-    scrubSessionRef: androidx.compose.runtime.MutableIntState = remember { mutableIntStateOf(0) }
+    scrubSessionRef: androidx.compose.runtime.MutableIntState = remember { mutableIntStateOf(0) },
+    /** Ekran döndürmeye dayanıklı oynatıcı oturumu (bkz. [TrimPlayerSession]). */
+    session: TrimPlayerSession
 ) {
     val context = LocalContext.current
-    // Kare hassas sarma: tolerans SIFIR. Oynatıcı anahtar kareye değil, istenen kareye
-    // oturur; yalnızca o kareye ulaşmak için gereken kareler dekoderden geçer.
-    val player = remember {
-        buildFastPlayer(context, isMultiView = false).apply { setSeekParameters(SEEK_EXACT) }
-    }
+    // Oynatıcı ARTIK burada oluşturulmaz: oturumdan alınır. Ekran döndürmede aynı
+    // örnek korunur (video başa dönmez). Kare hassas sarma: tolerans SIFIR.
+    val player = session.player
+    // Kare hassas sarma parametresi bir kez uygulanır (her yeniden çizimde değil).
+    LaunchedEffect(Unit) { player.setSeekParameters(SEEK_EXACT) }
     // Sürükleme sarması: "en son istek kazanır". Eski istekler iptal edilir, ekrana her
     // zaman EN SON istenen 500 ms örneğinin gerçek karesi gider.
     val scrubber = remember(player) { ScrubSeeker(player) }
     DisposableEffect(scrubber) {
         onDispose { scrubber.release() }
     }
-    var isPlaying by remember { mutableStateOf(false) }
-    var positionMs by remember { mutableLongStateOf(0L) }
+    var isPlaying by remember { mutableStateOf(session.wasPlaying) }
+    var positionMs by remember { mutableLongStateOf(session.positionMs) }
     var pendingSeekTargetMs by remember { mutableLongStateOf(-1L) }
     var pendingSeekAt by remember { mutableLongStateOf(0L) }
-    var aspect by remember { mutableFloatStateOf(16f / 9f) }
-    var videoWpx by remember { mutableIntStateOf(0) }
-    var videoHpx by remember { mutableIntStateOf(0) }
-    var scaleMode by remember { mutableStateOf(ScaleMode.FIT) }
-    var speed by remember { mutableFloatStateOf(1f) }
-    var fullscreen by remember { mutableStateOf(false) }
+    var aspect by remember { mutableFloatStateOf(session.aspect) }
+    var videoWpx by remember { mutableIntStateOf(session.videoWpx) }
+    var videoHpx by remember { mutableIntStateOf(session.videoHpx) }
+    var scaleMode by remember { mutableStateOf(session.scaleMode) }
+    var speed by remember { mutableFloatStateOf(session.speed) }
+    var fullscreen by remember { mutableStateOf(session.fullscreen) }
     // HIZLI KESİM: A noktası damgası (-1 = damga yok) ve kısa geri bildirim metni.
-    var markStartMs by remember { mutableLongStateOf(-1L) }
+    var markStartMs by remember { mutableLongStateOf(session.markStartMs) }
     var markHint by remember { mutableStateOf<String?>(null) }
+    // Sürükleme başlamadan önce video oynuyor muydu? Sürükleme bitince oynatma
+    // kendiliğinden devam eder; kullanıcıdan tekrar Play'e basması istenmez.
+    var wasPlayingBeforeScrub by remember { mutableStateOf(false) }
     val hostView = LocalView.current
     DisposableEffect(hostView) {
         hostView.keepScreenOn = true
         onDispose { hostView.keepScreenOn = false }
     }
-    var tracks by remember { mutableStateOf(Tracks.EMPTY) }
+    // Ekran döndürmede track menüsü boş kalmasın: mevcut track listesi doğrudan okunur.
+    var tracks by remember { mutableStateOf(player.currentTracks) }
     var cueText by remember { mutableStateOf("") }
     // Oynatıcı hazır mı? (tam ekran ilk açıldığında siyah ekran yerine halka gösterilir)
-    var playerReady by remember { mutableStateOf(false) }
+    var playerReady by remember { mutableStateOf(player.playbackState == Player.STATE_READY) }
 
     val startState = rememberUpdatedState(startMs)
     val endState = rememberUpdatedState(endMs)
@@ -1562,6 +1641,9 @@ private fun TrimPlayer(
                     aspect = (videoSize.width * videoSize.pixelWidthHeightRatio) / videoSize.height
                     videoWpx = (videoSize.width * videoSize.pixelWidthHeightRatio).toInt()
                     videoHpx = videoSize.height
+                    session.aspect = aspect
+                    session.videoWpx = videoWpx
+                    session.videoHpx = videoHpx
                 }
             }
             override fun onTracksChanged(t: Tracks) { tracks = t }
@@ -1573,6 +1655,10 @@ private fun TrimPlayer(
                 if (System.currentTimeMillis() - pendingSeekAt > 650L) {
                     positionMs = player.currentPosition.coerceAtLeast(0L)
                 }
+            }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                // Ekran döndürmede "oynuyor / duraklatılmış" niyeti korunur.
+                session.wasPlaying = playWhenReady
             }
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_READY) playerReady = true
@@ -1595,12 +1681,28 @@ private fun TrimPlayer(
         onDispose {
             owner?.lifecycle?.removeObserver(observer)
             player.removeListener(listener)
-            player.release()
+            // Oynatıcı BURADA serbest bırakılmaz: sahibi TrimPlayerSession'dır.
+            // Böylece ekran döndürmede aynı oynatıcı kaldığı yerden devam eder.
         }
     }
 
     LaunchedEffect(video.uri, video.cachePath) {
+        // EKRAN DÖNDÜRME: aynı dosya zaten yüklüyse HİÇBİR ŞEY yeniden yüklenmez.
+        // Oynatıcı son konumdan devam eder; dosya baştan açılmaz.
+        val mediaKey = if (video.cachePath.isNotBlank()) video.cachePath else video.uri.toString()
+        if (session.mediaKey == mediaKey && session.mediaLoaded && player.mediaItemCount > 0) {
+            // Oynatıcı hâlâ AYNI dosyayı taşıyor: konum, hız ve oynatma durumu korunur.
+            // Gereksiz sarma/decoder yeniden başlatma YAPILMAZ.
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+            playerReady = player.playbackState == Player.STATE_READY
+            player.playWhenReady = session.wasPlaying
+            return@LaunchedEffect
+        }
         playerReady = false
+        session.mediaKey = mediaKey
+        session.mediaLoaded = false
+        session.wasPlaying = false
+        session.positionMs = startState.value
         // HIZ: dosya yolu zaten çözüldüyse (TrimViewModel -> InputAccess) doğrudan
         // ondan oynatılır. Böylece her video geçişinde içerik sağlayıcısına tekrar
         // sorulmaz, "önbelleğe alınıyor" beklemesi oluşmaz.
@@ -1618,6 +1720,7 @@ private fun TrimPlayer(
         player.prepare()
         player.seekTo(startState.value)
         player.playWhenReady = false
+        session.mediaLoaded = true
     }
 
     LaunchedEffect(startMs) {
@@ -1630,7 +1733,9 @@ private fun TrimPlayer(
             pendingSeekTargetMs = startMs
             pendingSeekAt = System.currentTimeMillis()
             positionMs = startMs
-            delay(60)
+            // GECİKME YOK: eski kod burada 60 ms bekleyip İKİNCİ bir sarma gönderiyordu;
+            // dekoder iki kez meşgul edildiği için sarma gecikiyordu.
+            player.setSeekParameters(SEEK_EXACT)
             player.seekTo(startMs)
         }
     }
@@ -1649,14 +1754,23 @@ private fun TrimPlayer(
             pendingSeekTargetMs = target
             pendingSeekAt = System.currentTimeMillis()
             positionMs = target
-            delay(60)
+            player.setSeekParameters(SEEK_EXACT)
             player.seekTo(target)
         }
     }
-    LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
+    LaunchedEffect(speed) {
+        session.speed = speed
+        applyPlaybackSpeed(player, speed)
+    }
 
     // Anlık konumu (makas düğmesi için) dışarıya yayınla.
-    LaunchedEffect(positionMs) { playheadRef.longValue = positionMs }
+    LaunchedEffect(positionMs) {
+        playheadRef.longValue = positionMs
+        session.positionMs = positionMs
+    }
+    LaunchedEffect(scaleMode) { session.scaleMode = scaleMode }
+    LaunchedEffect(markStartMs) { session.markStartMs = markStartMs }
+    LaunchedEffect(fullscreen) { session.fullscreen = fullscreen }
 
     LaunchedEffect(isTrimming) {
         if (isTrimming) player.pause()
@@ -1681,8 +1795,9 @@ private fun TrimPlayer(
     }
 
     val togglePlay: () -> Unit = {
-        val state = player.playbackState
-        if (player.playWhenReady && state != Player.STATE_ENDED) {
+        // Karar `playWhenReady` üzerinden verilir: tampon doldururken (isPlaying=false)
+        // Play'e basıldığında video yanlışlıkla DURAKLATILMAZ.
+        if (player.playWhenReady) {
             player.pause()
         } else {
             val pos = player.currentPosition
@@ -1692,21 +1807,30 @@ private fun TrimPlayer(
                 positionMs = startState.value
                 player.seekTo(startState.value)
             }
+            if (player.playbackState == Player.STATE_IDLE) player.prepare()
             player.play()
         }
     }
     val seekBy: (Long) -> Unit = { delta ->
         val safeEnd = if (endState.value > startState.value) endState.value else player.duration.coerceAtLeast(1L)
-        val base = if (System.currentTimeMillis() - pendingSeekAt <= 650L && pendingSeekTargetMs >= 0L) {
+        // ART ARDA BASIŞ BİRİKİR: sarma uçuşta ise hedef, oynatıcının (geciken) konumu
+        // değil son istenen konumdur. 3 x +10 sn = +30 sn.
+        val base = if (System.currentTimeMillis() - pendingSeekAt <= 900L && pendingSeekTargetMs >= 0L) {
             pendingSeekTargetMs
         } else {
             player.currentPosition.coerceAtLeast(0L)
         }
         val target = frameClock.snap(base + delta).coerceIn(startState.value, safeEnd)
+        val playing = player.playWhenReady
         pendingSeekTargetMs = target
         pendingSeekAt = System.currentTimeMillis()
         positionMs = target
+        // YAPAY GECİKME YOK: bekleyen sürükleme isteği iptal edilir, sarma ANINDA gider.
+        scrubber.cancelPending()
+        player.setSeekParameters(SEEK_EXACT)
         player.seekTo(target)
+        // Oynatma durumu korunur: oynuyorsa oynamaya devam eder, duraklatılmışsa kalır.
+        if (playing) player.play()
     }
     val seekTo: (Long) -> Unit = { target ->
         val safeEnd = if (endState.value > startState.value) endState.value else player.duration.coerceAtLeast(1L)
@@ -1720,14 +1844,24 @@ private fun TrimPlayer(
     }
 
     // Sürükleme başladı / bitti: son hedef kesin olarak (kare hassas) uygulanır.
-    val scrubStart: () -> Unit = { scrubber.begin() }
+    val scrubStart: () -> Unit = {
+        wasPlayingBeforeScrub = player.playWhenReady
+        player.setSeekParameters(SEEK_SCRUB)
+        player.pause()
+        scrubber.begin()
+    }
     val scrubFinish: (Long) -> Unit = { ms ->
         val safeEnd = if (endState.value > startState.value) endState.value else player.duration.coerceAtLeast(1L)
         val clamped = frameClock.snap(ms).coerceIn(startState.value, safeEnd)
         pendingSeekTargetMs = clamped
         pendingSeekAt = System.currentTimeMillis()
         positionMs = clamped
+        player.setSeekParameters(SEEK_EXACT)
         scrubber.end(clamped)
+        // Sürükleme ÖNCESİNDE oynuyorsa otomatik devam eder (Play'e basmak gerekmez).
+        // Duraklatılmışsa duraklatılmış kalır.
+        if (wasPlayingBeforeScrub) player.play()
+        wasPlayingBeforeScrub = false
     }
 
     // Zaman çizelgesi tutamacı sürüklenmeye başladı / bitti.
@@ -1878,14 +2012,10 @@ private fun TrimPlayer(
             // Sürükleme boyunca HER 500 ms örneğin gerçek karesi ana oynatıcıda gösterilir;
             // parmak kalkınca son hedef kesin olarak oturur.
             onScrubChange = { dragging ->
-                if (dragging) {
-                    player.setSeekParameters(SEEK_SCRUB)
-                    player.pause()
-                    scrubStart()
-                } else {
-                    player.setSeekParameters(SEEK_EXACT)
-                    scrubFinish(positionMs)
-                }
+                // scrubStart() oynatma durumunu KENDİSİ saklayıp duraklatır; burada ayrıca
+                // pause() çağrılırsa "sürükleme öncesi oynuyordu" bilgisi kaybolur ve video
+                // parmak kalkınca kendiliğinden devam etmez.
+                if (dragging) scrubStart() else scrubFinish(positionMs)
             },
             snapToFrame = { ms -> frameClock.snap(ms) },
             scrubSampleMs = SCRUB_SAMPLE_MS,
@@ -2044,7 +2174,7 @@ internal fun PlayerControls(
     /** Kare hassasiyeti: hedef an gerçek kare sınırına oturtulur. */
     snapToFrame: ((Long) -> Long)? = null,
     /** Sürükleme örnekleme adımı (ms). 500 = her yarım saniyede bir gerçek kare. 0 = kapalı. */
-    scrubSampleMs: Long = 0L
+    scrubSampleMs: Long = SCRUB_SAMPLE_MS
 ) {
     val ctx = LocalContext.current
     LaunchedEffect(Unit) { loadSkipSeconds(ctx) }
@@ -2367,7 +2497,10 @@ enum class ScaleMode(val label: String) {
     ORIGINAL("Orijinal boyut (%100)")
 }
 
-internal val SPEED_PRESETS = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f, 2.5f, 3f, 4f, 5f)
+internal val SPEED_PRESETS = listOf(
+    0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f,
+    2.5f, 3f, 4f, 5f, 6f, 7f, 8f, 9f
+)
 
 internal fun speedLabel(v: Float): String {
     val r = Math.round(v * 100f) / 100f
@@ -2660,7 +2793,10 @@ internal fun ScaleButton(
     }
 }
 
-private val SPEED_LIST = listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
+private val SPEED_LIST = listOf(
+    0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f,
+    2.5f, 3f, 4f, 5f, 6f, 7f, 8f, 9f
+)
 
 @Composable
 internal fun SpeedButton(
@@ -2768,13 +2904,13 @@ internal fun SpeedPanelPopup(
                         .size(48.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF2A2A31))
-                        .clickable { onChange(((speed - 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
+                        .clickable { onChange(((speed - 0.05f).coerceIn(0.25f, 9f) * 100f).let { Math.round(it) / 100f }) },
                     contentAlignment = Alignment.Center
                 ) { Icon(Icons.Filled.Remove, "Yavaşlat", tint = Color.White) }
                 Slider(
                     value = speed,
-                    onValueChange = { v -> onChange((Math.round(v * 20f) / 20f).coerceIn(0.25f, 5f)) },
-                    valueRange = 0.25f..5f,
+                    onValueChange = { v -> onChange((Math.round(v * 20f) / 20f).coerceIn(0.25f, 9f)) },
+                    valueRange = 0.25f..9f,
                     modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
                     colors = SliderDefaults.colors(
                         thumbColor = PlayerTurquoise, activeTrackColor = PlayerTurquoise, inactiveTrackColor = Color(0xFF3A3A42)
@@ -2785,7 +2921,7 @@ internal fun SpeedPanelPopup(
                         .size(48.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF2A2A31))
-                        .clickable { onChange(((speed + 0.05f).coerceIn(0.25f, 5f) * 100f).let { Math.round(it) / 100f }) },
+                        .clickable { onChange(((speed + 0.05f).coerceIn(0.25f, 9f) * 100f).let { Math.round(it) / 100f }) },
                     contentAlignment = Alignment.Center
                 ) { Icon(Icons.Filled.Add, "Hızlandır", tint = Color.White) }
             }
@@ -3043,8 +3179,8 @@ private fun FullscreenPlayerDialog(
                                     lastTargetMs = clockState.value.snapToSample(baseMs, SCRUB_SAMPLE_MS)
                                     dragDeltaMs = lastTargetMs - baseMs
                                     dragSeekMs = lastTargetMs
-                                    player.setSeekParameters(SEEK_SCRUB)
-                                    player.pause()
+                                    // Duraklatmayı ve oynatma durumunun saklanmasını
+                                    // onScrubStart (scrubStart) yapar.
                                     onScrubStartState.value()
                                 },
                                 onHorizontalDrag = { change, _ ->
@@ -3323,6 +3459,30 @@ internal class SlotPlayerHolder(
     val appContext: Context = context.applicationContext
     val player: ExoPlayer = buildFastPlayer(appContext, isMultiView = isMultiView, fastSeek = true)
 
+    /**
+     * SÜRÜKLEME MOTORU (500 ms örnekleme + "en son istek kazanır").
+     *
+     * KÖK NEDEN: bu oynatıcı sürükleme sırasında `SEEK_SCRUB_STREAM` (CLOSEST_SYNC)
+     * kullanıyordu; yani oynatıcı her sarmada en yakın ANAHTAR KAREYE atlıyordu.
+     * Anahtar kareler arası 2-15 sn olduğu için zaman çizelgesi hareket ettiği hâlde
+     * ana görüntü ya hiç değişmiyor ya da saniyeler atlıyordu. Artık her sarma
+     * `SeekParameters.EXACT` ile hedefin GERÇEK karesine gider ve istekler bu motordan
+     * geçer: eski istek iptal edilir, ekrana her zaman EN SON 500 ms örneği gider.
+     */
+    private val scrubEngine = ScrubSeeker(player)
+    /** Sürükleme başlamadan önce video oynuyor muydu? (bitince otomatik devam) */
+    private var wasPlayingBeforeScrub = false
+    /** Kare hassas sarma parametresi uygulandı mı? (her örnekte yeniden uygulanmaz) */
+    private var exactSeekApplied = false
+
+    /** Tolerans SIFIR sarmayı bir kez uygular: oynatıcı anahtar kareye ATLAMAZ. */
+    private fun ensureExactSeek() {
+        if (!exactSeekApplied) {
+            exactSeekApplied = true
+            player.setSeekParameters(SEEK_EXACT)
+        }
+    }
+
     var loadedUri: Uri? by mutableStateOf(null)
     var isCloudStream: Boolean by mutableStateOf(false)
     var isPlaying: Boolean by mutableStateOf(false)
@@ -3391,12 +3551,12 @@ internal class SlotPlayerHolder(
             if (!isHolding2x) {
                 savedSpeedBeforeHold = speed
                 isHolding2x = true
-                player.setPlaybackSpeed(2.0f)
+                applyPlaybackSpeed(player, 2.0f)
             }
         } else {
             if (isHolding2x) {
                 isHolding2x = false
-                player.setPlaybackSpeed(savedSpeedBeforeHold)
+                applyPlaybackSpeed(player, savedSpeedBeforeHold)
             }
         }
     }
@@ -3428,12 +3588,18 @@ internal class SlotPlayerHolder(
             cueText = cueGroup.cues.mapNotNull { it.text?.toString() }.joinToString("\n")
         }
         override fun onIsPlayingChanged(playing: Boolean) {
-            isPlaying = playing
+            // Tampon doldururken isPlaying=false olur; oynatma NİYETİ (playWhenReady)
+            // açıksa arayüzde "Duraklat" gösterilir, böylece Play'e basınca video
+            // yanlışlıkla duraklatılmaz.
+            isPlaying = (playing || player.playWhenReady) && player.playbackState != Player.STATE_ENDED
             if (System.currentTimeMillis() - pendingSeekTimestamp > 700L) {
                 positionMs = player.currentPosition.coerceAtLeast(0L)
             }
             val d = player.duration
             if (d != C.TIME_UNSET && d > 0) durationMs = d
+        }
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            isPlaying = playWhenReady && player.playbackState != Player.STATE_ENDED
         }
         override fun onPlaybackStateChanged(playbackState: Int) {
             buffering = playbackState == Player.STATE_BUFFERING
@@ -3571,6 +3737,8 @@ internal class SlotPlayerHolder(
     }
 
     fun togglePlay() {
+        // Karar `playWhenReady` üzerinden verilir (tampon doldururken yanlış duraklatma yok);
+        // video bittiyse (ENDED) ilk basışta baştan oynatılır.
         if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
             player.pause()
         } else {
@@ -3596,37 +3764,74 @@ internal class SlotPlayerHolder(
         }
     }
 
-    /** Sürüklemede hızlı anahtar-kare önizlemesi, bırakışta kare hassas arama. */
+    /**
+     * Sarma. Sürükleme sırasında ([isLiveScrub] = true) hedef önce 500 ms ızgarasına
+     * (0,0 - 0,5 - 1,0 - 1,5 ...), sonra videonun GERÇEK kare sınırına oturtulur ve
+     * "en son istek kazanır" motoruna verilir.
+     *
+     * Sarma parametresi her zaman `SeekParameters.EXACT`: oynatıcı anahtar kareye
+     * ATLAMAZ, önceki anahtar kareden hedefe kadar gereken kareleri çözüp hedef kareyi
+     * gösterir. (Eski kod sürüklemede CLOSEST_SYNC kullanıyordu: "görüntü değişmiyor"
+     * şikâyetinin kök nedeni buydu.)
+     */
     fun seekTo(targetMs: Long, isLiveScrub: Boolean = false) {
         val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: durationMs
         if (d > 0L && durationMs != d) durationMs = d
         val safe = if (d > 0L) targetMs.coerceIn(0L, d) else targetMs.coerceAtLeast(0L)
-        // Kareye oturt (kare hızı henüz bilinmiyorsa ham değer kullanılır).
-        val snapped = if (detectedFps > 0f) frameClock.snap(safe) else safe
-        val liveScrub = isLiveScrub || scrubActive
+        val live = isLiveScrub || scrubActive
+        val snapped = if (live) {
+            frameClock.snapToSample(safe, SCRUB_SAMPLE_MS)
+        } else if (detectedFps > 0f) {
+            frameClock.snap(safe)
+        } else {
+            safe
+        }
+        // Aynı 500 ms örneği tekrar gönderilmez: dekoder gereksiz meşgul edilmez.
+        if (live && snapped == pendingSeekTargetMs) return
         pendingSeekTargetMs = snapped
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = snapped
-        // ÇOKLU OYNATICI: burada 1-4 video aynı anda çözüldüğü için sürükleme sırasında
-        // anahtar kare önizlemesi (hız) korunur; kırpma ekranı ise kare hassas çalışır.
-        player.setSeekParameters(if (liveScrub) SEEK_SCRUB_STREAM else SEEK_EXACT)
+        ensureExactSeek()
         if (player.playbackState == Player.STATE_IDLE) {
             player.prepare()
         }
-        player.seekTo(snapped)
+        if (live) {
+            scrubEngine.request(snapped)
+        } else {
+            scrubEngine.cancelPending()
+            player.seekTo(snapped)
+        }
     }
 
-    /** Sürükleme başladı: oynatmayı durdur ve ara aramaları hızlandır. */
+    /**
+     * Sürükleme başladı: oynatma durdurulur (yoksa oynatma sarma ile yarışır) ve
+     * sürükleme öncesi oynatma durumu saklanır.
+     */
     fun pauseForScrub() {
+        wasPlayingBeforeScrub = player.playWhenReady
         scrubActive = true
-        player.setSeekParameters(SEEK_SCRUB_STREAM)
+        player.setSeekParameters(SEEK_EXACT)
         if (player.playWhenReady) player.pause()
+        scrubEngine.begin()
     }
 
-    /** Sürükleme bitti: son hedefi kesin kare hassasiyetinde uygula. */
+    /**
+     * Sürükleme bitti: son hedef kesin (kare hassas) uygulanır ve video sürükleme
+     * ÖNCESİNDE oynuyorsa OTOMATİK olarak oynamaya devam eder. Kullanıcıdan tekrar
+     * Play'e basması istenmez. Duraklatılmışsa duraklatılmış kalır.
+     */
     fun finishScrub(targetMs: Long) {
         scrubActive = false
-        seekTo(targetMs, isLiveScrub = false)
+        val d = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: durationMs
+        val safe = if (d > 0L) targetMs.coerceIn(0L, d) else targetMs.coerceAtLeast(0L)
+        val snapped = if (detectedFps > 0f) frameClock.snap(safe) else safe
+        pendingSeekTargetMs = snapped
+        pendingSeekTimestamp = System.currentTimeMillis()
+        positionMs = snapped
+        player.setSeekParameters(SEEK_EXACT)
+        scrubEngine.end(snapped)
+        if (wasPlayingBeforeScrub) player.play()
+        wasPlayingBeforeScrub = false
     }
 
     /**
@@ -3645,14 +3850,24 @@ internal class SlotPlayerHolder(
         if (clock != frameClock) frameClock = clock
     }
 
+    /**
+     * İleri/geri sarma düğmeleri: YAPAY GECİKME YOK.
+     * Bekleyen sürükleme isteği iptal edilir, sarma anında uygulanır; oynatma durumu
+     * korunur (oynuyorsa oynamaya devam eder, duraklatılmışsa kalır) ve art arda
+     * basışlar birikir (3 x +10 sn = +30 sn).
+     */
     fun seekBy(deltaMs: Long) {
+        val playing = player.playWhenReady
         val base = currentAccuratePosition()
+        scrubActive = false
+        scrubEngine.cancelPending()
         seekTo(base + deltaMs, isLiveScrub = false)
+        if (playing) player.play()
     }
 
     fun updateSpeed(newSpeed: Float) {
         speed = newSpeed
-        player.setPlaybackSpeed(newSpeed)
+        applyPlaybackSpeed(player, newSpeed)
     }
 
     fun applyMute(targetMuted: Boolean) {
@@ -3677,6 +3892,7 @@ internal class SlotPlayerHolder(
     fun release() {
         released = true
         cloudStatus = null
+        scrubEngine.release()
         player.removeListener(listener)
         player.release()
     }
@@ -4295,7 +4511,6 @@ private fun SingleOrFocusedPlayerContent(
                         var scrubOriginX = startPos.x
                         var scrubBaseMs = 0L
                         var scrubTargetMs = 0L
-                        var lastLiveSeekTime = 0L
 
                         do {
                             val event = awaitPointerEvent()
@@ -4342,6 +4557,10 @@ private fun SingleOrFocusedPlayerContent(
                                             scrubBaseMs = holder.currentAccuratePosition()
                                             scrubTargetMs = scrubBaseMs
                                             interactionState.value()
+                                            // Sürükleme = scrubbing: oynatma durur ve önceki
+                                            // durum saklanır; parmak kalkınca video OTOMATİK
+                                            // devam eder (tekrar Play'e basmak gerekmez).
+                                            holder.pauseForScrub()
                                         }
                                     }
                                     if (isHorizontalSeeking) {
@@ -4369,18 +4588,18 @@ private fun SingleOrFocusedPlayerContent(
                                         scrubOverlayText = "${formatShortTime(scrubTargetMs)} ($deltaFormatted)"
 
                                         holder.positionMs = scrubTargetMs
-                                        val now = System.currentTimeMillis()
-                                        if (now - lastLiveSeekTime >= 110L) {
-                                            lastLiveSeekTime = now
-                                            holder.seekTo(scrubTargetMs, isLiveScrub = true)
-                                        }
+                                        // GECİKME YOK: her yeni 500 ms örneği anında gönderilir.
+                                        // Aynı örnek tekrar gönderilmez ve eski istekler
+                                        // "en son istek kazanır" motorunda iptal edilir.
+                                        holder.seekTo(scrubTargetMs, isLiveScrub = true)
                                     }
                                 }
                             }
                         } while (event.changes.any { it.pressed })
 
                         if (isHorizontalSeeking) {
-                            holder.seekTo(scrubTargetMs, isLiveScrub = false)
+                            // Sürükleme bitti: seçilen konum korunur, video otomatik devam eder.
+                            holder.finishScrub(scrubTargetMs)
                             scrubOverlayText = null
                         }
                     }
@@ -4954,7 +5173,8 @@ private fun MultiGridVideoCell(
                     textColor = Color.White,
                     fontSizeSp = 10,
                     rowHeight = 30.dp,
-                    snapToFrame = { ms -> holder.frameClock.snap(ms) }
+                    snapToFrame = { ms -> holder.frameClock.snap(ms) },
+                    sampleMs = SCRUB_SAMPLE_MS
                 )
 
                 // 2. Satır: TAM ORTADA (Alignment.CenterHorizontally) ve rahat dokunulabilir büyük butonlar

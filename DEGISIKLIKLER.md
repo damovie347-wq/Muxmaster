@@ -1,3 +1,77 @@
+# MuxMaster — Güncelleme 11 / Sürükleme Kök Nedeni + Otomatik Devam + Döndürme + 6x-9x
+
+Değişen dosyalar: `data/ScrubSeeker.kt`, `ui/screens/TrimScreen.kt`, `DEGISIKLIKLER.md`.
+Yeniden encode YOK, thumbnail/kare önbelleği YOK, FFmpeg YOK.
+
+## 1) SÜRÜKLEMEDE GÖRÜNTÜNÜN DEĞİŞMEMESİ — GERÇEK KÖK NEDEN
+Önceki güncelleme yalnızca KIRPMA ekranını düzeltmişti. **Video oynatıcı ekranı
+(`SlotPlayerHolder`) sürükleme sırasında hâlâ `SEEK_SCRUB_STREAM` = `CLOSEST_SYNC`
+kullanıyordu.** Bu ayar oynatıcıyı her sarmada en yakın ANAHTAR KAREYE gönderir.
+H.264'te anahtar kareler arası 2–15 sn olduğu için zaman çizelgesi hareket ettiği
+hâlde ana görüntü ya hiç değişmiyor ya da saniyeler atlıyordu. Slider'ın hareket
+etmesi oynatıcının görüntüyü değiştirdiği anlamına gelmiyordu.
+
+Düzeltme:
+- Sürükleme sarması artık **her yerde** `SeekParameters.EXACT` (tolerans sıfır):
+  oynatıcı önceki anahtar kareden başlayıp hedef kareye kadar gereken kareleri
+  çözer ve HEDEF KARENİN KENDİSİNİ gösterir. Anahtar kareye atlama yok.
+- Hedef an önce **500 ms ızgarasına** (0,0 – 0,5 – 1,0 – 1,5 …), sonra videonun
+  GERÇEK kare sınırına oturur (`FrameClock.snapToSample`). 500 ms yalnızca örnekleme
+  noktasıdır; ekrana basılan kare her zaman videoda gerçekten var olan bir karedir.
+- `ScrubSeeker` yeniden yazıldı: her istek bir **generation** numarası alır, daha yeni
+  istek gelince eskinin beklemesi anında kesilir. Eski kare yeni karenin üzerine
+  yazılamaz; kuyruk birikmez; parmak hızlıyken ara örnekler atlanır ama **en son
+  hedef her zaman** uygulanır.
+- Aynı 500 ms örneği tekrar gönderilmez (dekoder gereksiz meşgul edilmez).
+- `setSeekParameters` her örnekte değil, yalnızca gerektiğinde bir kez uygulanır.
+- Kırpma ekranındaki tutamaç sürüklemesi kare hassas kalır (tek tek gerçek kareler).
+
+## 2) İLERİ / GERİ SARMA GECİKMESİ
+- `delay(60)` + ikinci sarma kaldırıldı (kırpma ekranında her sarma 60 ms bekleyip
+  İKİ KEZ gönderiliyordu).
+- Sürüklemeden kalan bekleyen istek (`cancelPending`) düğmeye basıldığı anda iptal
+  edilir; sarma anında gider.
+- Art arda basışlar birikir: 3 × +10 sn = +30 sn (hedef, oynatıcının geciken konumu
+  değil son istenen konumdur).
+- Oynatma durumu korunur: oynuyorsa oynamaya devam eder, duraklatılmışsa kalır.
+- Oynat/Duraklat kararı `playWhenReady` üzerinden verilir: tampon doldururken
+  (isPlaying=false) Play'e basınca video yanlışlıkla DURAKLATILMAZ.
+
+## 3) YATAY SÜRÜKLEME SONRASI OTOMATİK DEVAM
+- Video yüzeyinde yatay sürükleme başlarken sürükleme öncesi oynatma durumu saklanır
+  (`pauseForScrub`), parmak kalkınca `finishScrub` videoyu **kendiliğinden** devam
+  ettirir. Ortadaki Play'e tekrar basmak gerekmez.
+- Sürükleme öncesi video duraklatılmışsa duraklatılmış kalır.
+- 110 ms'lik yapay kısıtlama kaldırıldı; sürükleme, dokunma/Play algılanmasıyla
+  çakışmaz (hareket eşiği + olay tüketimi korunur, Touch Offset Scrubbing bozulmaz).
+
+## 4) TELEFON DÖNDÜRÜLDÜĞÜNDE VİDEO BAŞA DÖNMESİN
+- KÖK NEDEN: kırpma ekranının yatay/dikey yerleşimi iki ayrı Compose dalıdır. Telefon
+  döndürüldüğünde `TrimPlayer` diğer dala taşınıp yeniden kuruluyor, içindeki
+  `remember { ExoPlayer }` çöp oluyor ve yeni oynatıcı dosyayı 0. saniyeden açıyordu.
+- Yeni `TrimPlayerSession`: ExoPlayer + oynatma konumu + oynatma niyeti + hız + ses +
+  en-boy oranı + tam ekran + A noktası damgası `TrimScreen` seviyesinde tutulur.
+  Yerleşim değişse de AYNI oynatıcı örneği kullanılır: dosya yeniden yüklenmez,
+  dekoder yeniden kurulmaz, video başa dönmez.
+- Aynı dosya için `setMediaItem/prepare` tekrar çağrılmaz (`mediaKey` denetimi).
+- Track menüsü döndürmeden sonra boş kalmaz (`player.currentTracks` doğrudan okunur).
+
+## 5) 6X – 7X – 8X – 9X
+- Hem uzun basma panelinde hem hız listesinde 6x, 7x, 8x, 9x eklendi; hız
+  kaydırıcısının aralığı 9x'e çıkarıldı. Mevcut hızlar korundu, aktif hız işaretli.
+- Hız değişimi videoyu sıfırlamaz; ekran döndürmede hız korunur.
+- SES: ExoPlayer'ın ses hattı (Sonic) 8x'e kadar ses üretir. **8x üzerinde (9x) ses
+  hattı kapatılır**: video tam 9 kat hızda oynamaya devam eder, ses duyulmaz.
+  8x ve altında uygulamanın mevcut ses davranışı aynen korunur.
+
+## 6) CPU / GPU / RAM
+- Video yeniden encode edilmez, orijinal dosyaya dokunulmaz, FFmpeg çalışmaz.
+- Thumbnail üretilmez, kare önbelleği tutulmaz, tüm video RAM'e alınmaz.
+- Donanım (VPU) dekoderi öncelikli; sürüklemede eski istekler iptal edilir,
+  yalnızca gerekli kareler çözülür; gereksiz player initialization yapılmaz.
+
+---
+
 # MuxMaster — Güncelleme 10 / 500 ms Kare Sarması + Klasörde Video Numarasına Git
 
 6 dosya değişti (1 yeni). Yeniden encode YOK, thumbnail/kare önbelleği YOK.

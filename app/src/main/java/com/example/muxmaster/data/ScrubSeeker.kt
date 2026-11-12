@@ -23,18 +23,19 @@ import kotlinx.coroutines.launch
  *
  * Bu sınıf tek bir "pompa" döngüsü çalıştırır: parmak hızlı hareket ederken ara istekler
  * bilinçli olarak ATLANIR (zaten bir anlamı kalmaz), ama EN SON istenen an her zaman
- * uygulanır. Her sarma işlemi bir öncekini geçersiz kıldığı için eski kare güncel karenin
- * üzerine yazılamaz ve kuyruk birikmez.
+ * uygulanır. Her istek bir [generation] numarası alır; daha yeni bir istek geldiğinde
+ * eskisinin beklemesi anında kesilir. Böylece eski kare güncel karenin üzerine yazılamaz.
  *
  * Hiçbir kare çözülmez, hiçbir thumbnail üretilmez, video yeniden encode edilmez:
- * yalnızca mevcut donanım dekoderine "şu ana git" denir.
+ * yalnızca mevcut donanım dekoderine "şu ana git" denir. Sarma parametresi çağıran
+ * tarafından `SeekParameters.EXACT` yapılır; motor anahtar kareye ATLAMAZ.
  */
 class ScrubSeeker(
     private val player: ExoPlayer,
     /** Bir sarmanın dekoderde oturması için beklenecek en uzun süre (ms). */
-    private val settleTimeoutMs: Long = 140L,
+    private val settleTimeoutMs: Long = 90L,
     /** Art arda iki sarma arasındaki en küçük boşluk (ms). */
-    private val minGapMs: Long = 12L
+    private val minGapMs: Long = 8L
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var pendingMs = -1L
@@ -49,31 +50,33 @@ class ScrubSeeker(
     var lastAppliedMs = -1L
         private set
 
+    /** Her sarma isteğine verilen artan numara (eski istekler geçersiz kalır). */
+    var generation = 0L
+        private set
+
     fun begin() {
         isScrubbing = true
     }
 
     /** Yeni hedef an. Bekleyen istek varsa onun yerine geçer (kuyruk oluşmaz). */
     fun request(targetMs: Long) {
+        if (released) return
+        generation++
         pendingMs = targetMs.coerceAtLeast(0L)
         if (pumpJob?.isActive == true) return
-        pumpJob = scope.launch {
-            while (true) {
-                if (released) break
-                val target = pendingMs
-                if (target < 0L) break
-                pendingMs = -1L
-                apply(target)
-                if (pendingMs < 0L) break
-                delay(minGapMs)
-            }
-        }
+        pumpJob = scope.launch { pump() }
     }
 
     /** Sürükleme bitti: son hedef kesin olarak uygulanır. */
     fun end(finalTargetMs: Long) {
         isScrubbing = false
         request(finalTargetMs)
+    }
+
+    /** Bekleyen (henüz uygulanmamış) isteği iptal eder: düğme ile sarmada kullanılır. */
+    fun cancelPending() {
+        pendingMs = -1L
+        generation++
     }
 
     fun release() {
@@ -85,7 +88,20 @@ class ScrubSeeker(
         scope.cancel()
     }
 
-    private suspend fun apply(targetMs: Long) {
+    private suspend fun pump() {
+        while (!released) {
+            val target = pendingMs
+            if (target < 0L) break
+            pendingMs = -1L
+            val gen = generation
+            apply(target, gen)
+            if (released) break
+            if (pendingMs < 0L) break
+            delay(minGapMs)
+        }
+    }
+
+    private suspend fun apply(targetMs: Long, gen: Long) {
         if (released) return
         // Oynatıcı kapatılmışsa hiçbir şey yapılmaz (bırakılmış oynatıcıya sarma hatası).
         val state = runCatching { player.playbackState }.getOrNull() ?: return
@@ -95,15 +111,15 @@ class ScrubSeeker(
         if (!runCatching { player.seekTo(t) }.isSuccess) return
         lastAppliedMs = t
         // Dekoderin hedef kareyi gerçekten hazırlamasını bekle (en fazla settleTimeoutMs).
-        // Böylece bir sonraki örnek, önceki kare çizilmeden gönderilmez; görüntü parmağın
-        // gerisinde kalmaz ve eski kare yeni karenin üzerine yazılmaz.
+        // Daha yeni bir istek gelirse bekleme ANINDA kesilir: eski kare yeni karenin
+        // üzerine yazılmaz ve görüntü parmağın gerisinde kalmaz.
         val deadline = System.currentTimeMillis() + settleTimeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (released) return
+            if (released || gen != generation) return
             val ready = runCatching { !player.isLoading && player.playbackState == Player.STATE_READY }
                 .getOrDefault(false)
             if (ready) break
-            delay(6L)
+            delay(4L)
         }
     }
 }
