@@ -21,7 +21,8 @@ import kotlinx.coroutines.launch
  *  - geç tamamlanan eski bir sarma, güncel karenin ÜZERİNE yazılabilir,
  *  - arada kalan 500 ms örnekleri hiç gösterilmez.
  *
- * Bu sınıf tek bir "pompa" döngüsü çalıştırır: parmak hızlı hareket ederken ara istekler
+ * Bu sınıf tek bir "pompa" döngüsü çalıştırır: her sarmanın karesi ekrana gelince EN SON
+ * istenen ana geçilir. Parmak hızlı hareket ederken ara istekler
  * bilinçli olarak ATLANIR (zaten bir anlamı kalmaz), ama EN SON istenen an her zaman
  * uygulanır. Her istek bir [generation] numarası alır; daha yeni bir istek geldiğinde
  * eskisinin beklemesi anında kesilir. Böylece eski kare güncel karenin üzerine yazılamaz.
@@ -32,15 +33,41 @@ import kotlinx.coroutines.launch
  */
 class ScrubSeeker(
     private val player: ExoPlayer,
-    /** Bir sarmanın dekoderde oturması için beklenecek en uzun süre (ms). */
-    private val settleTimeoutMs: Long = 90L,
+    /** Bir sarmanın karesinin ekrana gelmesi için beklenecek en uzun süre (ms). */
+    private val settleTimeoutMs: Long = 700L,
     /** Art arda iki sarma arasındaki en küçük boşluk (ms). */
-    private val minGapMs: Long = 8L
+    private val minGapMs: Long = 0L
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var pendingMs = -1L
     private var pumpJob: Job? = null
     private var released = false
+
+    /**
+     * KÖK NEDEN DÜZELTMESİ: Eskiden her yeni istek, önceki sarmanın karesi çözülüp ekrana
+     * gelmeden (90 ms sonra) yeni bir `seekTo` gönderiyordu. Her yeni `seekTo` dekoderi
+     * sıfırladığı için parmak hareket ettiği sürece HİÇBİR kare ekrana gelmiyordu.
+     * Artık her sarmadan sonra o sarmanın karesi gerçekten çizilene kadar
+     * (onRenderedFirstFrame) beklenir, sonra EN SON hedefe geçilir. Böylece sürükleme
+     * boyunca sahneler kesintisiz görünür.
+     */
+    private var frameRendered = false
+    private var readySinceSeek = false
+    private val listener = object : Player.Listener {
+        override fun onRenderedFirstFrame() {
+            frameRendered = true
+        }
+
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            // Ses dosyası / görüntüsüz durum: hazır olunca da beklemeyi bitir.
+            if (playbackState == Player.STATE_READY || playbackState == Player.STATE_ENDED) {
+                readySinceSeek = true
+            }
+        }
+    }
+    init {
+        runCatching { player.addListener(listener) }
+    }
 
     /** Sürükleme sürüyor mu? Sürükleme bitince yapılan sarma kesin (kare hassas) yapılır. */
     var isScrubbing = false
@@ -85,6 +112,7 @@ class ScrubSeeker(
         pendingMs = -1L
         pumpJob?.cancel()
         pumpJob = null
+        runCatching { player.removeListener(listener) }
         scope.cancel()
     }
 
@@ -93,32 +121,36 @@ class ScrubSeeker(
             val target = pendingMs
             if (target < 0L) break
             pendingMs = -1L
-            val gen = generation
-            apply(target, gen)
+            apply(target)
             if (released) break
             if (pendingMs < 0L) break
-            delay(minGapMs)
+            if (minGapMs > 0L) delay(minGapMs)
         }
     }
 
-    private suspend fun apply(targetMs: Long, gen: Long) {
+    private suspend fun apply(targetMs: Long) {
         if (released) return
         // Oynatıcı kapatılmışsa hiçbir şey yapılmaz (bırakılmış oynatıcıya sarma hatası).
         val state = runCatching { player.playbackState }.getOrNull() ?: return
         if (state == Player.STATE_IDLE) return
         val dur = runCatching { player.duration }.getOrDefault(C.TIME_UNSET)
         val t = if (dur > 0L && dur != C.TIME_UNSET) targetMs.coerceIn(0L, dur) else targetMs
+        // Aynı kare zaten ekrandaysa tekrar sarılmaz (dekoder boşuna sıfırlanmaz).
+        if (t == lastAppliedMs && frameRendered) return
+        frameRendered = false
+        readySinceSeek = false
         if (!runCatching { player.seekTo(t) }.isSuccess) return
         lastAppliedMs = t
-        // Dekoderin hedef kareyi gerçekten hazırlamasını bekle (en fazla settleTimeoutMs).
-        // Daha yeni bir istek gelirse bekleme ANINDA kesilir: eski kare yeni karenin
-        // üzerine yazılmaz ve görüntü parmağın gerisinde kalmaz.
+        val hasVideo = runCatching { player.videoSize.width > 0 }.getOrDefault(true)
+        // Bu sarmanın karesi ekrana gelene kadar bekle. Bekleme sırasında yeni istek gelse
+        // bile yarıda KESİLMEZ (kesilirse hiçbir kare görünmez); yeni istek kare çizilir
+        // çizilmez uygulanır. Sürükleme bittiyse son hedefe hemen geçilir.
         val deadline = System.currentTimeMillis() + settleTimeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (released || gen != generation) return
-            val ready = runCatching { !player.isLoading && player.playbackState == Player.STATE_READY }
-                .getOrDefault(false)
-            if (ready) break
+            if (released) return
+            if (frameRendered) break
+            if (!hasVideo && readySinceSeek) break
+            if (!isScrubbing && pendingMs >= 0L) break
             delay(4L)
         }
     }
