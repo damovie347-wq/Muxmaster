@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -85,11 +86,24 @@ fun MuxSeekSlider(
      */
     sampleMs: Long = 0L,
     /** Dokunulan nokta ile tutamaç arasındaki mesafeyi koru (parmak tutamağı çekmez). */
-    preserveTouchOffset: Boolean = true
+    preserveTouchOffset: Boolean = true,
+    /**
+     * Sürükleme sırasında ekranın ortasında büyük zaman göstergesi göster (mpv tarzı).
+     * Gösterge parmağın konumundan beslenir: dekoder yetişemese bile anında okunur.
+     */
+    showScrubHud: Boolean = true,
+    /**
+     * Sürükleme sırasında hedef anı üst katmana bildirir (-1 = sürükleme bitti).
+     * Süre etiketleri böylece oynatıcıyı beklemeden ANINDA güncellenir.
+     */
+    onScrubPreview: (Long) -> Unit = {}
 ) {
     val span = (endMs - startMs).coerceAtLeast(1L)
     // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
     var dragFraction by remember { mutableFloatStateOf(-1f) }
+    // Sürükleme göstergesi: -1 = gizli. Parmak kalkınca temizlenir.
+    var hudMs by remember { mutableLongStateOf(-1L) }
+    var hudBaseMs by remember { mutableLongStateOf(-1L) }
 
     val onSeekState = rememberUpdatedState(onSeek)
     val onScrubState = rememberUpdatedState(onScrubChange)
@@ -98,6 +112,7 @@ fun MuxSeekSlider(
     val positionState = rememberUpdatedState(positionMs)
     val snapState = rememberUpdatedState(snapToFrame)
     val sampleState = rememberUpdatedState(sampleMs)
+    val previewState = rememberUpdatedState(onScrubPreview)
 
     val shownFraction = if (dragFraction >= 0f) {
         dragFraction
@@ -143,6 +158,8 @@ fun MuxSeekSlider(
                     // Dokunma anındaki tutamaç oranı. Ofset korunur: bu oran referans alınır,
                     // parmağın nerede olduğu değil. Böylece tutamaç parmağın altına atlamaz.
                     val baseFraction = fractionOf(positionState.value)
+                    val baseMs = positionState.value
+                        .coerceIn(startState.value, startState.value + spanState.value)
                     val downX = down.position.x
                     val thumbX = thumbPx + usable * baseFraction
                     var fraction = baseFraction
@@ -166,6 +183,7 @@ fun MuxSeekSlider(
                             reported = true
                             // Sürükleme başladı: üst katman oynatmayı durdurup kareyi sabitler.
                             onScrubState.value(true)
+                            hudBaseMs = baseMs
                         }
                         if (moved) {
                             fraction = (baseFraction + dx / usable).coerceIn(0f, 1f)
@@ -173,6 +191,9 @@ fun MuxSeekSlider(
                             // Tutamaç, kareye oturmuş hedefe göre çizilir (kare kare ilerler).
                             fraction = fractionOf(target)
                             dragFraction = fraction
+                            // ANLIK GERİ BİLDİRİM: gösterge ve süre etiketleri parmaktan beslenir.
+                            hudMs = target
+                            previewState.value(target)
                             if (change.pressed && target != lastSentMs) {
                                 lastSentMs = target
                                 onSeekState.value(target)
@@ -185,10 +206,14 @@ fun MuxSeekSlider(
                         // Parmak kalktı: seçilen GERÇEK kareye tek seferde otur.
                         val target = quantized(msAt(fraction))
                         dragFraction = fractionOf(target)
+                        hudMs = target
+                        previewState.value(target)
                         if (target != lastSentMs) onSeekState.value(target)
                     }
                     if (reported) onScrubState.value(false)
                     dragFraction = -1f
+                    hudMs = -1L
+                    previewState.value(-1L)
                 }
             }
     ) {
@@ -260,6 +285,15 @@ fun MuxSeekSlider(
         drawCircle(color = Color(0xFFE24B4A), radius = thumbPx * 1.18f, center = Offset(thumbX, centerY))
         drawCircle(color = Color.White, radius = thumbPx * 0.82f, center = Offset(thumbX, centerY))
     }
+
+    // Sürükleme göstergesi: parmak çubukta gezerken ekranın ortasında hedef an.
+    ScrubHudPopup(
+        visible = showScrubHud && hudMs >= 0L,
+        targetMs = hudMs,
+        totalMs = if (endMs > startMs) endMs else 0L,
+        baseMs = hudBaseMs,
+        accent = activeColor
+    )
 }
 
 /**

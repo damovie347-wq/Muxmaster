@@ -89,6 +89,16 @@ class ScrubSeeker(
     var isScrubbing = false
         private set
 
+    /**
+     * Kare beklenip beklenmeyeceği.
+     *
+     * `true` (varsayılan): her sarmadan sonra o sarmanın karesi ekrana gelene kadar beklenir.
+     * `false`: beklemeden sıradaki hedefe geçilir. AV1 gibi anahtar kare (keyframe) ile
+     * sürüklenen videolarda kullanılır: art arda iki istek aynı anahtar kareye düşerse
+     * yeni kare hiç çizilmez ve bekleme boşa zaman aşımına girer (sürükleme takılır).
+     */
+    var waitForFrame: Boolean = true
+
     /** En son uygulanan (ekrana gitmesi istenen) an. */
     var lastAppliedMs = -1L
         private set
@@ -159,6 +169,12 @@ class ScrubSeeker(
         val framesBefore = renderedFrames.get()
         if (!runCatching { player.seekTo(t) }.isSuccess) return
         lastAppliedMs = t
+        // Kare beklenmeyecek modda (AV1 anahtar kare sarması) istekler doğrudan akar:
+        // aynı anahtar kareye düşen istekler yeni kare üretmediği için bekleme kilitlenirdi.
+        if (!waitForFrame) {
+            delay(90L)
+            return
+        }
         val hasVideo = runCatching { player.videoSize.width > 0 }.getOrDefault(true)
         // Bu sarmanın karesi ekrana gelene kadar bekle. Bekleme sırasında yeni istek gelse
         // bile yarıda KESİLMEZ (kesilirse hiçbir kare görünmez); yeni istek kare çizilir

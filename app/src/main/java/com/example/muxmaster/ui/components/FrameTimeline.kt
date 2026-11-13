@@ -8,7 +8,11 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -79,6 +83,10 @@ fun FrameTrimTimeline(
 
     val frameStep = frameClock.frameStepMs.coerceAtLeast(1L)
     val minWindowMs = max(frameStep * 4L, 160L)
+
+    // Sürükleme göstergesi: tutamaç çekilirken ekranın ortasında o karenin anı yazar.
+    // -1 = sürükleme yok. Değer parmaktan beslenir, oynatıcıdan değil: anında okunur.
+    var hudMs by remember { mutableLongStateOf(-1L) }
 
     Canvas(
         modifier = modifier
@@ -188,6 +196,7 @@ fun FrameTrimTimeline(
                                     localEnd = snapped.coerceIn(lower, total)
                                 }
                                 draggedHandle = true
+                                hudMs = if (handle == 0) localStart else localEnd
                                 val now = System.currentTimeMillis()
                                 if (now - lastReport >= 20L || !change.pressed) {
                                     lastReport = now
@@ -213,6 +222,7 @@ fun FrameTrimTimeline(
                         rangeState.value(localStart, localEnd)
                         handleState.value(handle, if (handle == 0) localStart else localEnd)
                     }
+                    hudMs = -1L
                     dragEndState.value()
                 }
             }
@@ -326,4 +336,13 @@ fun FrameTrimTimeline(
         drawHandle(sx)
         drawHandle(ex)
     }
+
+    // Tutamaç çekilirken ekranın ortasında büyük zaman göstergesi (mpv tarzı).
+    ScrubHudPopup(
+        visible = hudMs >= 0L,
+        targetMs = hudMs,
+        totalMs = durationMs,
+        frameNumber = if (frameClock.totalFrames > 0L) frameClock.frameNumber(hudMs) else -1L,
+        accent = activeColor
+    )
 }

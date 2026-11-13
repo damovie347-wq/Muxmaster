@@ -1,3 +1,50 @@
+# MuxMaster — Güncelleme 12 / AV1 Anında Açılış + Sürükleme Zaman Göstergesi
+
+Değişen dosyalar: `data/ScrubSeeker.kt`, `ui/components/Sliders.kt`,
+`ui/components/FrameTimeline.kt`, `ui/components/ScrubHud.kt` (yeni),
+`ui/screens/TrimScreen.kt`, `DEGISIKLIKLER.md`.
+Yeniden encode YOK, thumbnail/kare önbelleği YOK, FFmpeg YOK.
+
+## 1) AV1 VİDEOLARIN GEÇ AÇILMASI — KÖK NEDEN VE ÇÖZÜM
+AV1 videoları çoğu telefonda **donanım dekoderi olmadan** (libgav1, CPU) çözülür ve
+anahtar kare (keyframe) aralıkları 2–10 sn olabilir. Uygulama her sarmada
+`SeekParameters.EXACT` kullanıyordu; bu ayar **önceki anahtar kareden hedefe kadar
+TÜM kareleri çözmek** zorundadır. 1080p AV1'de bu saniyeler sürer → video geç açılır,
+sürüklerken görüntü hiç gelmez.
+
+Düzeltmeler:
+- **Açılış sarması artık anahtar kare ile**: dosya açılırken ilk kare `CLOSEST_SYNC`
+  ile ANINDA ekrana gelir; oynatıcı hazır olunca (`onPlaybackStateChanged` →
+  `STATE_READY`) kare hassas (`EXACT`) sarmaya dönülür ve gerekiyorsa tam kareye
+  oturulur. Sıfırdan açılışta gereksiz `seekTo` hiç yapılmaz.
+- **Kodek duyarlı sarma** (`scrubSeekParametersFor`): AV1'de sürükleme/jump sırasında
+  `CLOSEST_SYNC` (görüntü anında gelir), parmak kalkınca `EXACT` (hedef kare birebir).
+  H.264 / HEVC / VP9 davranışı değişmedi: sürüklemede de kare hassas.
+- **AV1 dekoder seçimi**: donanım AV1 dekoderi olan cihazda donanım, olmayan cihazda
+  doğrudan AV1 yazılım dekoderi (libgav1) seçilir; yanlış/eksik "donanım" dekoderi
+  denemesinden doğan açılış gecikmesi oluşmaz.
+- **Çift sarma kaldırıldı**: tutamaç sürüklenirken `LaunchedEffect(startMs/endMs)`
+  ikinci bir sarma gönderip AV1 dekoderini meşgul ediyordu; artık gönderilmiyor.
+- `ScrubSeeker.waitForFrame`: AV1 anahtar kare sarmasında aynı anahtar kareye düşen
+  istekler yeni kare çizmediği için bekleme zaman aşımına giriyordu (sürükleme
+  takılıyordu). AV1'de bekleme kapatıldı, istekler doğrudan akar (~90 ms).
+
+## 2) SÜRÜKLERKEN ZAMANI ANINDA GÖRME (mpv / Just Player davranışı)
+- Yeni `ScrubHud` / `ScrubHudPopup`: parmak çubukta gezerken **ekranın ortasında**
+  hedef an salise hassasiyetiyle (`mm:ss.SS`), parmağın başladığı yerden farkı
+  (+/−) ve kalan süre yazar. Gösterge **oynatıcıdan değil parmaktan** beslenir:
+  dekoder yetişemese bile anında okunur.
+- `MuxSeekSlider` (oynatıcı + kırpma slider'ı) ve `FrameTrimTimeline` (zoom'lu kırpma
+  çubuğunun A/B tutamaçları) bu göstergeyi kullanır; kırpma tutamacında kare numarası
+  da yazar.
+- `SmoothVideoSlider`: sol süre etiketi sürükleme sırasında oynatıcıyı beklemez,
+  hedef anı anında gösterir.
+- Kırpma ekranında A tutamacı sola çekilirken hedef an eski "başlangıç" değerine
+  kırpılıyordu (seçim aralığı bir kare geriden geldiği için görüntü ilerlemiyordu).
+  Alt sınır artık 0: oynatıcı parmağın gösterdiği kareye gider.
+
+---
+
 # MuxMaster — Güncelleme 11 / Sürükleme Kök Nedeni + Otomatik Devam + Döndürme + 6x-9x
 
 Değişen dosyalar: `data/ScrubSeeker.kt`, `ui/screens/TrimScreen.kt`, `DEGISIKLIKLER.md`.

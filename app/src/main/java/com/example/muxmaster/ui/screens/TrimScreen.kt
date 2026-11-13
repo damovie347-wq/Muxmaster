@@ -175,6 +175,23 @@ private val SEEK_SCRUB = SeekParameters.EXACT
 private const val SCRUB_SAMPLE_MS = FrameClock.SCRUB_SAMPLE_MS
 
 /**
+ * SÜRÜKLEME İÇİN KODEK DUYARLI SARMA PARAMETRESİ.
+ *
+ * KÖK NEDEN (AV1): AV1 videoları çoğu telefonda DONANIM dekoderi olmadan (libgav1, CPU)
+ * çözülür ve anahtar kare (keyframe) aralıkları 2-10 sn olabilir. `SeekParameters.EXACT`
+ * her sarmada önceki anahtar kareden hedefe kadar TÜM kareleri çözmek zorundadır. 1080p
+ * AV1'de bu saniyeler sürer; parmak hareket ettiği sürece ekrana HİÇBİR kare gelmez ve
+ * sürükleme "donmuş" görünür.
+ *
+ * ÇÖZÜM: AV1'de sürükleme boyunca en yakın anahtar kareye sarılır (görüntü ANINDA gelir),
+ * parmak kalkınca EXACT ile hedef kare kesin gösterilir. H.264/HEVC/VP9 gibi donanım
+ * dekoderli kodeklerde davranış değişmez: sürükleme boyunca da EXACT (kare hassas).
+ */
+internal fun scrubSeekParametersFor(sampleMimeType: String?): SeekParameters =
+    if (sampleMimeType == androidx.media3.common.MimeTypes.VIDEO_AV1) SeekParameters.CLOSEST_SYNC
+    else SEEK_EXACT
+
+/**
  * Zoom sonrası görünür pencerenin başlangıcı: verilen an (ör. seçimin başı) pencerenin
  * ortasında kalacak şekilde hesaplanır ve video sınırlarına kırpılır.
  */
@@ -1628,6 +1645,9 @@ private fun TrimPlayer(
     var cueText by remember { mutableStateOf("") }
     // Oynatıcı hazır mı? (tam ekran ilk açıldığında siyah ekran yerine halka gösterilir)
     var playerReady by remember { mutableStateOf(player.playbackState == Player.STATE_READY) }
+    // Açılış sarması anahtar kare ile yapılır (ANINDA ilk kare), hazır olunca kare hassas
+    // sarmaya geçilir. Bayrak, bu geçişin bir kez yapılmasını sağlar.
+    var openSeekUpgraded by remember { mutableStateOf(false) }
 
     val startState = rememberUpdatedState(startMs)
     val endState = rememberUpdatedState(endMs)
@@ -1661,7 +1681,19 @@ private fun TrimPlayer(
                 session.wasPlaying = playWhenReady
             }
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_READY) playerReady = true
+                if (state == Player.STATE_READY) {
+                    playerReady = true
+                    // İLK KARE EKRANDA: artık kare hassas sarma güvenli. Açılışta anahtar
+                    // kareye sarıldığı için görüntü ANINDA gelir, sonra tam kareye oturulur.
+                    if (!openSeekUpgraded && !scrubber.isScrubbing) {
+                        openSeekUpgraded = true
+                        player.setSeekParameters(SEEK_EXACT)
+                        val want = startState.value
+                        if (want > 0L && abs(player.currentPosition - want) > 40L) {
+                            player.seekTo(want)
+                        }
+                    }
+                }
                 if (state == Player.STATE_ENDED) {
                     player.pause()
                     player.seekTo(startState.value)
@@ -1699,6 +1731,7 @@ private fun TrimPlayer(
             return@LaunchedEffect
         }
         playerReady = false
+        openSeekUpgraded = false
         session.mediaKey = mediaKey
         session.mediaLoaded = false
         session.wasPlaying = false
@@ -1716,9 +1749,13 @@ private fun TrimPlayer(
             }
             else -> video.uri
         }
+        // HIZLI AÇILIŞ: ilk kare anahtar kareden gelsin. EXACT sarma AV1 gibi yazılım
+        // çözülen kodeklerde önceki anahtar kareden hedefe kadar tüm kareleri çözer ve
+        // açılış saniyelerce sürer. Hazır olunca (onPlaybackStateChanged) EXACT'e dönülür.
+        player.setSeekParameters(SeekParameters.CLOSEST_SYNC)
         player.setMediaItem(MediaItem.fromUri(playable))
         player.prepare()
-        player.seekTo(startState.value)
+        if (startState.value > 0L) player.seekTo(startState.value)
         player.playWhenReady = false
         session.mediaLoaded = true
     }
@@ -1729,13 +1766,15 @@ private fun TrimPlayer(
         // geciktiriyordu; sürükleme sırasında bu efekt devre dışı.
         val changed = abs(startMs - lastAppliedStartMs) > 30L
         lastAppliedStartMs = startMs
-        if (changed && !scrubber.isScrubbing) {
+        // Tutamaç sürüklenirken sarmayı zaman çizelgesi gönderir: burada İKİNCİ bir sarma
+        // gönderilmez (AV1'de dekoderi meşgul edip görüntüyü donduruyordu).
+        if (changed && !scrubber.isScrubbing && scrubSessionRef.intValue == 0) {
             pendingSeekTargetMs = startMs
             pendingSeekAt = System.currentTimeMillis()
             positionMs = startMs
             // GECİKME YOK: eski kod burada 60 ms bekleyip İKİNCİ bir sarma gönderiyordu;
             // dekoder iki kez meşgul edildiği için sarma gecikiyordu.
-            player.setSeekParameters(SEEK_EXACT)
+            player.setSeekParameters(scrubSeekParametersFor(player.videoFormat?.sampleMimeType))
             player.seekTo(startMs)
         }
     }
@@ -1749,12 +1788,12 @@ private fun TrimPlayer(
         lastAppliedEndMs = endMs
         // Bitiş tutamacı sürüklenirken O kare gösterilir; sürükleme sırasında sarmayı
         // zaman çizelgesi (onHandleDrag) gönderdiği için burada tekrar gönderilmez.
-        if (changed && !scrubber.isScrubbing) {
+        if (changed && !scrubber.isScrubbing && scrubSessionRef.intValue == 0) {
             val target = frameClock.snap(endMs).coerceAtLeast(startState.value)
             pendingSeekTargetMs = target
             pendingSeekAt = System.currentTimeMillis()
             positionMs = target
-            player.setSeekParameters(SEEK_EXACT)
+            player.setSeekParameters(scrubSeekParametersFor(player.videoFormat?.sampleMimeType))
             player.seekTo(target)
         }
     }
@@ -1827,26 +1866,41 @@ private fun TrimPlayer(
         positionMs = target
         // YAPAY GECİKME YOK: bekleyen sürükleme isteği iptal edilir, sarma ANINDA gider.
         scrubber.cancelPending()
-        player.setSeekParameters(SEEK_EXACT)
+        // AV1'de anahtar kareye sarma: 10 sn ileri/geri düğmesi ANINDA görüntü verir.
+        player.setSeekParameters(scrubSeekParametersFor(player.videoFormat?.sampleMimeType))
         player.seekTo(target)
         // Oynatma durumu korunur: oynuyorsa oynamaya devam eder, duraklatılmışsa kalır.
         if (playing) player.play()
     }
     val seekTo: (Long) -> Unit = { target ->
         val safeEnd = if (endState.value > startState.value) endState.value else player.duration.coerceAtLeast(1L)
-        val clamped = frameClock.snap(target).coerceIn(startState.value, safeEnd)
+        // ÖNEMLİ: alt sınır 0'dır (seçimin başı değil). A tutamacı sola çekilirken seçim
+        // aralığı henüz güncellenmemiş olsa bile oynatıcı parmağın gösterdiği kareye gider;
+        // eskiden hedef eski "başlangıç" değerine kırpıldığı için görüntü HİÇ ilerlemiyordu.
+        val clamped = frameClock.snap(target).coerceIn(0L, safeEnd)
         pendingSeekTargetMs = clamped
         pendingSeekAt = System.currentTimeMillis()
         positionMs = clamped
         // Sürükleme sürüyorsa istek motoru üzerinden gider (kuyruk birikmez, eski kare
         // yeni karenin üzerine yazılmaz). Dokunma/düğme atlamaları doğrudan uygulanır.
-        if (scrubber.isScrubbing) scrubber.request(clamped) else player.seekTo(clamped)
+        if (scrubber.isScrubbing) {
+            scrubber.request(clamped)
+        } else {
+            player.setSeekParameters(scrubSeekParametersFor(player.videoFormat?.sampleMimeType))
+            player.seekTo(clamped)
+        }
     }
 
     // Sürükleme başladı / bitti: son hedef kesin olarak (kare hassas) uygulanır.
     val scrubStart: () -> Unit = {
         wasPlayingBeforeScrub = player.playWhenReady
-        player.setSeekParameters(SEEK_SCRUB)
+        // Kodek duyarlı: AV1'de anahtar kare (anında görüntü), diğerlerinde EXACT.
+        player.setSeekParameters(scrubSeekParametersFor(player.videoFormat?.sampleMimeType))
+        // AV1'de aynı anahtar kareye düşen istekler yeni kare çizmez: kare bekleme kapatılır,
+        // istekler doğrudan akar (sürükleme takılmaz).
+        scrubber.waitForFrame =
+            player.videoFormat?.sampleMimeType != androidx.media3.common.MimeTypes.VIDEO_AV1
+        openSeekUpgraded = true
         player.pause()
         scrubber.begin()
     }
@@ -1856,6 +1910,8 @@ private fun TrimPlayer(
         pendingSeekTargetMs = clamped
         pendingSeekAt = System.currentTimeMillis()
         positionMs = clamped
+        // Parmak kalktı: son kare kesin gösterilsin (kare gelene kadar beklenir).
+        scrubber.waitForFrame = true
         player.setSeekParameters(SEEK_EXACT)
         scrubber.end(clamped)
         // Sürükleme ÖNCESİNDE oynuyorsa otomatik devam eder (Play'e basmak gerekmez).
@@ -2105,7 +2161,11 @@ internal fun SmoothVideoSlider(
 ) {
     val safeEnd = endMs.coerceAtLeast(startMs + 1L)
     val enabled = endMs > startMs
-    val shownMs = positionMs.coerceIn(startMs, safeEnd)
+    // Sürükleme sırasında sol süre etiketi OYNATICIYI BEKLEMEZ: hedef an parmaktan gelir.
+    // (AV1 gibi yazılım çözülen videolarda oynatıcı konumu saniyelerce geride kalabiliyor;
+    //  kullanıcı kaydırdığı anı ANINDA görmeli.) -1 = sürükleme yok.
+    var previewMs by remember { mutableLongStateOf(-1L) }
+    val shownMs = (if (previewMs >= 0L) previewMs else positionMs).coerceIn(startMs, safeEnd)
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -2127,6 +2187,7 @@ internal fun SmoothVideoSlider(
             endMs = safeEnd,
             onSeek = { if (enabled) onSeekTo(it) },
             onScrubChange = onDragStateChange,
+            onScrubPreview = { previewMs = it },
             activeColor = PlayerTurquoise,
             inactiveColor = Color(0x55FFFFFF),
             markedRanges = cutRanges,
@@ -2439,7 +2500,18 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fas
     // c2.android.* / OMX.google.* yazılım dekoderleri CPU'yu yakar ve cihazı ısıtır.
     val hwFirstSelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
         val infos = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
-        if (androidx.media3.common.MimeTypes.isVideo(mimeType) || androidx.media3.common.MimeTypes.isAudio(mimeType)) {
+        if (mimeType == androidx.media3.common.MimeTypes.VIDEO_AV1) {
+            // AV1: donanım dekoderi varsa o, yoksa AV1'e özel yazılım dekoderi (libgav1)
+            // seçilir. Böylece cihazda AV1 donanım dekoderi YOKKEN yanlış/eksik bir
+            // "donanım" dekoderi denemesinden doğan açılış gecikmesi oluşmaz.
+            infos.sortedBy { info ->
+                when {
+                    info.hardwareAccelerated && !info.softwareOnly -> 0
+                    info.name.contains("av1", ignoreCase = true) -> 1
+                    else -> 2
+                }
+            }
+        } else if (androidx.media3.common.MimeTypes.isVideo(mimeType) || androidx.media3.common.MimeTypes.isAudio(mimeType)) {
             infos.sortedBy { if (it.hardwareAccelerated && !it.softwareOnly) 0 else 1 }
         } else infos
     }
@@ -3472,14 +3544,26 @@ internal class SlotPlayerHolder(
     private val scrubEngine = ScrubSeeker(player)
     /** Sürükleme başlamadan önce video oynuyor muydu? (bitince otomatik devam) */
     private var wasPlayingBeforeScrub = false
-    /** Kare hassas sarma parametresi uygulandı mı? (her örnekte yeniden uygulanmaz) */
-    private var exactSeekApplied = false
+    /** En son uygulanan sarma parametresi (aynı parametre tekrar uygulanmaz). */
+    private var appliedSeekParams: SeekParameters? = null
 
-    /** Tolerans SIFIR sarmayı bir kez uygular: oynatıcı anahtar kareye ATLAMAZ. */
-    private fun ensureExactSeek() {
-        if (!exactSeekApplied) {
-            exactSeekApplied = true
-            player.setSeekParameters(SEEK_EXACT)
+    /**
+     * Sarma parametresini kodeğe göre uygular.
+     *
+     * - Durağan konum / parmak kalktı: `EXACT` (hedef kare birebir, anahtar kareye atlamaz).
+     * - Canlı sürükleme: AV1'de `CLOSEST_SYNC` (anahtar kare). AV1 çoğu cihazda yazılımla
+     *   çözülür; `EXACT` her sarmada önceki anahtar kareden hedefe kadar tüm kareleri
+     *   çözdüğü için görüntü saniyelerce donuyordu. H.264/HEVC/VP9'da `EXACT` korunur.
+     */
+    private fun applySeekParams(live: Boolean) {
+        val params = if (live) {
+            scrubSeekParametersFor(player.videoFormat?.sampleMimeType)
+        } else {
+            SEEK_EXACT
+        }
+        if (appliedSeekParams != params) {
+            appliedSeekParams = params
+            player.setSeekParameters(params)
         }
     }
 
@@ -3791,7 +3875,7 @@ internal class SlotPlayerHolder(
         pendingSeekTargetMs = snapped
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = snapped
-        ensureExactSeek()
+        applySeekParams(live)
         if (player.playbackState == Player.STATE_IDLE) {
             player.prepare()
         }
@@ -3810,7 +3894,10 @@ internal class SlotPlayerHolder(
     fun pauseForScrub() {
         wasPlayingBeforeScrub = player.playWhenReady
         scrubActive = true
-        player.setSeekParameters(SEEK_EXACT)
+        applySeekParams(live = true)
+        // AV1 anahtar kare sarması: kare bekleme kapalı (istekler doğrudan akar).
+        scrubEngine.waitForFrame =
+            player.videoFormat?.sampleMimeType != androidx.media3.common.MimeTypes.VIDEO_AV1
         if (player.playWhenReady) player.pause()
         scrubEngine.begin()
     }
@@ -3828,7 +3915,9 @@ internal class SlotPlayerHolder(
         pendingSeekTargetMs = snapped
         pendingSeekTimestamp = System.currentTimeMillis()
         positionMs = snapped
-        player.setSeekParameters(SEEK_EXACT)
+        applySeekParams(live = false)
+        // Parmak kalktı: son kare kesin gösterilsin (kare gelene kadar beklenir).
+        scrubEngine.waitForFrame = true
         scrubEngine.end(snapped)
         if (wasPlayingBeforeScrub) player.play()
         wasPlayingBeforeScrub = false
