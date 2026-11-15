@@ -5,6 +5,13 @@ Değişen dosyalar: `ui/components/ScrubHud.kt`, `ui/components/Sliders.kt`,
 `ui/screens/SettingsScreen.kt`, `res/values*/strings.xml`, `DEGISIKLIKLER.md`.
 Derleme: Gradle 8 + AGP 8.5 + Kotlin 1.9.24 + Compose BOM 2024.06.00 (değişmedi).
 
+## 0) DERLEME DÜZELTMESİ (Güncelleme 13.1)
+- `HomeScreen.kt` içindeki "Son Dosyalar" başlığında `Text(...)` çağrısına **iki kez**
+  `color` parametresi verilmişti (`color = Color.White` + `color = pal.title`).
+  Kotlin bunu "None of the following functions can be called with the arguments
+  supplied" hatasıyla reddediyordu. Eski `Color.White` satırı kaldırıldı; başlık
+  artık tek `color = pal.title` ile temaya uyuyor.
+
 ## 1) VİDEO OYNATICI / KESME — ORTADAKİ KOCAMAN PANEL KALDIRILDI
 - Eski `ScrubHud` + `ScrubHudPopup` (ekranın tam ortasında açılan "kalan süre /
   delta / kare" paneli) **tamamen silindi**. Video izlerken görüntünün üstünü

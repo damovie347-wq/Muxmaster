@@ -441,10 +441,9 @@ fun HomeScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text(
                             stringResource(R.string.home_recent_title),
-                            color = Color.White,
+                            color = pal.title,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
-                            color = pal.title,
                             modifier = Modifier.weight(1f)
                         )
                         Row(
