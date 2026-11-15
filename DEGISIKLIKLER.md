@@ -1,3 +1,41 @@
+# MuxMaster — Güncelleme 13 / Sade Sürükleme + Canlı Kare + Gerçek Koyu Tema
+
+Değişen dosyalar: `ui/components/ScrubHud.kt`, `ui/components/Sliders.kt`,
+`ui/components/FrameTimeline.kt`, `ui/screens/HomeScreen.kt`,
+`ui/screens/SettingsScreen.kt`, `res/values*/strings.xml`, `DEGISIKLIKLER.md`.
+Derleme: Gradle 8 + AGP 8.5 + Kotlin 1.9.24 + Compose BOM 2024.06.00 (değişmedi).
+
+## 1) VİDEO OYNATICI / KESME — ORTADAKİ KOCAMAN PANEL KALDIRILDI
+- Eski `ScrubHud` + `ScrubHudPopup` (ekranın tam ortasında açılan "kalan süre /
+  delta / kare" paneli) **tamamen silindi**. Video izlerken görüntünün üstünü
+  kapatmıyor.
+- Yerine `drawScrubBubble()` geldi: yalnızca kaydırılan tutamağın **hemen üstünde**,
+  çubuğun KENDİ içinde çizilen küçük bir zaman baloncuğu (`mm:ss.SS`). Kenarlarda
+  otomatik içeri kayar, dokunmayı yutmaz, ayrı bir pencere (Popup) açmaz.
+
+## 2) SLIDER'DA CANLI SANİYE / SALİSE OKUMA (kırpma hassasiyeti)
+- `MuxSeekSlider` (oynatıcı + kesme slider'ı): sürüklerken tutamağın üstünde
+  `04:56.50` gibi salise gösteren baloncuk çıkar; parmak kalkınca kaybolur.
+- `FrameTrimTimeline` (A/B tutamaçlı kırpma çubuğu): tutamaç çekilirken o karenin
+  zamanı **ve kare numarası** tutamağın üstünde yazar; ana oynatıcı aynı anda o
+  kareyi gösterir (ikinci dekoder / thumbnail üretilmez). Böylece kesim noktası
+  saniye ve kare düzeyinde görülerek seçilir.
+- Sürükleme sırasında sol süre etiketi yine parmaktan beslenir (oynatıcıyı beklemez).
+
+## 3) GERÇEK KOYU / AMOLED TEMA (ana ekran dahil)
+- Kök neden: ana ekranın arka planı, kartları ve yazı renkleri **sabit mor** olarak
+  kodlanmıştı; Ayarlar'dan tema değiştirilse bile ana ekran mor kalıyordu.
+- `HomeScreen` artık `LocalThemeVariant`'a bağlı `HomePalette` kullanıyor:
+  - **Koyu**: nötr koyu gri/siyah zemin, hafif mor parıltı.
+  - **AMOLED**: tam siyah `#000000` zemin ve kartlar; parıltı/dalga bantları hiç
+    çizilmez (pikseller kapanır, pil tasarrufu).
+  - **Açık**: açık zemin + koyu yazı.
+  Kartların renkli gradyanları (Mux / Kes / Birleştir / Oynatıcı) her temada canlı.
+- `SettingsScreen`: tema seçimi artık **görsel önizleme kartları** (Açık / Koyu /
+  AMOLED / Sistem) hâlinde; seçili olan mor çerçeve + onay simgesiyle işaretli.
+  Seçim `SharedPreferences`'a yazılır, uygulama yeniden açıldığında korunur.
+- Yeni metin: `settings_theme_desc` (tr/en/de).
+
 # MuxMaster — Güncelleme 12 / AV1 Anında Açılış + Sürükleme Zaman Göstergesi
 
 Değişen dosyalar: `data/ScrubSeeker.kt`, `ui/components/Sliders.kt`,

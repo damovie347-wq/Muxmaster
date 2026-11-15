@@ -1,34 +1,23 @@
 package com.example.muxmaster.ui.components
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import java.util.Locale
 
 /**
- * SÜRÜKLEME (SCRUB) ZAMAN GÖSTERGESİ.
+ * SÜRÜKLEME (SCRUB) ZAMAN BALONCUĞU — KOMPAKT.
  *
- * mpv / Just Player davranışı: parmak çubukta gezerken ekranın ortasında hedef an
- * salise hassasiyetiyle yazar, parmağın nereden nereye gittiği (delta) ve kalan süre
- * görünür. Gösterge oynatıcıdan DEĞİL, doğrudan parmağın konumundan beslenir:
- * dekoder yetişemese bile kullanıcı kaydırdığı anı anında okur.
+ * ÖNEMLİ DEĞİŞİKLİK: Ekranın ORTASINDA açılan kocaman "kalan süre / delta / kare"
+ * paneli (eski `ScrubHud` + `ScrubHudPopup`) tamamen kaldırıldı. Video izlerken
+ * görüntünün üstünü kapatıyordu. Artık yalnızca kaydırılan tutamağın hemen üstünde,
+ * çubuğun kendi içinde küçük bir zaman baloncuğu çizilir:
+ *
+ *  - Video alanı hiç kapanmaz (kare canlı görünür).
+ *  - Salise hassasiyeti (mm:ss.cc) doğrudan çubuğun üzerinde okunur.
+ *  - Baloncuk çubuğun DIŞINA taşmaz; kenarlarda otomatik olarak içeri kayar.
  */
 internal fun scrubClock(ms: Long): String {
     val safe = ms.coerceAtLeast(0L)
@@ -40,93 +29,52 @@ internal fun scrubClock(ms: Long): String {
     else String.format(Locale.US, "%02d:%02d.%02d", m, s, cs)
 }
 
-@Composable
-fun ScrubHud(
-    targetMs: Long,
-    totalMs: Long = 0L,
-    baseMs: Long = -1L,
-    frameNumber: Long = -1L,
-    accent: Color = Color(0xFF66C2B4),
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .background(Color(0xE6101216), RoundedCornerShape(16.dp))
-            .padding(horizontal = 22.dp, vertical = 12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = scrubClock(targetMs),
-            color = Color.White,
-            fontSize = 30.sp,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(Modifier.height(2.dp))
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (baseMs >= 0L) {
-                val delta = targetMs - baseMs
-                val sign = if (delta < 0L) "−" else "+"
-                Text(
-                    text = sign + scrubClock(if (delta < 0L) -delta else delta),
-                    color = accent,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-            if (totalMs > 0L) {
-                Text(
-                    text = "kalan " + scrubClock((totalMs - targetMs).coerceAtLeast(0L)),
-                    color = Color(0xFFB9BDC7),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-            if (frameNumber > 0L) {
-                Text(
-                    text = "kare $frameNumber",
-                    color = Color(0xFF8E939F),
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-        }
+/** Kaydırma baloncuğunun yazı tipi (tek yerde tanımlı; iki çubuk da bunu kullanır). */
+private fun scrubTextPaint(sizePx: Float): android.graphics.Paint =
+    android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.WHITE
+        textSize = sizePx
+        typeface = android.graphics.Typeface.MONOSPACE
+        isFakeBoldText = true
     }
-}
 
 /**
- * [ScrubHud] göstergeyi ekranın ortasında, dokunmayı yutmadan gösterir.
- * [visible] false olduğunda hiçbir katman oluşturulmaz.
+ * [centerX] noktasının üstüne küçük zaman baloncuğu çizer.
+ * Baloncuk çizim alanının DIŞINA çıkmaz: kenarda otomatik olarak içeri kayar.
  */
-@Composable
-fun ScrubHudPopup(
-    visible: Boolean,
-    targetMs: Long,
-    totalMs: Long = 0L,
-    baseMs: Long = -1L,
-    frameNumber: Long = -1L,
+internal fun DrawScope.drawScrubBubble(
+    centerX: Float,
+    topY: Float,
+    label: String,
     accent: Color = Color(0xFF66C2B4)
 ) {
-    if (!visible) return
-    Popup(
-        alignment = Alignment.Center,
-        offset = IntOffset(0, 0),
-        properties = PopupProperties(
-            focusable = false,
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false
-        )
-    ) {
-        ScrubHud(
-            targetMs = targetMs,
-            totalMs = totalMs,
-            baseMs = baseMs,
-            frameNumber = frameNumber,
-            accent = accent
-        )
-    }
+    val paint = scrubTextPaint(10.sp.toPx())
+    val textW = paint.measureText(label)
+    val padH = 7.dp.toPx()
+    val chipH = 16.dp.toPx()
+    val chipW = textW + padH * 2f
+    val cx = centerX.coerceIn(chipW / 2f, (size.width - chipW / 2f).coerceAtLeast(chipW / 2f))
+    val top = topY.coerceIn(0f, (size.height - chipH).coerceAtLeast(0f))
+    val left = cx - chipW / 2f
+
+    drawRoundRect(
+        color = Color(0xF00B0D12),
+        topLeft = androidx.compose.ui.geometry.Offset(left, top),
+        size = androidx.compose.ui.geometry.Size(chipW, chipH),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(chipH / 2f, chipH / 2f)
+    )
+    drawRoundRect(
+        color = accent.copy(alpha = 0.9f),
+        topLeft = androidx.compose.ui.geometry.Offset(left, top),
+        size = androidx.compose.ui.geometry.Size(chipW, chipH),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(chipH / 2f, chipH / 2f),
+        style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx())
+    )
+    drawContext.canvas.nativeCanvas.drawText(
+        label,
+        cx - textW / 2f,
+        top + chipH * 0.72f,
+        paint
+    )
 }

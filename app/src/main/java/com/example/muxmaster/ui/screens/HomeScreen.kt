@@ -71,6 +71,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.muxmaster.R
+import com.example.muxmaster.ui.theme.LocalThemeVariant
+import com.example.muxmaster.ui.theme.ThemeVariant
 import com.example.muxmaster.data.MediaThumbs
 import com.example.muxmaster.data.RecentFiles
 import com.example.muxmaster.data.RecentMedia
@@ -80,14 +82,76 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// Ana ekranın sabit renk paleti (koyu mor/lacivert "premium" görünüm).
-private val HomeBgTop = Color(0xFF0B0724)
-private val HomeBgMid = Color(0xFF1A0B3E)
-private val HomeBgBottom = Color(0xFF08050F)
-private val HomeAccentText = Color(0xFFB9AEE6)
-private val HomeLink = Color(0xFFB9A6F7)
-private val HomeCardBg = Color(0xFF171130)
-private val HomeCardStroke = Color(0xFF2A2150)
+/**
+ * ANA EKRAN RENK PALETİ — TEMA DUYARLI.
+ *
+ * ÖNEMLİ DEĞİŞİKLİK: Ana ekranın arka planı, kartları ve yazı renkleri artık SABİT mor
+ * değil; Ayarlar > Görünüm'de seçilen temaya göre değişir.
+ *  - KOYU  : nötr koyu gri/siyah zemin (mor parıltı çok hafif).
+ *  - AMOLED: tam siyah (#000000) zemin ve kartlar; parıltı/dalga çizilmez (piksel kapanır).
+ *  - AÇIK  : açık gri/beyaz zemin, koyu yazı.
+ * Kartların renkli gradyanları (Mux/Kes/Birleştir/Oynatıcı) her temada canlı kalır.
+ */
+private data class HomePalette(
+    val bgTop: Color,
+    val bgMid: Color,
+    val bgMid2: Color,
+    val bgBottom: Color,
+    val accentText: Color,
+    val link: Color,
+    val cardBg: Color,
+    val cardStroke: Color,
+    val title: Color,
+    val glow: Color,
+    val bandAlpha: Float,
+    val thumbGradient: List<Color>
+)
+
+@Composable
+private fun homePalette(): HomePalette = when (LocalThemeVariant.current) {
+    ThemeVariant.LIGHT -> HomePalette(
+        bgTop = Color(0xFFF7F7FA),
+        bgMid = Color(0xFFEFEDFA),
+        bgMid2 = Color(0xFFF6F6FA),
+        bgBottom = Color(0xFFECECF2),
+        accentText = Color(0xFF6B6B78),
+        link = Color(0xFF6E56CF),
+        cardBg = Color(0xFFFFFFFF),
+        cardStroke = Color(0xFFE3E3E8),
+        title = Color(0xFF1D1D1F),
+        glow = Color(0x269B7BF5),
+        bandAlpha = 0.18f,
+        thumbGradient = listOf(Color(0xFFEDEBFB), Color(0xFFDCD6F7))
+    )
+    ThemeVariant.AMOLED -> HomePalette(
+        bgTop = Color(0xFF000000),
+        bgMid = Color(0xFF000000),
+        bgMid2 = Color(0xFF000000),
+        bgBottom = Color(0xFF000000),
+        accentText = Color(0xFF8A8A96),
+        link = Color(0xFF9C8CE8),
+        cardBg = Color(0xFF050506),
+        cardStroke = Color(0xFF1B1B20),
+        title = Color(0xFFF0F0F5),
+        glow = Color(0x00000000),
+        bandAlpha = 0f,
+        thumbGradient = listOf(Color(0xFF141418), Color(0xFF0A0A0C))
+    )
+    ThemeVariant.DARK -> HomePalette(
+        bgTop = Color(0xFF101014),
+        bgMid = Color(0xFF15151C),
+        bgMid2 = Color(0xFF0D0D11),
+        bgBottom = Color(0xFF08080A),
+        accentText = Color(0xFF9C9CAC),
+        link = Color(0xFF9C8CE8),
+        cardBg = Color(0xFF17171D),
+        cardStroke = Color(0xFF26262E),
+        title = Color(0xFFF0F0F5),
+        glow = Color(0x338B5CF6),
+        bandAlpha = 0.30f,
+        thumbGradient = listOf(Color(0xFF23232B), Color(0xFF16161B))
+    )
+}
 
 /**
  * UYGULAMANIN ANA EKRANI.
@@ -116,6 +180,7 @@ fun HomeScreen(
     onShowAllFiles: () -> Unit
 ) {
     val context = LocalContext.current
+    val pal = homePalette()
     var recents by remember { mutableStateOf<List<RecentMedia>>(emptyList()) }
     var thumbs by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
     var durations by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
@@ -169,13 +234,13 @@ fun HomeScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 "MuxMaster",
-                                color = Color.White,
+                                color = pal.title,
                                 fontSize = 23.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
                                 stringResource(R.string.home_tagline),
-                                color = HomeAccentText,
+                                color = pal.accentText,
                                 fontSize = 12.sp
                             )
                         }
@@ -183,7 +248,7 @@ fun HomeScreen(
                             Icon(
                                 Icons.Filled.Settings,
                                 stringResource(R.string.home_settings_desc),
-                                tint = Color(0xFFCFC6F5)
+                                tint = pal.accentText
                             )
                         }
                     }
@@ -379,6 +444,7 @@ fun HomeScreen(
                             color = Color.White,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
+                            color = pal.title,
                             modifier = Modifier.weight(1f)
                         )
                         Row(
@@ -390,7 +456,7 @@ fun HomeScreen(
                         ) {
                             Text(
                                 stringResource(R.string.home_recent_show_all),
-                                color = HomeLink,
+                                color = pal.link,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -398,7 +464,7 @@ fun HomeScreen(
                             Icon(
                                 Icons.Filled.ArrowForward,
                                 null,
-                                tint = HomeLink,
+                                tint = pal.link,
                                 modifier = Modifier.size(16.dp)
                             )
                         }
@@ -413,26 +479,26 @@ fun HomeScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(16.dp))
-                                .background(HomeCardBg)
-                                .border(1.dp, HomeCardStroke, RoundedCornerShape(16.dp))
+                                .background(pal.cardBg)
+                                .border(1.dp, pal.cardStroke, RoundedCornerShape(16.dp))
                                 .padding(vertical = 22.dp, horizontal = 16.dp)
                         ) {
                             Icon(
                                 Icons.Filled.Movie,
                                 null,
-                                tint = Color(0xFF6D5AA8),
+                                tint = pal.accentText,
                                 modifier = Modifier.size(30.dp)
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 stringResource(R.string.home_recent_empty_title),
-                                color = Color.White.copy(alpha = 0.85f),
+                                color = pal.title.copy(alpha = 0.9f),
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
                                 stringResource(R.string.home_recent_empty_sub),
-                                color = HomeAccentText,
+                                color = pal.accentText,
                                 fontSize = 11.sp
                             )
                         }
@@ -459,6 +525,7 @@ fun HomeScreen(
 
 @Composable
 private fun HomeBackdrop(modifier: Modifier = Modifier) {
+    val pal = homePalette()
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
@@ -466,26 +533,28 @@ private fun HomeBackdrop(modifier: Modifier = Modifier) {
         drawRect(
             brush = Brush.verticalGradient(
                 colorStops = arrayOf(
-                    0f to HomeBgTop,
-                    0.28f to HomeBgMid,
-                    0.62f to Color(0xFF120A2C),
-                    1f to HomeBgBottom
+                    0f to pal.bgTop,
+                    0.28f to pal.bgMid,
+                    0.62f to pal.bgMid2,
+                    1f to pal.bgBottom
                 ),
                 startY = 0f,
                 endY = h
             )
         )
 
-        // Sağ üstteki mor parıltı.
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(Color(0x80A855F7), Color(0x00A855F7)),
-                center = Offset(w * 0.9f, -h * 0.02f),
-                radius = w * 1.15f
-            ),
-            radius = w * 1.15f,
-            center = Offset(w * 0.9f, -h * 0.02f)
-        )
+        // Sağ üstteki parıltı (AMOLED'de hiç çizilmez: piksel kapanır).
+        if (pal.glow.alpha > 0f) {
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(pal.glow, pal.glow.copy(alpha = 0f)),
+                    center = Offset(w * 0.9f, -h * 0.02f),
+                    radius = w * 1.15f
+                ),
+                radius = w * 1.15f,
+                center = Offset(w * 0.9f, -h * 0.02f)
+            )
+        }
 
         // Işıklı dalga bantları (görseldeki üst dalga efekti).
         fun band(centerY: Float, amplitude: Float, thickness: Float, alpha: Float, color: Color) {
@@ -516,10 +585,14 @@ private fun HomeBackdrop(modifier: Modifier = Modifier) {
             )
         }
 
-        band(h * 0.105f, h * 0.035f, 96.dp.toPx(), 0.05f, Color(0xFFC084FC))
-        band(h * 0.105f, h * 0.035f, 26.dp.toPx(), 0.22f, Color(0xFFC084FC))
-        band(h * 0.150f, h * 0.028f, 10.dp.toPx(), 0.16f, Color(0xFF818CF8))
-        band(h * 0.048f, h * 0.020f, 6.dp.toPx(), 0.10f, Color(0xFFA78BFA))
+        if (pal.bandAlpha > 0f) {
+            // Işık bantları temaya göre ölçeklenir (KOYU'da eski parlaklık korunur).
+            val f = pal.bandAlpha / 0.30f
+            band(h * 0.105f, h * 0.035f, 96.dp.toPx(), 0.05f * f, Color(0xFFC084FC))
+            band(h * 0.105f, h * 0.035f, 26.dp.toPx(), 0.22f * f, Color(0xFFC084FC))
+            band(h * 0.150f, h * 0.028f, 10.dp.toPx(), 0.16f * f, Color(0xFF818CF8))
+            band(h * 0.048f, h * 0.020f, 6.dp.toPx(), 0.10f * f, Color(0xFFA78BFA))
+        }
     }
 }
 
@@ -603,6 +676,7 @@ private fun RecentRow(
     onOpen: () -> Unit,
     onRemove: () -> Unit
 ) {
+    val pal = homePalette()
     var menuOpen by remember { mutableStateOf(false) }
 
     Row(
@@ -610,8 +684,8 @@ private fun RecentRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(HomeCardBg)
-            .border(1.dp, HomeCardStroke, RoundedCornerShape(14.dp))
+            .background(pal.cardBg)
+            .border(1.dp, pal.cardStroke, RoundedCornerShape(14.dp))
             .clickable(onClick = onOpen)
             .padding(horizontal = 8.dp, vertical = 8.dp)
     ) {
@@ -619,9 +693,7 @@ private fun RecentRow(
             modifier = Modifier
                 .size(width = 64.dp, height = 48.dp)
                 .clip(RoundedCornerShape(10.dp))
-                .background(
-                    Brush.linearGradient(listOf(Color(0xFF3B2A6B), Color(0xFF221640)))
-                ),
+                .background(Brush.linearGradient(pal.thumbGradient)),
             contentAlignment = Alignment.Center
         ) {
             if (thumbnail != null) {
@@ -635,7 +707,7 @@ private fun RecentRow(
                 Icon(
                     if (item.isAudio) Icons.Filled.MusicNote else Icons.Filled.Movie,
                     null,
-                    tint = Color(0xFFB9A6F7),
+                    tint = pal.link,
                     modifier = Modifier.size(22.dp)
                 )
             }
@@ -644,7 +716,7 @@ private fun RecentRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 item.name,
-                color = Color.White,
+                color = pal.title,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -653,7 +725,7 @@ private fun RecentRow(
             Spacer(Modifier.height(3.dp))
             Text(
                 buildRecentSubtitle(item.lastUsedMs, durationMs),
-                color = HomeAccentText,
+                color = pal.accentText,
                 fontSize = 11.sp,
                 maxLines = 1
             )
@@ -663,7 +735,7 @@ private fun RecentRow(
                 Icon(
                     Icons.Filled.MoreVert,
                     stringResource(R.string.home_more_desc),
-                    tint = Color(0xFF9C8FD6),
+                    tint = pal.accentText,
                     modifier = Modifier.size(20.dp)
                 )
             }

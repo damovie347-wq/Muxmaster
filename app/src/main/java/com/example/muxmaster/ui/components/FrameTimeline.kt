@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -84,9 +85,11 @@ fun FrameTrimTimeline(
     val frameStep = frameClock.frameStepMs.coerceAtLeast(1L)
     val minWindowMs = max(frameStep * 4L, 160L)
 
-    // Sürükleme göstergesi: tutamaç çekilirken ekranın ortasında o karenin anı yazar.
+    // Sürükleme baloncuğu: tutamaç çekilirken o karenin anı, tutamağın HEMEN ÜSTÜNDE
+    // küçük bir çip olarak yazar (eski ekran ortası paneli kaldırıldı; video kapanmaz).
     // -1 = sürükleme yok. Değer parmaktan beslenir, oynatıcıdan değil: anında okunur.
     var hudMs by remember { mutableLongStateOf(-1L) }
+    var hudHandle by remember { mutableIntStateOf(-1) }
 
     Canvas(
         modifier = modifier
@@ -196,6 +199,7 @@ fun FrameTrimTimeline(
                                     localEnd = snapped.coerceIn(lower, total)
                                 }
                                 draggedHandle = true
+                                hudHandle = handle
                                 hudMs = if (handle == 0) localStart else localEnd
                                 val now = System.currentTimeMillis()
                                 if (now - lastReport >= 20L || !change.pressed) {
@@ -223,6 +227,7 @@ fun FrameTrimTimeline(
                         handleState.value(handle, if (handle == 0) localStart else localEnd)
                     }
                     hudMs = -1L
+                    hudHandle = -1
                     dragEndState.value()
                 }
             }
@@ -335,14 +340,24 @@ fun FrameTrimTimeline(
         }
         drawHandle(sx)
         drawHandle(ex)
+
+        // ── SÜRÜKLEME ZAMAN BALONCUĞU (kompakt) ─────────────────────────────
+        // Tutamaç çekilirken o karenin anı tutamağın hemen üstünde yazar.
+        // Ekranın ortasında panel AÇILMAZ: video görüntüsü tamamen görünür kalır.
+        if (hudMs >= 0L) {
+            val label = if (frameClock.totalFrames > 0L) {
+                scrubClock(hudMs) + " · kare " + frameClock.frameNumber(hudMs)
+            } else {
+                scrubClock(hudMs)
+            }
+            val anchor = if (hudHandle == 0) xOf(startMs) else xOf(endMs)
+            drawScrubBubble(
+                centerX = anchor,
+                topY = (bandTop - 19.dp.toPx()).coerceAtLeast(0f),
+                label = label,
+                accent = activeColor
+            )
+        }
     }
 
-    // Tutamaç çekilirken ekranın ortasında büyük zaman göstergesi (mpv tarzı).
-    ScrubHudPopup(
-        visible = hudMs >= 0L,
-        targetMs = hudMs,
-        totalMs = durationMs,
-        frameNumber = if (frameClock.totalFrames > 0L) frameClock.frameNumber(hudMs) else -1L,
-        accent = activeColor
-    )
 }

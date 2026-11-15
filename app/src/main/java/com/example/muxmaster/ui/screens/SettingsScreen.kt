@@ -8,6 +8,7 @@ import android.provider.Settings
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -16,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -27,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -146,37 +149,63 @@ fun SettingsScreen(
                 color = TextSec, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
+            // ── TEMA SEÇİMİ (GÖRSEL ÖNİZLEMELİ) ──────────────────────────
+            // ÖNEMLİ DEĞİŞİKLİK: Tema artık yalnızca yazılı bir liste değil; her seçenek
+            // kendi renklerini gösteren küçük bir önizleme kartı olarak sunulur.
+            // Koyu / AMOLED (tam siyah) / Açık / Sistem seçenekleri tek bakışta görünür.
             Card(
                 colors = CardDefaults.cardColors(containerColor = Surface),
                 border = BorderStroke(1.dp, Outline),
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column {
-                    val themeOptions = listOf(
-                        ThemeMode.SYSTEM to stringResource(R.string.settings_theme_system),
-                        ThemeMode.LIGHT to stringResource(R.string.settings_theme_light),
-                        ThemeMode.DARK to stringResource(R.string.settings_theme_dark),
-                        ThemeMode.AMOLED to stringResource(R.string.settings_theme_amoled)
-                    )
-                    themeOptions.forEachIndexed { index, (mode, label) ->
-                        if (index > 0) Divider(color = Outline, thickness = 0.5.dp)
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onThemeModeChange(mode) }
-                                .padding(horizontal = 14.dp, vertical = 4.dp)
-                        ) {
-                            RadioButton(
-                                selected = themeMode == mode,
-                                onClick = { onThemeModeChange(mode) },
-                                colors = RadioButtonDefaults.colors(selectedColor = Purple, unselectedColor = TextMuted)
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(label, color = TextPrimary, fontSize = 14.sp)
-                        }
+                Column(Modifier.padding(12.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        ThemePreviewTile(
+                            label = stringResource(R.string.settings_theme_light),
+                            previewBg = Color(0xFFF5F5F7),
+                            previewSurface = Color(0xFFFFFFFF),
+                            previewAccent = Color(0xFF6E56CF),
+                            selected = themeMode == ThemeMode.LIGHT,
+                            onClick = { onThemeModeChange(ThemeMode.LIGHT) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        ThemePreviewTile(
+                            label = stringResource(R.string.settings_theme_dark),
+                            previewBg = Color(0xFF0F0F10),
+                            previewSurface = Color(0xFF1F1F28),
+                            previewAccent = Color(0xFF7C6FE0),
+                            selected = themeMode == ThemeMode.DARK,
+                            onClick = { onThemeModeChange(ThemeMode.DARK) },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        ThemePreviewTile(
+                            label = stringResource(R.string.settings_theme_amoled),
+                            previewBg = Color(0xFF000000),
+                            previewSurface = Color(0xFF0A0A0C),
+                            previewAccent = Color(0xFF7C6FE0),
+                            selected = themeMode == ThemeMode.AMOLED,
+                            onClick = { onThemeModeChange(ThemeMode.AMOLED) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        ThemePreviewTile(
+                            label = stringResource(R.string.settings_theme_system),
+                            previewBg = Color(0xFF20202A),
+                            previewSurface = Color(0xFF2E2E3A),
+                            previewAccent = Color(0xFFB3A6EE),
+                            selected = themeMode == ThemeMode.SYSTEM,
+                            onClick = { onThemeModeChange(ThemeMode.SYSTEM) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        stringResource(R.string.settings_theme_desc),
+                        color = TextMuted, fontSize = 11.sp
+                    )
                 }
             }
 
@@ -312,6 +341,89 @@ fun SettingsScreen(
             }
 
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * Tema önizleme kartı: seçeneğin kendi renklerini minik bir arayüz olarak gösterir.
+ * Seçili kart mor çerçeve + onay simgesiyle işaretlenir.
+ */
+@Composable
+private fun ThemePreviewTile(
+    label: String,
+    previewBg: Color,
+    previewSurface: Color,
+    previewAccent: Color,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) Purple.copy(alpha = 0.10f) else SurfaceHigh)
+            .border(
+                width = if (selected) 1.5.dp else 1.dp,
+                color = if (selected) Purple else Outline,
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onClick)
+            .padding(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(previewBg)
+                .border(0.5.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(8.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .padding(start = 6.dp, top = 6.dp)
+                    .fillMaxWidth(0.55f)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(previewAccent)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(6.dp)
+                    .fillMaxWidth(0.62f)
+                    .height(22.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(previewSurface)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(6.dp)
+                    .size(16.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(previewAccent.copy(alpha = 0.9f))
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (selected) {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    null,
+                    tint = Purple,
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                label,
+                color = if (selected) PurpleLight else TextSec,
+                fontSize = 11.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1
+            )
         }
     }
 }

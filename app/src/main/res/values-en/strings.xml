@@ -139,6 +139,7 @@
     <string name="settings_theme_light">Light</string>
     <string name="settings_theme_dark">Dark</string>
     <string name="settings_theme_amoled">AMOLED (True Black)</string>
+    <string name="settings_theme_desc">Dark uses a dark gray background, AMOLED uses true black (#000000) to save power on AMOLED screens.</string>
     <string name="settings_output_folder_title">Default Output Folder</string>
     <string name="settings_output_folder_desc">Default folder for muxed files and exported audio/subtitles.</string>
     <string name="settings_output_folder_none">Not selected</string>

@@ -88,10 +88,11 @@ fun MuxSeekSlider(
     /** Dokunulan nokta ile tutamaç arasındaki mesafeyi koru (parmak tutamağı çekmez). */
     preserveTouchOffset: Boolean = true,
     /**
-     * Sürükleme sırasında ekranın ortasında büyük zaman göstergesi göster (mpv tarzı).
-     * Gösterge parmağın konumundan beslenir: dekoder yetişemese bile anında okunur.
+     * Sürükleme sırasında tutamağın hemen üstünde küçük zaman baloncuğu göster.
+     * Baloncuk çubuğun İÇİNDE çizilir: video görüntüsünü kapatmaz (eski ekran ortası
+     * paneli kaldırıldı), saliseyi anında okur.
      */
-    showScrubHud: Boolean = true,
+    showScrubBubble: Boolean = true,
     /**
      * Sürükleme sırasında hedef anı üst katmana bildirir (-1 = sürükleme bitti).
      * Süre etiketleri böylece oynatıcıyı beklemeden ANINDA güncellenir.
@@ -101,9 +102,8 @@ fun MuxSeekSlider(
     val span = (endMs - startMs).coerceAtLeast(1L)
     // Sürükleme sırasında tutamağın yeri; -1 = sürükleme yok (oynatıcının konumu kullanılır).
     var dragFraction by remember { mutableFloatStateOf(-1f) }
-    // Sürükleme göstergesi: -1 = gizli. Parmak kalkınca temizlenir.
+    // Sürükleme baloncuğu: -1 = gizli. Parmak kalkınca temizlenir.
     var hudMs by remember { mutableLongStateOf(-1L) }
-    var hudBaseMs by remember { mutableLongStateOf(-1L) }
 
     val onSeekState = rememberUpdatedState(onSeek)
     val onScrubState = rememberUpdatedState(onScrubChange)
@@ -158,8 +158,6 @@ fun MuxSeekSlider(
                     // Dokunma anındaki tutamaç oranı. Ofset korunur: bu oran referans alınır,
                     // parmağın nerede olduğu değil. Böylece tutamaç parmağın altına atlamaz.
                     val baseFraction = fractionOf(positionState.value)
-                    val baseMs = positionState.value
-                        .coerceIn(startState.value, startState.value + spanState.value)
                     val downX = down.position.x
                     val thumbX = thumbPx + usable * baseFraction
                     var fraction = baseFraction
@@ -183,7 +181,6 @@ fun MuxSeekSlider(
                             reported = true
                             // Sürükleme başladı: üst katman oynatmayı durdurup kareyi sabitler.
                             onScrubState.value(true)
-                            hudBaseMs = baseMs
                         }
                         if (moved) {
                             fraction = (baseFraction + dx / usable).coerceIn(0f, 1f)
@@ -284,16 +281,19 @@ fun MuxSeekSlider(
         drawCircle(color = activeColor.copy(alpha = 0.28f), radius = thumbPx * 1.9f, center = Offset(thumbX, centerY))
         drawCircle(color = Color(0xFFE24B4A), radius = thumbPx * 1.18f, center = Offset(thumbX, centerY))
         drawCircle(color = Color.White, radius = thumbPx * 0.82f, center = Offset(thumbX, centerY))
-    }
 
-    // Sürükleme göstergesi: parmak çubukta gezerken ekranın ortasında hedef an.
-    ScrubHudPopup(
-        visible = showScrubHud && hudMs >= 0L,
-        targetMs = hudMs,
-        totalMs = if (endMs > startMs) endMs else 0L,
-        baseMs = hudBaseMs,
-        accent = activeColor
-    )
+        // ── SÜRÜKLEME ZAMAN BALONCUĞU (kompakt) ─────────────────────────────
+        // Eski "ekranın ortasında kocaman panel" YOK. Baloncuk çubuğun içinde,
+        // tutamağın hemen üstünde: video görüntüsü kapanmaz, salise okunur.
+        if (showScrubBubble && hudMs >= 0L) {
+            drawScrubBubble(
+                centerX = thumbX,
+                topY = 0f,
+                label = scrubClock(hudMs),
+                accent = activeColor
+            )
+        }
+    }
 }
 
 /**
