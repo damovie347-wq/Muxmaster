@@ -2176,3 +2176,72 @@ diff -ru '--exclude=DEGISIKLIKLER.md' orig/x/Muxmaster-main/app/src/main/res/val
 
 ## Sürüklemede sahne görünmeme düzeltmesi
 - ScrubSeeker: kare algılama `onRenderedFirstFrame` (yalnızca bir kez tetiklenir) yerine `VideoFrameMetadataListener` ile her karede yapılır; sarma zaman aşımı 2500 ms. Video kesme ve oynatıcıda sürüklerken 0,5 sn karelerin hepsi görünür.
+
+---
+
+# Güncelleme 14 — OYNATICI PERFORMANSI (AV1 açılış + ağ sarması)
+
+Değişen dosyalar: `data/MediaCache.kt`, `data/InputAccess.kt`, `data/PlayerPerf.kt` (yeni),
+`ui/screens/TrimScreen.kt`, `MainActivity.kt`, `DEGISIKLIKLER.md`.
+Oynatıcının üstüne/sağına/soluna **hiçbir yazı eklenmedi**; yalnızca altyapı hızlandırıldı.
+
+## 1) AÇILIŞTAKİ "LOADING" EKRANI — asıl sebep: ön bellek kurulumu oynatma yolunda
+- `SimpleCache` ilk oluşturulurken disk indeksini okur. Bu iş **ilk `DataSource.open()`
+  içinde**, yani oynatma iş parçacığında yapılıyordu: kullanıcı "video açılıyor" ekranında
+  indeksin okunmasını bekliyordu (dolmuş önbellekte saniyeler).
+- Artık ön bellek **uygulama açılışında arka planda** ısıtılır (`MediaCache.warmUp`,
+  `MainActivity.onCreate`). Oynatma yolu asla beklemez: ön bellek hazır değilse video
+  doğrudan ağdan başlar (`MediaCache.ready`), ısıtma arkada devam eder.
+- Ön bellek sınırı 768 MB → 512 MB (LRU indeksi küçülür, kurulum hızlanır).
+
+## 2) AĞ ÖN BELLEĞİ GERÇEKTEN ÇALIŞIYOR (anahtar düzeltmesi)
+- ExoPlayer bir kaynağı diske yazmak için `DataSpec.key` ister. Kod `MediaItem.fromUri`
+  kullandığı için anahtar `null` kalıyordu ve `CacheDataSource` önbelleği **hiç
+  kullanmıyordu** (sadece ağdan okuyordu). Artık her ağ kaynağına sabit anahtar verilir:
+  `MediaCache.cacheKeyFor` → Drive için `drive:<dosyaKimliği>` (link her açılışta farklı
+  token taşısa da aynı anahtar), diğer http(s) için tam adres.
+- Sonuç: aynı video ikinci açılışta ve ileri/geri sarmalarda **diskten** gelir; yerel
+  dosyalarda anahtar üretilmez, yani yerel video asla diske kopyalanmaz.
+
+## 3) TAMPON AYARLARI — sarmadan sonra 1,5 saniye bekleme kaldırıldı
+- `bufferForPlaybackAfterRebufferMs` 1500 → **300 ms**: sarma sonrası "0,1 sn oynayıp
+  donuyor" hissinin asıl sebebi buydu; hedef anahtar kare gelir gelmez oynatma başlar.
+- `bufferForPlaybackMs` 250 → **100 ms**: ilk kare daha erken ekrana gelir.
+- `maxBufferMs` 60 → **90 sn**, `targetBufferBytes` 64 → **96 MB**: yükleyici ±90 saniyeyi
+  önden indirir, bu aralıktaki her sarma ağa hiç gitmez.
+- Çoklu görünüm (4 video) tamponu küçültüldü (16 MB, 12 sn) — bellek şişmesi yok.
+
+## 4) AV1 / KODEK AÇILIŞ GECİKMESİ
+- **Gerçek kodek ısınması:** eski `prewarmVideoDecoders` yalnızca "hangi dekoder var?"
+  sorgusunu yapıyordu; bu codec HAL'ini yüklemez. Artık seçilen donanım dekoderi
+  `MediaCodec.createByCodecName(...).release()` ile **bir kez gerçekten açılır**; vendor
+  kodek kütüphanesi süreçte kalır, video açılışında bu maliyet (AV1'de 300–900 ms) ödenmez.
+- **Dekoder sıralaması:** AV1'de adında `av1` geçen donanım (VPU) dekoderi ilk sırada,
+  ardından diğer donanım dekoderleri, yazılım dekoderleri (`c2.android.*`, `OMX.google.*`,
+  `*.sw.*`) en sonda. Yazılım dekoderi başa düşerse cihaz AV1'i CPU'da çözüp ilk kareyi
+  saniyelerce geciktiriyor ve pili yakıyordu.
+- **Dekoder listesi önbelleği:** `MediaCodecUtil.getDecoderInfos` her çağrıda binder
+  çağrısı yapar; sonuç MIME başına bir kez hesaplanıp saklanır.
+- Kare hızı eşleştirme (display mode switch) kapalı kalıyor — ilk kareyi geciktiren
+  faktörlerden biriydi.
+
+## 5) BULUT (Drive / SAF) AÇILIŞI — sağlayıcı turu azaltıldı
+- Bulut okuma bloğu 1 MB → **4 MB** (yalnızca bulut dosyalarında ve gerektiğinde ayrılır):
+  MKV "Cues" / MP4 "moov" indeksi dosya sonunda megabaytlar tutar; 1 MB'lık bloklarla
+  açılış onlarca sağlayıcı turu (=saniyeler) sürüyordu.
+- Yeni `CloudStreamSession.warmIndex`: indeks (son 4 MB) + başlık (ilk 1 MB) oynatma
+  hazırlanırken **arka planda, düşük öncelikli** iş parçacığında önden okunur. ExoPlayer
+  dosya sonuna atladığında baytlar zaten önbellekte olur. Oynatmayı bloklamaz.
+
+## 6) GPU / PİL
+- `TextureView.isOpaque = true`: video kareleri alfa karışımı yapılmadan opak birleştirilir
+  (her karede fazladan GPU geçişi yok → daha az gecikme, daha az pil).
+
+## 7) ÖLÇÜM (arayüzde değil, sadece logcat)
+- `PlayerPerf`: `adb logcat -s MuxPerf` ile açılış süreleri görülür:
+  seçilen **dekoder adı + kurulum süresi**, `video=` MIME, ve **İLK KARE** süresi (ms).
+  Ekranda hiçbir yazı çıkmaz; kare başına iş yapılmaz.
+
+## Derleme
+- Yeni API kullanılmadı; mevcut media3 1.2.1 sürümüyle derlenir. Gradle/AGP/Kotlin/Compose
+  sürümleri ve GitHub Actions iş akışı **değişmedi**.

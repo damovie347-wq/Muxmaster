@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
+import android.media.MediaCodec
 import android.net.Uri
 import android.os.Build
 import android.view.SurfaceView
@@ -123,6 +124,8 @@ import androidx.media3.extractor.mp4.Mp4Extractor
 import com.example.muxmaster.data.DriveStreamResolver
 import com.example.muxmaster.data.InputAccess
 import com.example.muxmaster.data.FrameClock
+import com.example.muxmaster.data.MediaCache
+import com.example.muxmaster.data.PlayerPerf
 import com.example.muxmaster.data.ScrubSeeker
 import com.example.muxmaster.model.TimeRange
 import com.example.muxmaster.model.VideoFile
@@ -2467,6 +2470,80 @@ internal fun KeepSystemBarsHidden() {
     }
 }
 
+/**
+ * Dekoder listesi önbelleği.
+ *
+ * KÖK NEDEN: `MediaCodecUtil.getDecoderInfos` her çağrıda `media.codec` servisine binder
+ * çağrıları yapar (bazı cihazlarda 30–120 ms). Bu sorgu oynatıcı kurulurken ve her
+ * dekoder seçiminde tekrarlanıyordu. Liste bir MIME için süreç boyunca DEĞİŞMEZ,
+ * bu yüzden bir kez hesaplanıp saklanır: video açılışında bu maliyet sıfırlanır.
+ */
+private val decoderInfoCache =
+    java.util.concurrent.ConcurrentHashMap<String, List<androidx.media3.exoplayer.mediacodec.MediaCodecInfo>>()
+
+/**
+ * Dekoderleri "en hızlı başlatan" sıraya dizer.
+ *
+ * 0 = AV1 için adında av1 geçen DONANIM dekoderi (VPU)
+ * 1 = diğer donanım dekoderleri (VPU)
+ * 2 = donanım olmayan ama yazılım da sayılmayan ara çözümler
+ * 3 = yazılım dekoderleri (c2.android.* / OMX.google.*) — CPU'yu yakar, en son çare
+ *
+ * Yazılım dekoderi yanlışlıkla ilk sıraya girerse cihaz AV1'i CPU'da çözmeye çalışıp
+ * ilk kareyi saniyelerce geciktiriyor ve pili yakıyordu.
+ */
+internal fun orderedDecoderInfos(
+    mimeType: String,
+    requiresSecure: Boolean,
+    requiresTunneling: Boolean
+): List<androidx.media3.exoplayer.mediacodec.MediaCodecInfo> {
+    val key = mimeType + "|" + requiresSecure + "|" + requiresTunneling
+    decoderInfoCache[key]?.let { return it }
+    val infos = try {
+        MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+    } catch (_: Throwable) {
+        emptyList()
+    }
+    val ordered = if (
+        androidx.media3.common.MimeTypes.isVideo(mimeType) ||
+        androidx.media3.common.MimeTypes.isAudio(mimeType)
+    ) {
+        infos.sortedBy { info -> decoderRank(info, mimeType) }
+    } else infos
+    if (ordered.isNotEmpty()) decoderInfoCache[key] = ordered
+    return ordered
+}
+
+private fun decoderRank(
+    info: androidx.media3.exoplayer.mediacodec.MediaCodecInfo,
+    mimeType: String
+): Int {
+    val name = info.name.lowercase(Locale.US)
+    val hw = info.hardwareAccelerated && !info.softwareOnly
+    val soft = info.softwareOnly ||
+        name.startsWith("omx.google.") ||
+        name.contains(".sw.") ||
+        name.startsWith("c2.android.")
+    return when {
+        hw && mimeType == androidx.media3.common.MimeTypes.VIDEO_AV1 && name.contains("av1") -> 0
+        hw -> 1
+        !soft -> 2
+        else -> 3
+    }
+}
+
+/**
+ * KODEK ISINMA (GERÇEK).
+ *
+ * KÖK NEDEN: eski sürüm yalnızca "hangi dekoder var?" sorgusunu yapıyordu; bu codec
+ * HAL'ini YÜKLEMEZ. AV1 gibi kodeklerde ilk kare gecikmesinin büyük kısmı,
+ * `MediaCodec` oluşturulurken vendor kodek kütüphanesinin (.so) ve HAL'in süreç
+ * belleğine yüklenmesidir (cihaza göre 300–900 ms).
+ *
+ * ÇÖZÜM: uygulama açılışında seçilen donanım dekoderi bir kez açılıp kapatılır.
+ * Kütüphane süreçte kalır; video açtığımızda bu maliyet ödenmez.
+ * Hiçbir kare çözülmez, hiçbir yüzey bağlanmaz, pil maliyeti yoktur (tek seferlik).
+ */
 fun prewarmVideoDecoders() {
     for (mime in listOf(
         androidx.media3.common.MimeTypes.VIDEO_AV1, androidx.media3.common.MimeTypes.VIDEO_H265,
@@ -2474,8 +2551,12 @@ fun prewarmVideoDecoders() {
         androidx.media3.common.MimeTypes.AUDIO_AAC, androidx.media3.common.MimeTypes.AUDIO_E_AC3,
         androidx.media3.common.MimeTypes.AUDIO_AC3, androidx.media3.common.MimeTypes.AUDIO_OPUS
     )) {
-        try { androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getDecoderInfos(mime, false, false) }
-        catch (_: Throwable) { }
+        try {
+            val best = orderedDecoderInfos(mime, false, false).firstOrNull() ?: continue
+            MediaCodec.createByCodecName(best.name).release()
+        } catch (_: Throwable) {
+            // Cihaz bu kodeği desteklemiyor olabilir: sessizce geç.
+        }
     }
 }
 
@@ -2495,54 +2576,45 @@ internal fun isCloudAuthority(a: String?): Boolean {
  *   bekletmeden (<16ms) anında gerçekleşir.
  */
 internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fastSeek: Boolean = false): ExoPlayer {
-    // ── TAMPON (LoadControl) ──────────────────────────────────────────────────
+    // ── TAMPON (LoadControl) — "0 saniye" açılış ve sarma ──────────────────────
     // ÇOKLU GÖRÜNÜM: 4 eşzamanlı dekoder belleği şişmesin diye küçük tampon korunur.
     // TEK OYNATICI: yerel + AĞ (Google Drive / http) için DERİN tampon.
-    //   KÖK NEDEN DÜZELTMESİ: eski ayar `maxBufferMs = 25 sn` idi. Ağ kaynağında tampon
-    //   25 saniyeye ulaşınca yükleyici duruyor, oynatma konumu ilerleyince sıfırdan yeniden
-    //   başlıyordu. Drive bağlantısı bu arada düşünce video KALICI olarak donuyor, ileri
-    //   sarmalar 0,1 saniye oynayıp tekrar donuyordu. 60 sn / 64 MB derin tampon + disk
-    //   ön belleği bu döngüyü tamamen kaldırır.
-    //   `bufferForPlaybackMs = 250` olduğu için derin tampon AÇILIŞI geciktirmez.
+    //  setBufferDurationsMs(minBuffer, maxBuffer, bufferForPlayback, bufferForPlaybackAfterRebuffer)
+    //  • bufferForPlayback 250 -> 100 ms: ilk kare 150 ms daha erken ekrana gelir.
+    //  • bufferForPlaybackAfterRebuffer 1500 -> 300 ms: SARMADAN SONRA 1,5 saniye
+    //    tampon beklenmesi ("ileri alınca 0,1 sn oynayıp donuyor" hissinin asıl sebebi)
+    //    tamamen kalkar; hedef anahtar kare gelir gelmez oynatma başlar.
+    //  • maxBuffer 60 -> 90 sn: yükleyici çok daha ileriyi önden indirir; ±90 saniye
+    //    içindeki her sarma ağa hiç gitmeden tampondan/diskten gelir.
+    //  • targetBufferBytes 64 -> 96 MB: yüksek bitrate AV1'de bile derin tampon korunur.
+    //  • backBuffer 15 -> 10 sn: geri sarmalar için yeterli, bellek tasarrufu.
     val loadControl = if (isMultiView) {
         DefaultLoadControl.Builder()
-            .setBufferDurationsMs(2_000, 12_000, 20, 300)
-            .setTargetBufferBytes(12 * 1024 * 1024)
+            .setBufferDurationsMs(1_500, 12_000, 20, 250)
+            .setTargetBufferBytes(16 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(true)
-            .setBackBuffer(10_000, true)
+            .setBackBuffer(6_000, true)
             .build()
     } else {
         DefaultLoadControl.Builder()
-            .setBufferDurationsMs(6_000, 60_000, 250, 1_500)
-            .setTargetBufferBytes(64 * 1024 * 1024)
+            .setBufferDurationsMs(2_000, 90_000, 100, 300)
+            .setTargetBufferBytes(96 * 1024 * 1024)
             // false = bayt sınırı öncelikli: yüksek bitrate videolarda yükleyici zaman
             // sınırına takılıp erken durmaz, tampon gerçekten dolar.
             .setPrioritizeTimeOverSizeThresholds(false)
-            .setBackBuffer(15_000, true)
+            .setBackBuffer(10_000, true)
             .build()
     }
 
     // Donanım (VPU) dekoderlerini her zaman yazılım (CPU) dekoderlerinin önüne al:
     // c2.android.* / OMX.google.* yazılım dekoderleri CPU'yu yakar ve cihazı ısıtır.
+    // Sıralama ve listeleme [orderedDecoderInfos] içinde ÖNBELLEKLENİR (binder çağrısı yok).
     val hwFirstSelector = MediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
-        val infos = MediaCodecUtil.getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
-        if (mimeType == androidx.media3.common.MimeTypes.VIDEO_AV1) {
-            // AV1: donanım dekoderi varsa o, yoksa AV1'e özel yazılım dekoderi (libgav1)
-            // seçilir. Böylece cihazda AV1 donanım dekoderi YOKKEN yanlış/eksik bir
-            // "donanım" dekoderi denemesinden doğan açılış gecikmesi oluşmaz.
-            infos.sortedBy { info ->
-                when {
-                    info.hardwareAccelerated && !info.softwareOnly -> 0
-                    info.name.contains("av1", ignoreCase = true) -> 1
-                    else -> 2
-                }
-            }
-        } else if (androidx.media3.common.MimeTypes.isVideo(mimeType) || androidx.media3.common.MimeTypes.isAudio(mimeType)) {
-            infos.sortedBy { if (it.hardwareAccelerated && !it.softwareOnly) 0 else 1 }
-        } else infos
+        orderedDecoderInfos(mimeType, requiresSecure, requiresTunneling)
     }
     val renderers = DefaultRenderersFactory(context)
         .setMediaCodecSelector(hwFirstSelector)
+        // Donanım dekoderi gerçekten çalışmazsa yazılım dekoderine düşmeyi korur.
         .setEnableDecoderFallback(true)
 
     val extractorsFactory = DefaultExtractorsFactory()
@@ -2667,7 +2739,10 @@ internal fun VideoSurface(
             AndroidView(
                 factory = { ctx ->
                     TextureView(ctx).also { tv ->
-                        tv.isOpaque = false
+                        // isOpaque = true: video kareleri alfa kanalı olmadan (opak)
+                        // birleştirilir. GPU her karede fazladan alfa karışımı yapmaz ->
+                        // daha düşük gecikme ve daha az pil tüketimi.
+                        tv.isOpaque = true
                         tv.tag = player
                         player.setVideoTextureView(tv)
                     }
@@ -3682,6 +3757,9 @@ internal class SlotPlayerHolder(
         }
     }
 
+    /** Açılış süresi ölçümü için (yalnızca logcat). */
+    private var loadStartedAt: Long = 0L
+
     private var pendingSeekTargetMs: Long = -1L
     private var pendingSeekTimestamp: Long = 0L
     private var scrubActive: Boolean = false
@@ -3698,9 +3776,17 @@ internal class SlotPlayerHolder(
             buffering = false
             errorText = null
             cloudStatus = null
+            if (loadStartedAt > 0L) {
+                PlayerPerf.log("İLK KARE " + (android.os.SystemClock.elapsedRealtime() - loadStartedAt) + " ms")
+            }
         }
         override fun onTracksChanged(t: Tracks) {
             tracks = t
+            // Ölçüm (yalnızca logcat): hangi kodek geldi.
+            runCatching {
+                val v = player.videoFormat
+                if (v != null) PlayerPerf.log("video=" + v.sampleMimeType + " codecs=" + v.codecs)
+            }
             // Kare hızı konteynerden gelir (Format.frameRate): ücretsiz bilgi.
             // Kare çözme, thumbnail üretme veya ek okuma gerekmez.
             refreshFrameClock()
@@ -3744,6 +3830,7 @@ internal class SlotPlayerHolder(
 
     init {
         player.addListener(listener)
+        PlayerPerf.attach(player, "P")
     }
 
     private var retryScope: CoroutineScope? = null
@@ -3754,6 +3841,7 @@ internal class SlotPlayerHolder(
         loadedUri = uri
         errorText = null
         buffering = true
+        loadStartedAt = android.os.SystemClock.elapsedRealtime()
 
         resetZoom()
         cloudStatus = null
@@ -3799,6 +3887,10 @@ internal class SlotPlayerHolder(
                     progressJob.cancel()
                     return@launch
                 }
+                // AÇILIŞ HIZI: konteyner indeksini (MKV Cues / MP4 moov) arka planda önden
+                // okut. ExoPlayer indeks için dosya sonuna atladığında baytlar zaten
+                // sağlayıcı/OS önbelleğinde olur -> "video açılıyor" süresi kısalır.
+                if (seekable) DriveStreamResolver.warmIndex(uri)
                 val cloudExtractors = DefaultExtractorsFactory()
                     .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
                     .setConstantBitrateSeekingEnabled(true)
@@ -3836,7 +3928,13 @@ internal class SlotPlayerHolder(
                 else -> uri
             }
 
-            player.setMediaItem(MediaItem.fromUri(finalUri))
+            // ÖN BELLEK ANAHTARI: Drive linkleri her açılışta farklı token sorguları
+            // taşıyabildiği için varsayılan anahtar (tam URI) yüzünden aynı video hep
+            // "önbellekte yok" sayılıyordu. Dosya kimliğine göre sabit anahtar kullanılır:
+            // aynı video ikinci kez açıldığında ve ileri/geri sarıldığında diskten gelir.
+            val itemBuilder = MediaItem.Builder().setUri(finalUri)
+            MediaCache.cacheKeyFor(finalUri)?.let { itemBuilder.setCustomCacheKey(it) }
+            player.setMediaItem(itemBuilder.build())
             player.prepare()
             player.playWhenReady = true
         }

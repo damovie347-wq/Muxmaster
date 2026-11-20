@@ -323,7 +323,15 @@ class MainActivity : AppCompatActivity() {
             notifAsked = true
             notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
-        Thread { prewarmVideoDecoders() }.start()
+        // AÇILIŞ HIZI (arka plan):
+        //  1) Disk ön belleğini (SimpleCache) hazırla: indeks okuması oynatma yolunda
+        //     yapılırsa ilk video açılışında saniyeler kaybettiriyordu.
+        //  2) Donanım kodeklerini gerçekten yükle (AV1/H.265/H.264 ...): ilk kare
+        //     gecikmesinin büyük kısmı kodek kütüphanesinin yüklenmesidir.
+        Thread {
+            runCatching { com.example.muxmaster.data.MediaCache.warmUp(applicationContext) }
+            prewarmVideoDecoders()
+        }.start()
         setContent {
             var themeMode by remember { mutableStateOf(appPrefs.themeMode.toThemeMode()) }
             MuxMasterTheme(themeMode = themeMode) {

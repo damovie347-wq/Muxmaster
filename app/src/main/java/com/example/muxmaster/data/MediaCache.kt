@@ -1,12 +1,14 @@
 package com.example.muxmaster.data
 
 import android.content.Context
+import android.net.Uri
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.database.StandaloneDatabaseProvider
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * AĞ (HTTP/HTTPS) OYNATMA ÖN BELLEĞİ — kalıcı, disk tabanlı, LRU tahliyeli.
@@ -21,17 +23,21 @@ import java.io.File
  *    hem pili yakıyordu.
  *
  * ÇÖZÜM: İndirilen her bayt `SimpleCache` içine yazılır. Aynı aralığa yapılan her sarma
- * diskten (mikrosaniyeler) karşılanır, ağa hiç gidilmez. Ön bellek 768 MB ile LRU olarak
+ * diskten (mikrosaniyeler) karşılanır, ağa hiç gidilmez. Ön bellek 512 MB ile LRU olarak
  * sınırlıdır; en eski parçalar otomatik silinir. Disk hatası olursa oynatma ağdan kesintisiz
  * devam eder ([CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR]) — yani ön bellek asla engel değil.
  *
- * Bellek/CPU maliyeti: yalnızca sıralı disk yazımı. Kod çözme, kopyalama veya yeniden
- * paketleme YOK.
+ * AÇILIŞ GECİKMESİ DÜZELTMESİ (yeni):
+ *  - `SimpleCache` ilk oluşturulurken disk indeksini okur. Bu, dolmuş bir önbellekte saniyeler
+ *    sürebilir. Eskiden bu kurulum OYNATMA YOLUNDA (ilk `DataSource.open()`) yapılıyordu;
+ *    yani kullanıcı "video açılıyor" ekranında indeksin okunmasını bekliyordu.
+ *  - Artık ön bellek uygulama açılışında ARKA PLANDA ısıtılır ([warmUp]). Oynatma yolu asla
+ *    beklemez: ön bellek hazır değilse oynatma doğrudan ağdan başlar ([ready]).
  */
 object MediaCache {
 
     /** Ön bellek üst sınırı (LRU ile otomatik tahliye). */
-    private const val MAX_BYTES: Long = 768L * 1024L * 1024L
+    private const val MAX_BYTES: Long = 512L * 1024L * 1024L
 
     /** `clearWorkCache` bu klasörü silmez (açık SimpleCache bozulmasın). */
     const val DIR_NAME = "media_cache"
@@ -42,10 +48,36 @@ object MediaCache {
     @Volatile
     private var disabled = false
 
+    private val warming = AtomicBoolean(false)
+
+    /** Ön bellek HAZIRSA döner; hazır değilse `null` (asla beklemez). */
+    fun ready(): SimpleCache? = simpleCache
+
     /**
-     * Tekil [SimpleCache]. Aynı klasörde ikinci bir örnek açılamayacağı için süreç genelinde
-     * tekildir. İlk oluşturma disk indeksini okur; bu yüzden ağ oynatma iş parçacığından
-     * (ana iş parçacığından değil) çağrılır.
+     * Ön belleği arka planda hazırlar. Uygulama açılışında bir kez çağrılır; tek uçuşludur
+     * (aynı anda ikinci bir kurulum başlamaz). Ana iş parçacığını ASLA bloklamaz.
+     */
+    fun warmUp(context: Context) {
+        if (simpleCache != null || disabled) return
+        if (!warming.compareAndSet(false, true)) return
+        val app = context.applicationContext
+        Thread({
+            try {
+                cache(app)
+            } catch (_: Throwable) {
+                // Isıtma başarısızsa oynatma ağdan devam eder.
+            } finally {
+                warming.set(false)
+            }
+        }, "MediaCacheWarm").apply {
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY - 1
+        }.start()
+    }
+
+    /**
+     * Tekil [SimpleCache] (gerekirse kurar — yalnızca arka plan iş parçacığından çağırın).
+     * Aynı klasörde ikinci bir örnek açılamayacağı için süreç genelinde tekildir.
      */
     fun cache(context: Context): SimpleCache? {
         simpleCache?.let { return it }
@@ -76,11 +108,15 @@ object MediaCache {
     }
 
     /**
-     * Ön bellekli DataSource üretir. Ön bellek açılamazsa `null` döner; çağıran taraf
-     * doğrudan ağ kaynağını kullanır (davranış bozulmaz).
+     * Ön bellekli DataSource üretir. Ön bellek HENÜZ HAZIR DEĞİLSE `null` döner ve
+     * çağıran taraf doğrudan ağ kaynağını kullanır: ilk kare hiçbir zaman indeks
+     * okumasını beklemez. (Isıtma arka planda zaten sürmektedir.)
      */
     fun newDataSource(context: Context, upstream: DataSource.Factory): DataSource? {
-        val c = cache(context) ?: return null
+        val c = simpleCache ?: run {
+            warmUp(context)
+            return null
+        }
         return try {
             CacheDataSource.Factory()
                 .setCache(c)
@@ -90,5 +126,28 @@ object MediaCache {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /**
+     * Kalıcı önbellek anahtarı.
+     *
+     * Google Drive linkleri her açılışta farklı sorgu parametreleri (imza/token, `confirm=t`,
+     * `export=download` ...) taşıyabilir. Varsayılan anahtar TAM URI olduğu için aynı dosya
+     * her seferinde "önbellekte yok" sayılıyordu. Dosya kimliği sabit olduğundan anahtar
+     * `drive:<id>` yapılır: aynı video ikinci kez açıldığında tamamen diskten gelir.
+     *
+     * NEDEN GEREKLİ: ExoPlayer bir kaynağı diske yazmak için `DataSpec.key` ister; bu anahtar
+     * `MediaItem.setCustomCacheKey` ile verilir. Anahtar verilmezse `CacheDataSource` önbelleği
+     * HİÇ KULLANMAZ (sadece doğrudan ağdan okur). Bu yüzden her ağ kaynağı için sabit anahtar
+     * üretilir. Yerel dosyalarda `null` döner: yerel video asla diske kopyalanmaz.
+     */
+    fun cacheKeyFor(uri: Uri): String? {
+        val scheme = uri.scheme?.lowercase() ?: return null
+        if (scheme != "http" && scheme != "https") return null
+        val s = uri.toString()
+        if (DriveStreamResolver.isGoogleDriveUrl(s)) {
+            DriveStreamResolver.extractDriveFileId(s)?.let { return "drive:$it" }
+        }
+        return "http:" + s.substringBefore('#')
     }
 }

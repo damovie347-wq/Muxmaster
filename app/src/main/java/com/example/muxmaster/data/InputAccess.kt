@@ -359,6 +359,15 @@ object DriveStreamResolver {
         return s.progress()
     }
 
+    /**
+     * Dosya sonundaki indeksin (MKV Cues / MP4 moov) arka planda önden okunmasını ister.
+     * Yalnızca seek destekli bulut oturumlarında çalışır ve oynatmayı ASLA bloklamaz.
+     */
+    fun warmIndex(uri: Uri?) {
+        if (uri == null) return
+        runCatching { sessions[uri.toString()]?.warmIndex() }
+    }
+
     fun releaseSession(uri: Uri?) {
         if (uri == null) return
         sessions.remove(uri.toString())?.release()
@@ -404,6 +413,10 @@ internal class CloudStreamSession(private val context: Context, val uri: Uri) {
         /** Pipe modunda oynatma konumunun ne kadar ilerisine kadar indirilsin (pil/IO dengesi). */
         const val AHEAD_BYTES = 48L * 1024L * 1024L
         private const val COPY_CHUNK = 256 * 1024
+        /** Açılışta önden okunacak dosya sonu (indeks) miktarı. */
+        private const val TAIL_BYTES = 4L * 1024L * 1024L
+        /** Açılışta önden okunacak dosya başı miktarı. */
+        private const val HEAD_BYTES = 1L * 1024L * 1024L
     }
 
     private val lock = Object()
@@ -452,6 +465,47 @@ internal class CloudStreamSession(private val context: Context, val uri: Uri) {
     }
 
     fun progress(): Pair<Long, Long>? = if (!opened || seekable) null else Pair(downloaded, totalLength)
+
+    /**
+     * AÇILIŞ HIZI: konteyner indeksini (MKV Cues / MP4 moov) önden okur.
+     *
+     * KÖK NEDEN: ExoPlayer açılışta indeksi okumak için dosyanın SONUNA atlar. Bulut
+     * sağlayıcısında bu atlama her seferinde ağ turu demektir; indeks birkaç megabayt
+     * olduğunda "video açılıyor" ekranı saniyelerce kalıyordu. Burada indeks, oynatma
+     * hazırlanırken ARKA PLANDA (düşük öncelikli iş parçacığı) tek seferde okunur;
+     * sağlayıcı/OS önbelleği ısındığı için ExoPlayer'ın ilk okumaları yerelden gelir.
+     *
+     * Maliyet: en fazla 5 MB okuma, normalin altında iş parçacığı önceliği. Oynatma
+     * bekletilmez; okuma başarısız olursa hiçbir şey değişmez.
+     */
+    fun warmIndex() {
+        if (!opened || !seekable || released) return
+        val total = totalLength
+        if (total <= 0L) return
+        Thread({
+            val buf = ByteArray(1 shl 20)
+            // 1) Dosya sonu: MKV Cues / MP4 moov.
+            var pos = (total - TAIL_BYTES).coerceAtLeast(0L)
+            while (!released && pos < total) {
+                val want = min(buf.size.toLong(), total - pos).toInt()
+                val n = runCatching { readAt(pos, buf, 0, want) }.getOrNull() ?: break
+                if (n <= 0) break
+                pos += n
+            }
+            // 2) Dosya başı: konteyner başlığı + ilk kare.
+            val headEnd = min(total, HEAD_BYTES)
+            var head = 0L
+            while (!released && head < headEnd) {
+                val want = min(buf.size.toLong(), headEnd - head).toInt()
+                val n = runCatching { readAt(head, buf, 0, want) }.getOrNull() ?: break
+                if (n <= 0) break
+                head += n
+            }
+        }, "CloudIndexWarm").apply {
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY - 1
+        }.start()
+    }
 
     private fun openPfd(): ParcelFileDescriptor? {
         runCatching { context.contentResolver.openFileDescriptor(uri, "r")?.let { return it } }
@@ -598,7 +652,16 @@ private class SafNativeDataSource(
 ) : BaseDataSource(/* isNetwork = */ true) {
 
     companion object {
-        private const val BLOCK = 1 shl 20 // 1 MB
+        /**
+         * Bulut SAF okuma bloğu.
+         *
+         * 1 MB -> 4 MB: Google Drive / OneDrive gibi sağlayıcılarda HER okuma ayrı bir
+         * sağlayıcı turudur. MKV "Cues" / MP4 "moov" indeksi dosyanın sonunda megabaytlar
+         * tutabildiği için 1 MB'lık bloklarla açılış onlarca tur (=saniyeler) sürüyordu.
+         * 4 MB'lık blok tur sayısını 4 kat azaltır; bellek maliyeti yalnızca bulut
+         * dosyalarında ve tembel olarak ödenir (yerel dosyada hiç ayrılmaz).
+         */
+        private const val BLOCK = 4 shl 20 // 4 MB
         /** content:// -> gerçek yol çözümleri önbelleği (her seek'te ContentResolver sorgusu yapılmasın). */
         private val realPathCache = ConcurrentHashMap<String, String>()
         private val noRealPath = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -612,8 +675,8 @@ private class SafNativeDataSource(
     private var bytesRemaining = C.LENGTH_UNSET.toLong()
     private var opened = false
 
-    // Seekable bulut için blok önbelleği
-    private val block = ByteArray(BLOCK)
+    // Seekable bulut için blok önbelleği (yalnızca gerektiğinde ayrılır)
+    private var block: ByteArray? = null
     private var blockStart = -1L
     private var blockLen = 0
     private var blockUri: Uri? = null
@@ -707,14 +770,16 @@ private class SafNativeDataSource(
         if (!inBlock) {
             // Büyük isteklerde blok önbelleğini atla (zaten verimli)
             if (length >= BLOCK) return s.readAt(readPosition, buffer, offset, length)
-            val n = s.readAt(readPosition, block, 0, BLOCK)
+            val b = block ?: ByteArray(BLOCK).also { block = it }
+            val n = s.readAt(readPosition, b, 0, BLOCK)
             if (n == C.RESULT_END_OF_INPUT) return n
             blockStart = readPosition
             blockLen = n
         }
+        val b = block ?: return C.RESULT_END_OF_INPUT
         val off = (readPosition - blockStart).toInt()
         val c = min(length, blockLen - off)
-        System.arraycopy(block, off, buffer, offset, c)
+        System.arraycopy(b, off, buffer, offset, c)
         return c
     }
 
