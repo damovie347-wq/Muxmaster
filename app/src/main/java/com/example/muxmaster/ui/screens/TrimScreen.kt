@@ -2544,10 +2544,6 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fas
     val renderers = DefaultRenderersFactory(context)
         .setMediaCodecSelector(hwFirstSelector)
         .setEnableDecoderFallback(true)
-        // ASENKRON MediaCodec kuyruğu: ilk karenin ekrana gelme gecikmesini kısaltır
-        // (özellikle AV1'de 3-5 saniyelik açılış beklemesini düşürür). Çoklu görünümde
-        // 4 eşzamanlı dekoderde C2 kuyruk kilitlenmesi riski olduğu için KAPALI bırakılır.
-        .setEnableMediaCodecAsynchronousQueueing(!isMultiView)
 
     val extractorsFactory = DefaultExtractorsFactory()
         .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
