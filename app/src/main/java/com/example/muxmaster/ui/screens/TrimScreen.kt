@@ -116,6 +116,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.mp4.Mp4Extractor
@@ -171,6 +172,15 @@ private val SEEK_EXACT = SeekParameters.EXACT
  * GERÇEK karesi çözülür.
  */
 private val SEEK_SCRUB = SeekParameters.EXACT
+/**
+ * AĞ (bulut/http) kaynağı için sarma parametresi: ±1 saniye tolerans.
+ *
+ * KÖK NEDEN: `EXACT` sarma, oynatıcıya "hedef kareden önceki anahtar kareden başla ve
+ * aradaki tüm kareleri çöz" der. Ağ kaynağında bu, o baytların hepsinin yeniden indirilmesi
+ * anlamına gelir; Drive bağlantısı bunu bitiremediği için video donuyordu. ±1 sn tolerans
+ * ile en yakın anahtar kare kullanılır: görüntü ANINDA gelir, indirme sürer.
+ */
+private val SEEK_STREAM = SeekParameters(1_000_000L, 1_000_000L)
 /** Sürükleme sırasında görüntülenecek örnekleme adımı: her 500 ms'de bir gerçek kare. */
 private const val SCRUB_SAMPLE_MS = FrameClock.SCRUB_SAMPLE_MS
 
@@ -2485,16 +2495,32 @@ internal fun isCloudAuthority(a: String?): Boolean {
  *   bekletmeden (<16ms) anında gerçekleşir.
  */
 internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fastSeek: Boolean = false): ExoPlayer {
-    val minBufferMs = if (isMultiView) 2_000 else 2_500
-    val maxBufferMs = if (isMultiView) 12_000 else 25_000
-    val targetBytes = if (isMultiView) 12 * 1024 * 1024 else 32 * 1024 * 1024
-
-    val loadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(minBufferMs, maxBufferMs, 20, 50)
-        .setTargetBufferBytes(targetBytes)
-        .setPrioritizeTimeOverSizeThresholds(true)
-        .setBackBuffer(if (isMultiView) 10_000 else 25_000, true)
-        .build()
+    // ── TAMPON (LoadControl) ──────────────────────────────────────────────────
+    // ÇOKLU GÖRÜNÜM: 4 eşzamanlı dekoder belleği şişmesin diye küçük tampon korunur.
+    // TEK OYNATICI: yerel + AĞ (Google Drive / http) için DERİN tampon.
+    //   KÖK NEDEN DÜZELTMESİ: eski ayar `maxBufferMs = 25 sn` idi. Ağ kaynağında tampon
+    //   25 saniyeye ulaşınca yükleyici duruyor, oynatma konumu ilerleyince sıfırdan yeniden
+    //   başlıyordu. Drive bağlantısı bu arada düşünce video KALICI olarak donuyor, ileri
+    //   sarmalar 0,1 saniye oynayıp tekrar donuyordu. 60 sn / 64 MB derin tampon + disk
+    //   ön belleği bu döngüyü tamamen kaldırır.
+    //   `bufferForPlaybackMs = 250` olduğu için derin tampon AÇILIŞI geciktirmez.
+    val loadControl = if (isMultiView) {
+        DefaultLoadControl.Builder()
+            .setBufferDurationsMs(2_000, 12_000, 20, 300)
+            .setTargetBufferBytes(12 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBackBuffer(10_000, true)
+            .build()
+    } else {
+        DefaultLoadControl.Builder()
+            .setBufferDurationsMs(6_000, 60_000, 250, 1_500)
+            .setTargetBufferBytes(64 * 1024 * 1024)
+            // false = bayt sınırı öncelikli: yüksek bitrate videolarda yükleyici zaman
+            // sınırına takılıp erken durmaz, tampon gerçekten dolar.
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .setBackBuffer(15_000, true)
+            .build()
+    }
 
     // Donanım (VPU) dekoderlerini her zaman yazılım (CPU) dekoderlerinin önüne al:
     // c2.android.* / OMX.google.* yazılım dekoderleri CPU'yu yakar ve cihazı ısıtır.
@@ -2518,14 +2544,22 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fas
     val renderers = DefaultRenderersFactory(context)
         .setMediaCodecSelector(hwFirstSelector)
         .setEnableDecoderFallback(true)
+        // ASENKRON MediaCodec kuyruğu: ilk karenin ekrana gelme gecikmesini kısaltır
+        // (özellikle AV1'de 3-5 saniyelik açılış beklemesini düşürür). Çoklu görünümde
+        // 4 eşzamanlı dekoderde C2 kuyruk kilitlenmesi riski olduğu için KAPALI bırakılır.
+        .setEnableMediaCodecAsynchronousQueueing(!isMultiView)
 
     val extractorsFactory = DefaultExtractorsFactory()
         .setMp4ExtractorFlags(Mp4Extractor.FLAG_WORKAROUND_IGNORE_EDIT_LISTS)
         .setConstantBitrateSeekingEnabled(true)
 
     val dataSourceFactory = DriveStreamResolver.buildDataSourceFactory(context)
+    // AĞ DAYANIKLILIĞI: kopan/tazelenen Drive bağlantılarında oynatıcı hata ekranına düşmeden
+    // 8 kez üstel geri çekilmeyle yeniden dener (varsayılan 3). Yerel dosyalarda etkisi yoktur.
+    val loadErrorPolicy = DefaultLoadErrorHandlingPolicy(if (isMultiView) 3 else 8)
     val mediaSourceFactory = DefaultMediaSourceFactory(context, extractorsFactory)
         .setDataSourceFactory(dataSourceFactory)
+        .setLoadErrorHandlingPolicy(loadErrorPolicy)
 
     return ExoPlayer.Builder(context, renderers)
         .setMediaSourceFactory(mediaSourceFactory)
@@ -2534,10 +2568,9 @@ internal fun buildFastPlayer(context: Context, isMultiView: Boolean = false, fas
         // dekoder önceki keyframe'den hedefe kadar yüzlerce kareyi çözüp atmak zorunda kalmaz -> anında başlar.
         // Kırpma ekranı (fastSeek = false) kare hassasiyetini korur.
         .setSeekParameters(if (fastSeek) SeekParameters.CLOSEST_SYNC else SeekParameters(350_000L, 350_000L))
-        .setVideoChangeFrameRateStrategy(
-            if (isMultiView) C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF
-            else C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS
-        )
+        // Kare hızı eşleştirme (display mode switch) KAPALI: bazı cihazlarda ilk kareyi
+        // saniyelerce geciktiriyor ve her video geçişinde fazladan güç harcıyordu.
+        .setVideoChangeFrameRateStrategy(C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF)
         .setVideoScalingMode(C.VIDEO_SCALING_MODE_SCALE_TO_FIT)
         .build()
         .apply {
@@ -3556,7 +3589,15 @@ internal class SlotPlayerHolder(
      *   çözdüğü için görüntü saniyelerce donuyordu. H.264/HEVC/VP9'da `EXACT` korunur.
      */
     private fun applySeekParams(live: Boolean) {
-        val params = if (live) {
+        val params = if (isCloudStream) {
+            // AĞ KAYNAĞI (Google Drive / http): EXACT sarma, hedef kareden önceki anahtar
+            // kareden itibaren TÜM baytların ağdan inmesini zorunlu kılar. Drive'da bu,
+            // "ileri alıyorum, oynamıyor; 0,1 sn oynayıp donuyor" şikâyetinin ta kendisiydi:
+            // sarma sırasında indirme sürekli sıfırdan başlıyor ve bitmiyordu.
+            // Ağda ±1 sn toleranslı sarma kullanılır: en yakın anahtar kare ANINDA gösterilir,
+            // indirme kaldığı yerden devam eder. Yerel dosyada kare hassasiyeti korunur.
+            SEEK_STREAM
+        } else if (live) {
             scrubSeekParametersFor(player.videoFormat?.sampleMimeType)
         } else {
             SEEK_EXACT
@@ -3896,7 +3937,9 @@ internal class SlotPlayerHolder(
         scrubActive = true
         applySeekParams(live = true)
         // AV1 anahtar kare sarması: kare bekleme kapalı (istekler doğrudan akar).
-        scrubEngine.waitForFrame =
+        // AV1 anahtar kare sarması + ağ kaynağı: kare bekleme kapalı (istekler doğrudan akar,
+        // ağ gecikmesi sürüklemeyi kilitlemez).
+        scrubEngine.waitForFrame = !isCloudStream &&
             player.videoFormat?.sampleMimeType != androidx.media3.common.MimeTypes.VIDEO_AV1
         if (player.playWhenReady) player.pause()
         scrubEngine.begin()

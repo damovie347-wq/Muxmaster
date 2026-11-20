@@ -74,6 +74,7 @@ dependencies {
     implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
     implementation("androidx.media3:media3-common:1.2.1")
     implementation("androidx.media3:media3-datasource:1.2.1")
+    implementation("androidx.media3:media3-database:1.2.1")
     implementation("androidx.media3:media3-extractor:1.2.1")
     implementation("androidx.media3:media3-exoplayer:1.2.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.2.1")

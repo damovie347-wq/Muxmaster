@@ -278,6 +278,9 @@ object InputAccess {
     fun clearWorkCache(context: Context) {
         runCatching {
             context.cacheDir.listFiles()?.forEach { f ->
+                // Ağ oynatma ön belleği açık bir SimpleCache tarafından tutulur;
+                // burada silinirse indeks bozulur. Kendi LRU tahliyesi vardır.
+                if (f.name == MediaCache.DIR_NAME) return@forEach
                 runCatching { if (f.isDirectory) f.deleteRecursively() else f.delete() }
             }
         }
@@ -373,12 +376,23 @@ object DriveStreamResolver {
             .setUserAgent(DEFAULT_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
             .setKeepPostFor302Redirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(25_000)
+            // AĞ OPTİMİZASYONU: uzun zaman aşımı, kopan bir Drive bağlantısında oynatıcıyı
+            // onlarca saniye "tampon dolduruyorum" ekranında kilitliyordu. Kısa zaman aşımı +
+            // LoadErrorHandlingPolicy'deki yeniden deneme sayesinde bağlantı hızla tazelenir.
+            .setConnectTimeoutMs(8_000)
+            .setReadTimeoutMs(15_000)
         val defaultFactory = DefaultDataSource.Factory(appCtx, httpFactory)
+        // Ağ (http/https) kaynakları için kalıcı disk ön belleği: sarma anında diskten gelir.
+        val cacheFactory = DataSource.Factory {
+            MediaCache.newDataSource(appCtx, defaultFactory) ?: defaultFactory.createDataSource()
+        }
 
         return DataSource.Factory {
-            SafNativeDataSource(appCtx, defaultFactory.createDataSource())
+            SafNativeDataSource(
+                appCtx,
+                defaultFactory.createDataSource(),
+                cacheFactory.createDataSource()
+            )
         }
     }
 }
@@ -388,7 +402,7 @@ internal class CloudStreamSession(private val context: Context, val uri: Uri) {
 
     companion object {
         /** Pipe modunda oynatma konumunun ne kadar ilerisine kadar indirilsin (pil/IO dengesi). */
-        const val AHEAD_BYTES = 96L * 1024L * 1024L
+        const val AHEAD_BYTES = 48L * 1024L * 1024L
         private const val COPY_CHUNK = 256 * 1024
     }
 
@@ -521,7 +535,7 @@ internal class CloudStreamSession(private val context: Context, val uri: Uri) {
             }
             while (downloaded <= position && !eof && failure == null && !released) {
                 try {
-                    lock.wait(200L)
+                    lock.wait(60L)
                 } catch (ie: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw java.io.InterruptedIOException("Okuma iptal edildi")
@@ -575,7 +589,12 @@ internal class CloudStreamSession(private val context: Context, val uri: Uri) {
  */
 private class SafNativeDataSource(
     private val context: Context,
-    private val fallbackDelegate: DataSource
+    private val fallbackDelegate: DataSource,
+    /**
+     * Ağ (http/https) kaynakları için ön bellekli DataSource. `null` ise doğrudan ağ kullanılır.
+     * Yerel içerik/SAF yollarında ön bellek KULLANILMAZ (gereksiz disk kopyası ve IO olmaz).
+     */
+    private val cacheDelegate: DataSource? = null
 ) : BaseDataSource(/* isNetwork = */ true) {
 
     companion object {
@@ -587,6 +606,7 @@ private class SafNativeDataSource(
 
     private var currentUri: Uri? = null
     private var usingDelegate = false
+    private var usingCache = false
     private var session: CloudStreamSession? = null
     private var readPosition = 0L
     private var bytesRemaining = C.LENGTH_UNSET.toLong()
@@ -601,7 +621,19 @@ private class SafNativeDataSource(
     override fun open(dataSpec: DataSpec): Long {
         val uri = dataSpec.uri
         currentUri = uri
-        if (uri.scheme?.lowercase() != "content") {
+        val scheme = uri.scheme?.lowercase()
+        // AĞ: kalıcı disk ön belleği üzerinden aç. Ön bellek hazırsa sarma anında diskten gelir,
+        // hazır değilse şeffaf biçimde ağdan indirip ön belleğe yazar (oynatma hiç beklemez).
+        if (scheme == "http" || scheme == "https") {
+            val cached = cacheDelegate
+            if (cached != null) {
+                usingCache = true
+                return cached.open(dataSpec)
+            }
+            usingDelegate = true
+            return fallbackDelegate.open(dataSpec)
+        }
+        if (scheme != "content") {
             usingDelegate = true
             return fallbackDelegate.open(dataSpec)
         }
@@ -654,6 +686,7 @@ private class SafNativeDataSource(
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (usingCache) return cacheDelegate?.read(buffer, offset, length) ?: C.RESULT_END_OF_INPUT
         if (usingDelegate) return fallbackDelegate.read(buffer, offset, length)
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
@@ -688,6 +721,11 @@ private class SafNativeDataSource(
     override fun getUri(): Uri? = if (usingDelegate) fallbackDelegate.uri else currentUri
 
     override fun close() {
+        if (usingCache) {
+            usingCache = false
+            runCatching { cacheDelegate?.close() }
+            return
+        }
         if (usingDelegate) {
             usingDelegate = false
             fallbackDelegate.close()
